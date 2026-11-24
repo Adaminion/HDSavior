@@ -133,6 +133,7 @@ pub(super) fn resolve(path: &Path, purpose: Purpose) -> Result<Resolved, Refusal
             existing.display()
         )));
     }
+    let backing = backing_files(meta.dev());
     let (fs_name, max_file_bytes) = match File::open(existing) {
         Ok(handle) => fs_name_and_file_limit(&handle),
         Err(_) => (None, None),
@@ -152,8 +153,22 @@ pub(super) fn resolve(path: &Path, purpose: Purpose) -> Result<Resolved, Refusal
             volume: meta.dev(),
             index: meta.ino(),
         }),
-        backing_files: backing_files(meta.dev()),
+        backing_files: backing.files,
+        backing_unknown: backing.unresolved,
     })
+}
+
+/// What is known about the files the file system with device number `dev`
+/// is stored in.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Backing {
+    /// The regular files it is stored in.
+    pub(crate) files: Vec<FileId>,
+    /// Set when it is stored in a file that can no longer be found by the name
+    /// it was mounted from: a FUSE file system (ntfs-3g) mounted directly from
+    /// a file that was renamed, moved or deleted since. That file may be the
+    /// source image under its new name.
+    pub(crate) unresolved: Option<String>,
 }
 
 /// The regular files the file system with device number `dev` is stored
@@ -163,35 +178,28 @@ pub(super) fn resolve(path: &Path, purpose: Purpose) -> Result<Resolved, Refusal
 /// there writes into that file: if it is the source image, the engine
 /// would write into its own source.
 #[cfg(target_os = "linux")]
-fn backing_files(dev: u64) -> Vec<FileId> {
-    let mut out = Vec::new();
-    collect_block_device(dev, &mut out, 0);
+fn backing_files(dev: u64) -> Backing {
+    let mut out = Backing::default();
+    collect_block_device(dev, &mut out.files, 0);
     // The mount table names the device or file a file system was mounted
     // from; FUSE file systems have an anonymous device number of their own.
     let wanted = format!("{}:{}", libc::major(dev), libc::minor(dev));
     if let Ok(table) = std::fs::read_to_string("/proc/self/mountinfo") {
-        for line in table.lines() {
-            let mut fields = line.split(' ');
-            if fields.nth(2) != Some(wanted.as_str()) {
-                continue;
-            }
-            // After the separator: file-system type, then the mount source.
-            let Some(source) = line
-                .split(" - ")
-                .nth(1)
-                .and_then(|rest| rest.split(' ').nth(1))
-            else {
-                continue;
-            };
-            let source = unescape_mountinfo(source);
-            let Ok(meta) = std::fs::metadata(&source) else {
-                continue;
-            };
-            use std::os::unix::fs::FileTypeExt;
-            if meta.file_type().is_block_device() {
-                collect_block_device(meta.rdev(), &mut out, 0);
-            } else if meta.is_file() {
-                push_id(&mut out, meta.dev(), meta.ino());
+        for (fs_type, source) in mount_sources(&table, &wanted) {
+            match std::fs::metadata(&source) {
+                Ok(meta) => {
+                    use std::os::unix::fs::FileTypeExt;
+                    if meta.file_type().is_block_device() {
+                        collect_block_device(meta.rdev(), &mut out.files, 0);
+                    } else if meta.is_file() {
+                        push_id(&mut out.files, meta.dev(), meta.ino());
+                    }
+                }
+                Err(_) => {
+                    if out.unresolved.is_none() {
+                        out.unresolved = unresolved_fuse_source(&fs_type, &source);
+                    }
+                }
             }
         }
     }
@@ -199,8 +207,48 @@ fn backing_files(dev: u64) -> Vec<FileId> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn backing_files(_dev: u64) -> Vec<FileId> {
-    Vec::new()
+fn backing_files(_dev: u64) -> Backing {
+    Backing::default()
+}
+
+/// The file-system type and mount source of every entry of a
+/// `/proc/self/mountinfo` text whose device is `wanted` (`major:minor`).
+#[cfg(target_os = "linux")]
+pub(crate) fn mount_sources(table: &str, wanted: &str) -> Vec<(String, std::path::PathBuf)> {
+    let mut out = Vec::new();
+    for line in table.lines() {
+        if line.split(' ').nth(2) != Some(wanted) {
+            continue;
+        }
+        // After the separator: file-system type, then the mount source.
+        let mut rest = match line.split(" - ").nth(1) {
+            Some(rest) => rest.split(' '),
+            None => continue,
+        };
+        let (Some(fs_type), Some(source)) = (rest.next(), rest.next()) else {
+            continue;
+        };
+        out.push((fs_type.to_string(), unescape_mountinfo(source)));
+    }
+    out
+}
+
+/// Why a mount source that no longer exists makes the location's backing
+/// unknown, or `None` when it does not. Only a FUSE file system whose source
+/// is an absolute path counts: that is a file system mounted directly from a
+/// file (ntfs-3g), and the file has been renamed, moved or deleted since.
+/// Sources that are not paths (`user@host:/dir` of sshfs, the names of
+/// virtual file systems) say nothing about local files.
+#[cfg(target_os = "linux")]
+pub(crate) fn unresolved_fuse_source(fs_type: &str, source: &Path) -> Option<String> {
+    let fuse = fs_type == "fuse" || fs_type == "fuseblk" || fs_type.starts_with("fuse.");
+    (fuse && source.is_absolute()).then(|| {
+        format!(
+            "the file system there was mounted from {}, which no longer exists under that name; it may be \
+             the disk image being rescued under another name",
+            source.display()
+        )
+    })
 }
 
 #[cfg(target_os = "linux")]

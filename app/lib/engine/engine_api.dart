@@ -435,16 +435,20 @@ final class EngineApi {
 
   /// `check_destination`: asks the destination guard about [path] without
   /// creating anything. With [needBytes] the result says whether the space
-  /// suffices.
+  /// suffices. With [start] or [end] the range of a scan about to start is
+  /// protected as well (`start` defaults to 0 and `end` to the size of the
+  /// source), as `scan_start` will protect it.
   Future<DestinationCheck> checkDestination({
     required String path,
     required DestinationPurpose purpose,
     int? needBytes,
+    int? start,
+    int? end,
     CancelToken? cancel,
   }) => _call(
     'check_destination',
     DestinationCheck.fromJson,
-    args: {'path': path, 'purpose': purpose.wire, 'need_bytes': ?needBytes},
+    args: {'path': path, 'purpose': purpose.wire, 'need_bytes': ?needBytes, 'start': ?start, 'end': ?end},
     cancel: cancel,
   );
 

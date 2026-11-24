@@ -13,10 +13,11 @@ use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
-    FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetDiskFreeSpaceExW,
-    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, GetVolumeInformationW,
-    GetVolumePathNamesForVolumeNameW, FILE_FLAG_BACKUP_SEMANTICS, FILE_NAME_NORMALIZED,
-    VOLUME_NAME_DOS, VOLUME_NAME_GUID,
+    FileRemoteProtocolInfo, FindFirstVolumeW, FindNextVolumeW, FindVolumeClose,
+    GetDiskFreeSpaceExW, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+    GetVolumeInformationByHandleW, GetVolumeInformationW, GetVolumePathNamesForVolumeNameW,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_NAME_NORMALIZED, FILE_REMOTE_PROTOCOL_INFO, VOLUME_NAME_DOS,
+    VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_MULTI_SZ};
 use windows_sys::Win32::System::SystemInformation::{
@@ -54,6 +55,14 @@ impl Volume {
         let mut root = self.device.clone();
         root.push("\\");
         root
+    }
+
+    /// True when the volume has a drive letter or mounted folder. Only such a
+    /// volume may be asked anything through a path on it
+    /// (`GetVolumeInformationW` on its root): opening a path on a volume that
+    /// is not mounted mounts it, and a first NTFS mount writes.
+    pub(crate) fn is_reachable(&self) -> bool {
+        !self.mount_paths.is_empty()
     }
 
     /// The drive letters among the mount paths, as `"E:"`.
@@ -283,6 +292,28 @@ pub(crate) fn final_path(file: &File, guid: bool) -> io::Result<OsString> {
     })
 }
 
+/// `WNNC_NET_SMB` (= `WNNC_NET_LANMAN`): the network provider of SMB shares.
+pub(crate) const WNNC_NET_SMB: u32 = 0x0002_0000;
+
+/// The network provider (`WNNC_NET_*`) that serves an open remote file or
+/// directory (`FileRemoteProtocolInfo`). Fails for a local object.
+pub(crate) fn remote_protocol(file: &File) -> io::Result<u32> {
+    let mut info = FILE_REMOTE_PROTOCOL_INFO::default();
+    // SAFETY: the handle is open and `info` is a writable structure of the size passed.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileRemoteProtocolInfo,
+            (&mut info as *mut FILE_REMOTE_PROTOCOL_INFO).cast(),
+            std::mem::size_of::<FILE_REMOTE_PROTOCOL_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.Protocol)
+}
+
 /// The volume device (`\\?\Volume{GUID}`) an open file or directory is on.
 pub(crate) fn volume_device_of(file: &File) -> io::Result<OsString> {
     let path = final_path(file, true)?;
@@ -346,12 +377,15 @@ pub(crate) fn computer_names() -> Vec<String> {
 }
 
 /// The serial numbers of the file systems on all local volumes that are
-/// stored on a disk. (Volumes without disk extents - an empty card reader, a
-/// CD drive - are not asked: there is nothing on them to lead back to.)
+/// stored on a disk and reachable through a drive letter or mounted folder.
+/// (Volumes without disk extents - an empty card reader, a CD drive - are not
+/// asked: there is nothing on them to lead back to. Volumes without a mount
+/// path are not asked either: asking would mount them, and nothing can share
+/// a volume that has no path.)
 pub(crate) fn local_volume_serials() -> Vec<u32> {
     enumerate_volumes()
         .iter()
-        .filter(|volume| volume.extents.is_some())
+        .filter(|volume| volume.extents.is_some() && volume.is_reachable())
         .filter_map(|volume| volume_info_by_root(&volume.root()).ok())
         .map(|info| info.serial)
         .collect()

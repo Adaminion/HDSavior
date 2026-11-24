@@ -68,7 +68,7 @@ pub use rangeset::{Gaps, Intersection, Iter as RangeSetIter, RangeSet};
 pub use resilient::classify_unix_error;
 pub use resilient::{
     classify_read_error, classify_windows_error, read_error, read_resilient, read_unaligned,
-    ReadFailure, ReadOutcome, MAX_CONSECUTIVE_BAD, RETRY_BLOCK_SIZE,
+    windows_loss_needs_proof, ReadFailure, ReadOutcome, MAX_CONSECUTIVE_BAD, RETRY_BLOCK_SIZE,
 };
 pub use sanitize::{
     fallback_component, fit_component, is_engine_file_name, is_reserved_device_name,
@@ -76,8 +76,8 @@ pub use sanitize::{
     MIN_COMPONENT_LIMIT,
 };
 pub use source::{
-    check_read_request, open_source, BlockSource, FileId, OutOfRange, RangeError, RangedSource,
-    SourceInfo, SourceKind, SourceLocation,
+    check_read_request, is_disk_source_name, open_source, BlockSource, FileId, OutOfRange,
+    RangeError, RangedSource, SourceInfo, SourceKind, SourceLocation,
 };
 
 #[cfg(windows)]

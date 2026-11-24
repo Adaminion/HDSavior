@@ -57,6 +57,12 @@ Hard requirements. A reviewer must be able to verify each by reading the code.
   `IOCTL_STORAGE_GET_DEVICE_NUMBER`, `IOCTL_STORAGE_CHECK_VERIFY2`,
   `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`. No lock, dismount, offline or
   attribute change, ever. The `BlockSource` trait has no write method.
+  No path on a volume is ever opened just to describe it: opening a volume's
+  root (`GetVolumeInformationW("\\?\Volume{GUID}\")` and the like) mounts
+  a file system that is not mounted, and a first NTFS mount writes. File
+  system, label and serial number are asked only of volumes that already
+  have a drive letter or mounted folder; a volume without one is listed with
+  file system and label unknown.
 - **S2 — The rescued area is read-only territory.** (a) Every read made on
   behalf of a session stays inside its session range; a run that maps outside
   is `out_of_bounds`, yields zeros and can never be reported OK. (b) Nothing
@@ -76,8 +82,11 @@ Hard requirements. A reviewer must be able to verify each by reading the code.
   connected disk with the recorded serial and model. Only when that source
   cannot be found is a location of unknown disk. On Linux, a file system
   stored in the source image (through a loop device, a partition or
-  device-mapper stack, or a FUSE mount) overlaps the source; below the
-  output root the engine never enters a mount point.
+  device-mapper stack, or a FUSE mount) overlaps the source; a FUSE file
+  system mounted from a file that no longer exists under the name it was
+  mounted from (renamed or moved since; it may be the source image) is
+  `unknown_disk`. Below the output root the engine never enters a mount
+  point.
 - **S3 — Same physical disk needs explicit consent.** A location on the
   source disk outside the protected ranges is refused unless the caller
   passes `allow_same_disk`; before a catalog exists nobody knows how far the
@@ -104,7 +113,11 @@ Hard requirements. A reviewer must be able to verify each by reading the code.
   file-system writes of the engine go through `hds_io::out`.
 - **S7 — A vanished device is not a bad sector.** When the source stops
   answering, the job ends with `source_lost`; nothing is recorded as scanned
-  or as bad, no image is extended, no zero-filled file is written.
+  or as bad, no image is extended, no zero-filled file is written. An error
+  that a present device can also give for one bad sector (Windows
+  `ERROR_GEN_FAILURE`, `ERROR_NOT_READY`, `ERROR_BAD_UNIT`,
+  `ERROR_ACCESS_DENIED`) counts as lost only when the device then fails
+  `is_alive`; otherwise it is worked around like a media error.
 
 The UI adds: a permanent notice to stop using the rescued disk, and
 read-only-computed `source_warnings` (the range is a mounted volume, a page
@@ -186,7 +199,7 @@ engine/                  Cargo workspace
   crates/hds-engine/     binary `hdsavior-engine`: CLI + JSON-lines server
   crates/hds-testkit/    dev-only: synthetic NTFS image builder for tests
 app/                     Flutter app (Windows desktop only)
-scripts/                 build.ps1, windows/ (CI round trip), linux/ (fixtures, e2e)
+scripts/                 windows/ (CI raw-disk and guard probe), linux/ (fixtures, e2e)
 .github/workflows/       CI
 ```
 
@@ -289,7 +302,11 @@ pub trait BlockSource: Send + Sync {
   resolve the host volumes recursively. Creates nothing. Verdicts: `ok`,
   `overlaps_source` (with the index of the first protected range that was
   hit), `same_disk`, `unknown_disk` (extents unavailable, Storage Spaces, a
-  UNC path to this machine), `not_found`, `not_writable`, `invalid_path`;
+  UNC path to this machine - including the WSL servers `wsl$` and
+  `wsl.localhost` and WebDAV forms such as `localhost@8080` or
+  `127.0.0.1@SSL` - or a share whose redirector is not SMB, such as WSL's 9P
+  or WebDAV; only an SMB share on another machine counts as off the source),
+  `not_found`, `not_writable`, `invalid_path`;
   plus free space, file-system name, its maximum file size, and the
   destination's extents on the source disk, so that `hds-core` can say how
   many catalog files lie there.
@@ -424,7 +441,7 @@ Dart fake engine replays it, so both sides stay in step.
 
 1. **Source** — disks and partitions as cards (model, size, letter, label,
    file system, warnings such as TRIM or system disk); "Scan" per partition
-   or whole disk; "Open disk image…", "Open saved session…", "Create disk
+   or whole disk; "Open disk image…", "Open saved scan…", "Create disk
    image…". Permanent notice: the disk being rescued is never written to;
    stop using it.
 2. **Scan** — progress, speed, ETA, counters; phase (`mft_probe` → `sweep` →

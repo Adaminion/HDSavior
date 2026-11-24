@@ -652,6 +652,16 @@ pub struct CheckDestinationArgs {
     /// Space needed, for `enough_space`.
     #[serde(default)]
     pub need_bytes: Option<u64>,
+    /// The range a scan is about to cover (`start` defaults to 0 and `end` to
+    /// the size of the source when only one is given). When either is given
+    /// it is protected in addition to the current protected ranges, as
+    /// `scan_start` will protect it: a session file can be checked, and its
+    /// folder created, before the scan is started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u64>,
+    /// End of that range, exclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<u64>,
 }
 
 /// Result of `check_destination`: the guard's result plus what the catalog

@@ -182,6 +182,73 @@ fn e1_extension_records_join_their_base_and_e7_orphans() {
 }
 
 #[test]
+fn e2_a_real_size_above_the_allocated_size_is_not_believed() {
+    let mut lab = base_lab(32, 24);
+    let f = |n: u32, name: &str| Rec::new(n).si([t(10); 4], 0x20).name(ROOT, name, 1, 0x20);
+    // 110: a damaged record says 1 TiB, while 3 clusters are allocated and mapped.
+    lab.rec(
+        ORIGIN,
+        &f(110, "huge.bin").data_extent(
+            0,
+            2,
+            (3 * 4096, 1 << 40, 1 << 40),
+            &runlist(&[(Some(4000), 3)]),
+            0,
+        ),
+    );
+    // 111: allocated is also too large; what is mapped from VCN 0 caps the size.
+    lab.rec(
+        ORIGIN,
+        &f(111, "both.bin").data_extent(
+            0,
+            1,
+            (1 << 39, 1 << 40, 5000),
+            &runlist(&[(Some(4100), 2)]),
+            0,
+        ),
+    );
+    // 112: an ordinary file with slack: real <= allocated is believed.
+    lab.rec(
+        ORIGIN,
+        &f(112, "fine.bin").data_extent(
+            0,
+            2,
+            (3 * 4096, 10_000, 9_000),
+            &runlist(&[(Some(4200), 3)]),
+            0,
+        ),
+    );
+    let run = lab.run(None);
+    let store = run.store();
+    let cat = catalog(&run);
+    let flags = |p: &str| cat.flags(at(&cat, store, p));
+    let size = |p: &str| cat.row(store, at(&cat, store, p), false).unwrap().size;
+    let huge = flags("huge.bin");
+    assert!(huge.contains(Flag::SizeEstimated) && huge.contains(Flag::MissingFragments));
+    assert_eq!(size("huge.bin"), 3 * 4096);
+    match cat
+        .file_source(store, at(&cat, store, "huge.bin").0)
+        .unwrap()
+        .0
+    {
+        hds_recover::FileSource::Extents {
+            real_size,
+            initialized_size,
+            ..
+        } => {
+            assert_eq!(real_size, 3 * 4096);
+            assert_eq!(initialized_size, 3 * 4096);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(flags("both.bin").contains(Flag::SizeEstimated));
+    assert_eq!(size("both.bin"), 2 * 4096);
+    let fine = flags("fine.bin");
+    assert!(!fine.contains(Flag::SizeEstimated) && !fine.contains(Flag::MissingFragments));
+    assert_eq!(size("fine.bin"), 10_000);
+}
+
+#[test]
 fn e2_extents_merge_by_vcn_and_gaps_are_flagged() {
     let mut lab = base_lab(32, 24);
     let f = |n: u32, name: &str| Rec::new(n).si([t(10); 4], 0x20).name(ROOT, name, 1, 0x20);

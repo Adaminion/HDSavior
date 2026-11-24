@@ -429,7 +429,11 @@ are merged across the group ordered by start VCN. Extent `k` must begin at
 `start_vcn(k−1) + Σ run lengths of extent k−1`; the stored last VCN is only a
 cross-check when it is > 0. Sizes (allocated, real, initialized) are read only
 from the extent with start VCN 0. A hole in the chain, an overlap, or fewer
-mapped clusters than the real size needs → `missing_fragments`. If the VCN-0
+mapped clusters than the real size needs → `missing_fragments`. A real size
+above the allocated size of an attribute that is not compressed (NTFS never
+stores one; only a damaged record can) is not believed: size = min(allocated
+size, clusters mapped contiguously from VCN 0 × cluster size), initialized
+size capped at it, flags `missing_fragments` and `size_estimated`. If the VCN-0
 extent is lost: size = (highest mapped VCN + 1) × cluster size, flags
 `missing_fragments` and `size_estimated`. A base with an `$ATTRIBUTE_LIST`
 but no `$DATA` extent found is `missing_fragments`; a base with neither is
@@ -586,6 +590,12 @@ of the group), `missing_fragments`, `size_estimated`, `out_of_bounds`,
 `overwritten`, `overlap`, `compressed`, `encrypted`, `placeholder`, `sparse`,
 `no_data`, `bad_sectors`, `older_generation`, `embedded`, `stray`,
 `signature_ok`, `signature_mismatch`.
+
+The extents that G1, G2, H1 and I4 test, and that I2 (a) protects, are a
+file's *data* extents: each run clipped to the file bytes below
+min(initialized size, real size). Clusters past the real size and bytes at
+or after the valid data length are never read (H7, they read as zeros or
+not at all), so damage, conflicts or bounds there do not affect the file.
 
 - `compressed` — non-resident `$DATA` with `(flags & 0x00FF) != 0`, or reparse
   tag 0x80000017 / a `WofCompressedData` stream. Resident data is always raw.
@@ -745,7 +755,11 @@ removed, status `cancelled`. The report keeps what was done.
 multiple of the cluster size, it is inside the scanned (done) part of the
 range, and it is not inside (a) an extent of an in-use `main` file that is
 neither `overwritten` nor `out_of_bounds`, (b) the overwritten set, (c) a file
-already carved in this run.
+already carved in this run whose end was verified by structure
+(`Measured.end_verified`). A file whose length comes from a header or a guess
+does not bound the candidates after it: if it is fragmented, its length runs
+over foreign clusters, and a file starting there is measured like any other
+candidate (both are kept).
 
 **I3. Measuring.** Candidates are processed in ascending offset order with
 `hds_carve::try_measure`, bounded by the next extent of kind (a), the next
@@ -765,7 +779,8 @@ An end concluded from missing data (the walker asked for bytes at or past the
 bound and got none) is not verified; JPEG and GIF ends are verified only by
 decoding the entropy-coded or LZW data to exactly the frame's size.
 
-**I4.** A carved file that lies inside a deleted file's extents makes that
+**I4.** A carved file that lies inside a deleted file's data extents (G1; every
+byte of it, not merely touching them) makes that
 file `overwritten`, except the file's own content: a carved file that starts
 exactly at the deleted file's first data byte (its mapped run at VCN 0) and is
 no longer than its real size. A deleted file whose VCN-0 run is unknown gets
@@ -782,9 +797,15 @@ layout, cluster size or volume offset, by
 Sequential copy of a byte range of the source to a file with `read_resilient`.
 Bad sectors are zero-filled and appended to `<image>.bad.txt`. A side file
 `<image>.hdsimg` (source identity, range, confirmed byte count) is rewritten
-after a flush every 1 GiB and on stop. `resume` checks the identity and
-truncates the image to the confirmed count; the image length alone is never
-trusted. A resumed image is reopened without following links and only when it
+after a flush every 1 GiB and on stop. A side file (`.hdsimg`, and
+`.bad.txt` when a resume trims it) is rewritten without ever leaving its
+only copy in a part file: the new text is committed as `<side file>.new`,
+then the old file is removed and `.new` renamed to its name; a side file
+that is missing is read from its `.new` copy. A fresh image refuses the
+`.new` names like the side files themselves. `resume` checks the identity,
+truncates the image to the confirmed count and only then checks the free
+space (the unconfirmed tail is not part of the image, and its space counts
+as free); the image length alone is never trusted. A resumed image is reopened without following links and only when it
 is a regular file that is not a reparse point (S6). The guard protects the
 imaged range `[start, end)` in addition to the session's protected ranges. Without `resume` an existing image file is refused (`exists`). An
 image larger than the destination file system's maximum file size is refused

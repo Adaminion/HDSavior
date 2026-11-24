@@ -7,8 +7,8 @@ import 'state/state.dart';
 import 'ui/format.dart';
 
 /// Starts HDSavior with the real engine: `hdsavior-engine serve` next to
-/// the app's executable, or what the environment variable `HDSAVIOR_ENGINE`
-/// names.
+/// the app's executable, or, in a debug or profile build, what the
+/// environment variable `HDSAVIOR_ENGINE` names.
 Future<void> main() async {
   final binding = WidgetsFlutterBinding.ensureInitialized();
   // Dates and numbers in the user's regional format (the text is English).

@@ -89,9 +89,12 @@ then starts and explains that the engine was not found.
 
 ### How the app finds the engine at run time
 
-`locateEngineExecutable()` (lib/engine/engine_locator.dart): the value of the
-environment variable **`HDSAVIOR_ENGINE`** if it is set, otherwise
-`hdsavior-engine.exe` in the directory of the app's own executable.
+`locateEngineExecutable()` (lib/engine/engine_locator.dart):
+`hdsavior-engine.exe` in the directory of the app's own executable. In a
+debug or profile build (`flutter run`), the value of the environment
+variable **`HDSAVIOR_ENGINE`** wins if it is set. A release build ignores
+it: the app runs elevated, and a user environment variable can be set by any
+program without elevation.
 
 ### What was changed in the generated Windows runner
 

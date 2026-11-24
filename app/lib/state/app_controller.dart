@@ -35,9 +35,10 @@ class AppController {
     this.pickers = const SystemFilePickers(),
     int pageSize = 200,
     int maxCachedPages = 64,
+    Duration helloTimeout = const Duration(seconds: 15),
   }) : client = EngineClient(transport) {
     api = EngineApi(client);
-    engine = EngineController(api);
+    engine = EngineController(api, helloTimeout: helloTimeout);
     catalog = CatalogController(
       api,
       pageSize: pageSize,

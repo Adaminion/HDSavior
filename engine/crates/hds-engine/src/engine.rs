@@ -892,8 +892,22 @@ impl Engine {
     }
 
     fn check_destination(&self, args: CheckDestinationArgs) -> Handled {
-        self.source()?;
-        reply(&self.check(&args.path, args.purpose, &self.protected(), args.need_bytes))
+        let opened = self.source()?;
+        let mut protected = self.protected();
+        if args.start.is_some() || args.end.is_some() {
+            // The range of a scan about to start: protected first, as
+            // `scan_start` will protect it, without dropping what is
+            // protected now.
+            let source = &opened.source;
+            let range = validate::byte_range(
+                args.start.unwrap_or(0),
+                args.end,
+                source.size(),
+                source.sector_size(),
+            )?;
+            protected.insert(0, Protected::session(range));
+        }
+        reply(&self.check(&args.path, args.purpose, &protected, args.need_bytes))
     }
 
     // --------------------------------------------------------------------------------------
@@ -1021,6 +1035,13 @@ impl Engine {
         validate::path("path", &args.path)?;
         if let Some(source) = &args.source {
             validate::path("source.path", &source.path)?;
+            // A malformed request, not a source that cannot be found: refused
+            // before anything is loaded (PROTOCOL, errors of session_load).
+            if source.kind == SourceKind::Disk && !hds_io::is_disk_source_name(&source.path) {
+                return Err(ProtocolError::bad_request(
+                    r"a disk source must be named \\.\PhysicalDrive<N>",
+                ));
+            }
         }
         let task = TaskContext::new(self.out.clone(), TaskName::SessionLoad);
         let loaded = self.backend.session_load(&args, &task)?;

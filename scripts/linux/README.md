@@ -33,7 +33,7 @@ scripts/linux/make-fixtures.sh --list
 ```
 
 The whole build (16 scenarios) takes about 80 seconds on a 4-core machine and
-leaves about 610 MB on disk (1.7 GiB apparent size; the images are sparse). It
+leaves about 510 MB on disk (1.7 GiB apparent size; the images are sparse). It
 needs root because it mounts. Per scenario it writes `<name>.img` and
 `<name>.manifest.json`; with `--keep-pre` also `<name>.pre.img`, the same image
 right before the accident (for `repartition`: with the old partition table).

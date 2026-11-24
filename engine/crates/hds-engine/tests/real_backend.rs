@@ -589,10 +589,28 @@ fn stopped_and_shut_down_scans_resume_to_the_same_catalog() {
     assert_eq!(without_epoch(done["catalog"].clone()), full);
     let (_, rows) = root_listing(&mut h);
     assert_eq!(rows, full_rows);
-    // Resuming a complete session just ends.
+    // Resuming a complete session reads nothing and rebuilds the catalog
+    // (PROTOCOL scan_start): a final sweep event, then the analysis, then
+    // scan_done with a new epoch and the same contents.
+    let before = u(&done["catalog"]["epoch"]);
+    h.events.clear();
     h.ok("scan_start", json!({"resume": true}));
     let done = h.wait_event_for("scan_done", JOB_TIMEOUT);
     assert_eq!(done["status"], "completed");
+    assert!(u(&done["catalog"]["epoch"]) > before);
+    assert_eq!(without_epoch(done["catalog"].clone()), full);
+    let phases: Vec<String> = h
+        .events
+        .iter()
+        .filter(|e| e.event == "scan_progress")
+        .map(|e| e.data["phase"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(
+        phases.first().map(String::as_str),
+        Some("sweep"),
+        "{phases:?}"
+    );
+    assert!(phases[1..].iter().all(|p| p == "analyzing"), "{phases:?}");
     h.ok("shutdown", json!({}));
 
     // Shut down during the scan: the session is saved without a catalog;

@@ -538,6 +538,22 @@ void main() {
       expect(recover.readyToStart, isFalse, reason: 'nothing selected');
     });
 
+    test('readyToStart: folders without a file to recover are not startable', () async {
+      final recover = app().recover;
+      // A folder that holds only deleted files, with deleted files left out.
+      app().selection.setChecked(fake.landmarks.deletedOnlyFolder, [root], true);
+      await recover.checkDestination(r'D:\Rescued');
+      await pumpEventQueue();
+      final summary = recover.summary!;
+      expect(summary.files, 0);
+      expect(summary.dirs, greaterThan(0), reason: 'the folder itself is counted');
+      expect(recover.readyToStart, isFalse, reason: 'recover_start refuses a selection without files');
+      recover.options = recover.options.copyWith(includeDeleted: true);
+      await pumpEventQueue();
+      expect(recover.summary!.files, greaterThan(0));
+      expect(recover.readyToStart, isTrue);
+    });
+
     test('starting, progress, completion', () async {
       final recover = app().recover;
       final phases = phasesOf(recover);

@@ -495,5 +495,17 @@ void main() {
         reason: 'an empty value is no override',
       );
     });
+
+    test('a release build ignores HDSAVIOR_ENGINE: the elevated app starts only its own engine', () {
+      expect(
+        locateEngineExecutable(
+          environment: const {'HDSAVIOR_ENGINE': r'C:\Users\me\AppData\evil.exe'},
+          appExecutable: r'C:\Program Files\HDSavior\hdsavior.exe',
+          isWindows: true,
+          allowOverride: false,
+        ),
+        r'C:\Program Files\HDSavior\hdsavior-engine.exe',
+      );
+    });
   });
 }

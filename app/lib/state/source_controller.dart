@@ -319,6 +319,15 @@ class SourceController extends ChangeNotifier {
     );
     _sessionPath = result.path;
     notifyListeners();
+    // A successful save clears the warnings `session_file_at_risk` and
+    // `session_file_not_saved`: the catalog on screen must say so.
+    if (_catalog.hasCatalog) {
+      try {
+        await _catalog.refresh();
+      } on EngineException {
+        // The save itself worked; the next adoption brings the warnings up to date.
+      }
+    }
     return result;
   }
 
@@ -451,9 +460,11 @@ class SourceController extends ChangeNotifier {
   /// [suggestSessionPath]) and asks the destination guard about it
   /// (`check_destination`, purpose `session`).
   ///
-  /// On verdict `ok` the session directory is created, so that the engine
-  /// can write the file: the verdict is about a file inside that directory,
-  /// so creating the directory is covered by it (docs/ARCHITECTURE.md, S2).
+  /// The check protects [range] (the whole source when `null`) on top of
+  /// what is protected now, as `scan_start` will. On verdict `ok` the
+  /// session directory is created, so that the engine can write the file:
+  /// the verdict is about a file inside that directory, so creating the
+  /// directory is covered by it (docs/ARCHITECTURE.md, S2).
   /// On any other verdict nothing is created and the caller must ask the
   /// user for another place. Engine errors are rethrown.
   Future<SessionFilePlan> prepareSessionFile({ByteRange? range, DateTime? now}) async {
@@ -461,7 +472,12 @@ class SourceController extends ChangeNotifier {
     if (path == null) {
       throw EngineException.client(EngineErrorCode.noSource, 'No source is open.');
     }
-    final check = await _api.checkDestination(path: path, purpose: DestinationPurpose.session);
+    final check = await _api.checkDestination(
+      path: path,
+      purpose: DestinationPurpose.session,
+      start: range?.start ?? 0,
+      end: range?.end,
+    );
     if (check.isOk) await _platform.createDirectory(_platform.defaultSessionDirectory);
     return SessionFilePlan(path: path, check: check);
   }

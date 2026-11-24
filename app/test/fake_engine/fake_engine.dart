@@ -519,7 +519,15 @@ final class FakeEngine {
 
   /// PROTOCOL `check_destination` result for [path] with the protected
   /// ranges of the moment ([job]: see [_protectedNow]).
-  Map<String, Object?> _check(String path, {required String purpose, required int? needBytes, (int, int)? job}) {
+  /// [scan] is the range of a scan about to start (`check_destination`'s
+  /// `start`/`end`): protected on top of what is protected now.
+  Map<String, Object?> _check(
+    String path, {
+    required String purpose,
+    required int? needBytes,
+    (int, int)? job,
+    (int, int)? scan,
+  }) {
     final catalog = _job is _ScanJob ? null : _catalog;
     return world.checkDestination(
       path,
@@ -527,7 +535,10 @@ final class FakeEngine {
       needBytes: needBytes,
       sourceDisk: _sourceDisk,
       sourceImage: _source?['kind'] == 'image' ? _source!['path'] as String? : null,
-      protected: _protectedNow(job: job),
+      protected: [
+        if (scan != null) FakeProtectedRange(scan.$1, scan.$2, 'session_range'),
+        ..._protectedNow(job: job),
+      ],
       filesIn: catalog?.filesIn,
     );
   }
@@ -675,7 +686,24 @@ final class FakeEngine {
         if (!const ['recover', 'image', 'session', 'app_data'].contains(purpose)) {
           throw FakeError('bad_request', 'unknown purpose "$purpose"');
         }
-        return _check(_arg<String>(args, 'path'), purpose: purpose, needBytes: _opt<int?>(args, 'need_bytes', null));
+        final scanStart = _opt<int?>(args, 'start', null);
+        final scanEnd = _opt<int?>(args, 'end', null);
+        (int, int)? scan;
+        if (scanStart != null || scanEnd != null) {
+          final size = (_source?['size'] as int?) ?? 0;
+          final start = scanStart ?? 0;
+          final end = scanEnd ?? size;
+          if (start < 0 || end > size || start >= end) {
+            throw FakeError('bad_request', 'the range $start..$end does not fit the source');
+          }
+          scan = (start, end);
+        }
+        return _check(
+          _arg<String>(args, 'path'),
+          purpose: purpose,
+          needBytes: _opt<int?>(args, 'need_bytes', null),
+          scan: scan,
+        );
       case 'recover_start':
         return _recoverStart(args);
       case 'carve_start':

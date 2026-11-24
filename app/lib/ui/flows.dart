@@ -257,8 +257,19 @@ Future<bool> confirm(
   return result ?? false;
 }
 
-/// Lets the user pick a disk image file and opens it as the source.
+/// Lets the user pick a disk image file and opens it as the source. Opening
+/// another source drops the current scan, so with results on screen the
+/// user is asked first (as for a saved scan or another source).
 Future<void> openImageFile(BuildContext context, AppController app) async {
+  if (app.catalog.hasCatalog) {
+    final yes = await confirm(
+      context,
+      title: S.closeSourceTitle,
+      body: app.source.sessionPath == null ? S.closeSourceBodyUnsaved : S.closeSourceBody(app.source.sessionPath!),
+      confirmLabel: S.closeSourceConfirm,
+    );
+    if (!yes || !context.mounted) return;
+  }
   final path = await app.pickers.pickFile(label: S.imageFilesLabel, extensions: imageExtensions);
   if (path == null || !context.mounted) return;
   await attempt(context, () => app.source.openImage(path), errorTitle: S.openImageFailed);

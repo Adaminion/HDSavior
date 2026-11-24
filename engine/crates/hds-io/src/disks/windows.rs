@@ -25,8 +25,15 @@ const ERROR_NOT_READY: i32 = 21;
 /// `FVE_E_LOCKED_VOLUME`: the volume is locked by BitLocker.
 const FVE_E_LOCKED_VOLUME: i32 = 0x8031_0000_u32 as i32;
 
-/// File system and label of a mounted volume. A raw volume has neither.
+/// File system and label of a mounted volume. A raw volume has neither, and
+/// neither is asked of a volume without a drive letter or mounted folder:
+/// opening its root directory would make Windows mount it, and a first NTFS
+/// mount writes (ARCHITECTURE S1). The user may have kept the volumes of the
+/// disk to be rescued unmounted on purpose.
 fn fs_and_label(volume: &Volume) -> (Option<FsKind>, Option<String>) {
+    if !volume.is_reachable() {
+        return (None, None);
+    }
     match volume_info_by_root(&volume.root()) {
         Ok(info) => {
             let fs = match info.fs_name.to_ascii_uppercase().as_str() {

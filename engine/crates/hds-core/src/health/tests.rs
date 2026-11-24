@@ -270,6 +270,81 @@ fn g1_overwritten_by_the_current_volume_and_bad_sectors() {
 }
 
 #[test]
+fn g1_g2_only_the_bytes_the_reader_returns_count() {
+    let mut lab = base_lab(32, 24);
+    let sized = |r: Rec, lcn: u64, clusters: u64, real: u64, init: u64| {
+        r.data_extent(
+            0,
+            i64::try_from(clusters).unwrap() - 1,
+            (clusters * 4096, real, init),
+            &runlist(&[(Some(lcn), clusters)]),
+            0,
+        )
+    };
+    // Pre-allocated: 4 clusters, real size 16 KiB, valid data length 4 KiB.
+    // The new volume took cluster 3002, and 3003 is unreadable: both lie at
+    // or after the valid data length, which reads as zeros.
+    lab.rec(
+        ORIGIN,
+        &sized(named(100, "prealloc.bin"), 3000, 4, 4 * 4096, 4096),
+    );
+    // Slack: 3 clusters allocated for 4 KiB of data; cluster 3102 was taken.
+    lab.rec(ORIGIN, &sized(named(101, "slack.bin"), 3100, 3, 4096, 4096));
+    // Valid data length 8 KiB: the second cluster is data, and it was taken.
+    lab.rec(
+        ORIGIN,
+        &sized(named(102, "touched.bin"), 3200, 4, 4 * 4096, 8192),
+    );
+    // G2: an older file whose slack a newer file now uses.
+    lab.rec(
+        ORIGIN,
+        &sized(
+            Rec::new(103)
+                .si([t(10); 4], 0x20)
+                .name(ROOT, "older.bin", 1, 0x20),
+            3300,
+            3,
+            4096,
+            4096,
+        ),
+    );
+    lab.rec(
+        ORIGIN,
+        &file(104, 1, ROOT, "newer.bin", t(11), Some((3302, 1))),
+    );
+    lab.current_volume(
+        0,
+        8192,
+        4,
+        64,
+        t(500),
+        &[],
+        &[3002..3003, 3102..3103, 3201..3202],
+    );
+    let faulty = Arc::new(FaultySource::new(Arc::new(MemSource::new(lab.img.clone()))));
+    faulty.bad_sectors(3003 * 4096..3003 * 4096 + 512);
+    let run = run_source(faulty, 0..32 * MIB);
+    let store = run.store();
+    let cat = catalog(&run);
+    let f = |p: &str| cat.flags(at(&cat, store, p));
+    for name in ["prealloc.bin", "slack.bin", "older.bin", "newer.bin"] {
+        let flags = f(name);
+        assert!(
+            !flags.contains(Flag::Overwritten)
+                && !flags.contains(Flag::BadSectors)
+                && !flags.contains(Flag::Overlap),
+            "{name}: {flags:?}"
+        );
+        assert_ne!(
+            cat.rating(at(&cat, store, name)),
+            Some(Rating::Damaged),
+            "{name}"
+        );
+    }
+    assert!(f("touched.bin").contains(Flag::Overwritten));
+}
+
+#[test]
 fn g2_overlap_conflicts() {
     let mut lab = base_lab(32, 24);
     // Two in-use files of main sharing cluster 3000: the later record
@@ -465,6 +540,105 @@ fn i4_carved_files_overwrite_deleted_files_and_get_new_ids() {
     assert_eq!(
         c4.row(store, main_root, false),
         cat.row(store, main_root, false)
+    );
+}
+
+#[test]
+fn i4_only_a_carved_file_inside_a_deleted_file_overwrites_it() {
+    let mut lab = base_lab(32, 24);
+    // A deleted video whose header claims 200 clusters from 3050 on, and an
+    // intact deleted photo at 3100 inside that span.
+    lab.rec(
+        ORIGIN,
+        &freed(named(100, "video.mp4").data_extent(
+            0,
+            0,
+            (4096, 4096, 4096),
+            &runlist(&[(Some(3050), 1)]),
+            0,
+        )),
+    );
+    lab.rec(ORIGIN, &freed(one_run(named(101, "photo.jpg"), 3100, 0)));
+    // A deleted 2-cluster file at 3200: something longer than it, starting at
+    // its first byte, but within its allocation (3 clusters).
+    lab.rec(
+        ORIGIN,
+        &freed(named(102, "short.doc").data_extent(
+            0,
+            2,
+            (3 * 4096, 2 * 4096, 2 * 4096),
+            &runlist(&[(Some(3200), 3)]),
+            0,
+        )),
+    );
+    // A deleted 4-cluster file at 3300, carved at its first byte with its
+    // own length: its own content.
+    lab.rec(
+        ORIGIN,
+        &freed(named(103, "own.bin").data_extent(
+            0,
+            3,
+            (4 * 4096, 4 * 4096, 4 * 4096),
+            &runlist(&[(Some(3300), 4)]),
+            0,
+        )),
+    );
+    let run = lab.run(None);
+    let store = run.store();
+    let cat = catalog(&run);
+    let carved = |offset: u64, len: u64, ext: &str| CarvedEntry {
+        offset,
+        len,
+        ext: ext.into(),
+        end_verified: false,
+    };
+    let entries = vec![
+        carved(3050 * 4096, 200 * 4096, "mp4"),
+        carved(3200 * 4096, 2 * 4096 + 1, "doc"),
+        carved(3300 * 4096, 4 * 4096, "bin"),
+    ];
+    let c2 = cat.with_carved(store, &entries).unwrap();
+    let f = |p: &str| c2.flags(at(&c2, store, p));
+    // Runs into the photo, but does not lie inside it.
+    assert!(
+        !f("photo.jpg").contains(Flag::Overwritten),
+        "{:?}",
+        f("photo.jpg")
+    );
+    assert!(!f("video.mp4").contains(Flag::Overwritten), "its own start");
+    // Inside the data bytes? 2 clusters + 1 byte do not fit 2 clusters of data.
+    assert!(!f("short.doc").contains(Flag::Overwritten));
+    assert!(!f("own.bin").contains(Flag::Overwritten));
+    // The data extents end at the real size (G1): a carved file at the first
+    // byte that fits them is the file's own content; one inside them that
+    // starts elsewhere overwrites it.
+    let mut lab = base_lab(32, 24);
+    lab.rec(
+        ORIGIN,
+        &freed(named(102, "short.doc").data_extent(
+            0,
+            3,
+            (4 * 4096, 2 * 4096, 4 * 4096),
+            &runlist(&[(Some(3200), 4)]),
+            0,
+        )),
+    );
+    let run = lab.run(None);
+    let store = run.store();
+    let cat = catalog(&run);
+    let c2 = cat
+        .with_carved(store, &[carved(3200 * 4096, 2 * 4096 - 512, "doc")])
+        .unwrap();
+    assert!(!c2
+        .flags(at(&c2, store, "short.doc"))
+        .contains(Flag::Overwritten));
+    let c3 = cat
+        .with_carved(store, &[carved(3201 * 4096, 512, "doc")])
+        .unwrap();
+    assert!(
+        c3.flags(at(&c3, store, "short.doc"))
+            .contains(Flag::Overwritten),
+        "inside, not at the start"
     );
 }
 

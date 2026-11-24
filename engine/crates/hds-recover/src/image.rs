@@ -395,20 +395,53 @@ fn read_existing(dir: &OutDir, name: &str, max: u64) -> io::Result<String> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{name} is not text")))
 }
 
-/// Replaces (or creates) the small file `name` in `dir` with `text`:
-/// written under a temporary name, flushed, then renamed; the only thing
-/// ever replaced is a regular file of that name (S6).
+/// The name under which a new version of the side file `name` is staged
+/// ([`replace_small_file`]).
+fn staged_name(name: &str) -> String {
+    format!("{name}.new")
+}
+
+/// Replaces (or creates) the small file `name` in `dir` with `text`. There
+/// is always a complete copy under a name of its own: the new text is
+/// written to a part file, flushed and committed as `<name>.new`; only then
+/// is the old `name` removed and `<name>.new` renamed to `name`. A stop
+/// between the two (a kill, a power loss, a rename refused by another
+/// program) leaves `<name>.new`, which [`read_side_file`] reads when `name`
+/// is missing; a part file, which the next start deletes, never holds the
+/// only copy. The only thing ever replaced is a regular file of either
+/// name (S6).
 fn replace_small_file(dir: &OutDir, name: &str, text: &str) -> io::Result<()> {
+    let staged = staged_name(name);
     let mut part = dir.create_part()?;
     part.write_all(text.as_bytes())?;
     part.sync()?;
     part.finish(&Timestamps::default())?;
-    match part.commit(name, OnExists::Overwrite, &|_| false)? {
-        CommitOutcome::Committed | CommitOutcome::Overwritten => Ok(()),
-        CommitOutcome::NameTaken | CommitOutcome::Skipped => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("{name} is taken by something that is not a regular file"),
-        )),
+    match part.commit(&staged, OnExists::Overwrite, &|_| false)? {
+        CommitOutcome::Committed | CommitOutcome::Overwritten => {}
+        CommitOutcome::NameTaken | CommitOutcome::Skipped => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{staged} is taken by something that is not a regular file"),
+            ))
+        }
+    }
+    match dir.remove_file(name) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    dir.rename_noreplace(&staged, name)
+}
+
+/// Reads the side file `name` as [`read_existing`] does; when it is missing,
+/// the copy [`replace_small_file`] staged as `<name>.new` and could not
+/// rename any more.
+fn read_side_file(dir: &OutDir, name: &str, max: u64) -> io::Result<String> {
+    match read_existing(dir, name, max) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            read_existing(dir, &staged_name(name), max)
+        }
+        other => other,
     }
 }
 
@@ -538,8 +571,10 @@ impl ImageJob {
         let mut job = if options.resume && image_exists {
             Self::reopen(source, dir, name, side_name, bad_name, identity)?
         } else {
-            // A fresh image: nothing of that name may be there, side files included.
-            for n in [&name, &side_name, &bad_name] {
+            // A fresh image: nothing of that name may be there, side files
+            // (and their staged copies) included.
+            let staged = [staged_name(&side_name), staged_name(&bad_name)];
+            for n in [&name, &side_name, &bad_name, &staged[0], &staged[1]] {
                 if exists(n)? {
                     return Err(ImageStartError::Exists(dir.path().join(n)));
                 }
@@ -582,7 +617,7 @@ impl ImageJob {
         bad_name: String,
         identity: Identity,
     ) -> Result<ImageJob, ImageStartError> {
-        let text = match read_existing(&dir, &side_name, SIDE_MAX) {
+        let text = match read_side_file(&dir, &side_name, SIDE_MAX) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(ImageStartError::CannotResume(format!(
@@ -633,7 +668,6 @@ impl ImageJob {
                 failed.into_iter().map(String::from).collect(),
             ));
         }
-        check_space(&dir, total.saturating_sub(confirmed))?;
         let mut image = dir.open_existing(&name).map_err(|e| {
             ImageStartError::CannotResume(format!("the image cannot be reopened: {e}"))
         })?;
@@ -643,7 +677,10 @@ impl ImageJob {
                 "the image holds {len} bytes, fewer than the {confirmed} recorded"
             )));
         }
+        // The unconfirmed tail is cut off first (it is not part of the image
+        // by definition), so that the space it held counts as free.
         image.set_len(confirmed).map_err(ImageStartError::Io)?;
+        check_space(&dir, total.saturating_sub(confirmed))?;
         image
             .seek(SeekFrom::Start(confirmed))
             .map_err(ImageStartError::Io)?;
@@ -667,7 +704,7 @@ impl ImageJob {
             checkpoint_bytes: CHECKPOINT_BYTES,
             chunk_bytes: CHUNK,
         };
-        match read_existing(&job.dir, &job.bad_name, BAD_MAP_MAX) {
+        match read_side_file(&job.dir, &job.bad_name, BAD_MAP_MAX) {
             Ok(text) => {
                 let entries =
                     parse_bad_map(&text, confirmed).map_err(ImageStartError::CannotResume)?;

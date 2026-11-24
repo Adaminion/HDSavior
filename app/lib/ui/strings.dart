@@ -899,7 +899,9 @@ abstract final class S {
       'To recover files, the disk that was scanned must be connected and attached.';
   static const String recoverWhyBusy = 'Wait for the running task to finish.';
   static const String recoverWhyNothing = 'Tick some files first.';
-  static const String recoverWhyNoFiles = 'What is ticked contains no files with the current options.';
+  static const String recoverWhyNoFiles =
+      'What is ticked contains no files with the current options. Files that were deleted before the format '
+      'count only with “$optionDeleted”.';
   static const String recoverWhyNoDestination = 'Choose a destination folder.';
   static const String recoverWhyChecking = 'Checking the destination…';
   static const String recoverWhyConsent = 'This destination needs your permission first (see above).';

@@ -387,7 +387,6 @@ pub(crate) fn merge(store: &ScanStore, base: RecordId, exts: &[RecordId], cs: u6
         m.size = highest_end.saturating_mul(cs);
         m.initialized = m.size;
     } else if cs > 0 {
-        let needed = m.size.div_ceil(cs);
         let mapped_from_zero = m
             .runs
             .iter()
@@ -400,6 +399,17 @@ pub(crate) fn merge(store: &ScanStore, base: RecordId, exts: &[RecordId], cs: u6
             })
             .last()
             .unwrap_or(0);
+        // NTFS keeps real <= allocated for an attribute that is not
+        // compressed: a larger real size comes from a damaged record. It is
+        // not believed: the size is capped at what is allocated and mapped
+        // from VCN 0, and flagged as estimated with missing fragments.
+        if !m.compressed && m.size > m.allocated {
+            m.size = m.allocated.min(mapped_from_zero.saturating_mul(cs));
+            m.initialized = m.initialized.min(m.size);
+            m.estimated = true;
+            m.missing = true;
+        }
+        let needed = m.size.div_ceil(cs);
         if mapped_from_zero < needed {
             m.missing = true;
         }

@@ -121,6 +121,12 @@ fn a_directory_resolves_to_its_volume() {
     for volume in &volumes {
         assert!(winpath::is_volume_guid_device(&wide_units(&volume.device)));
         assert!(volume.root().to_string_lossy().ends_with('\\'));
+        // A volume with a drive letter is reachable; one with no mount path is
+        // never asked through its root (that would mount it).
+        assert_eq!(volume.is_reachable(), !volume.mount_paths.is_empty());
+        if !volume.letters().is_empty() {
+            assert!(volume.is_reachable());
+        }
         for letter in volume.letters() {
             assert!(letter.len() == 2 && letter.ends_with(':'), "{letter}");
         }
@@ -162,4 +168,20 @@ fn page_file_entries_name_their_drive() {
     assert_eq!(page_file_letter(r"\??\Volume{x}\pagefile.sys"), None);
     // Reading the registry value does not fail, whatever it holds.
     let _ = super::volumes::page_file_letters();
+}
+
+#[test]
+fn a_volume_without_mount_paths_is_not_reachable() {
+    let volume = volumes::Volume {
+        device: OsString::from(r"\\?\Volume{00000000-0000-0000-0000-000000000000}"),
+        extents: None,
+        device_number: None,
+        mount_paths: Vec::new(),
+    };
+    assert!(!volume.is_reachable());
+    let mounted = volumes::Volume {
+        mount_paths: vec![r"E:\".to_string()],
+        ..volume
+    };
+    assert!(mounted.is_reachable());
 }

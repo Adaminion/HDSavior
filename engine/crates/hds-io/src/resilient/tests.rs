@@ -682,6 +682,25 @@ fn windows_error_codes_are_classified_as_in_the_notes() {
     }
 }
 
+#[test]
+fn ambiguous_windows_loss_codes_need_a_failed_liveness_check() {
+    // Codes a present disk can answer for one bad sector (a USB bridge that
+    // reports a medium error as STATUS_UNSUCCESSFUL, ...): the device is asked
+    // before the job ends.
+    for code in [31, 21, 20, 5] {
+        assert_eq!(classify_windows_error(code), ReadFailure::DeviceLost);
+        assert!(windows_loss_needs_proof(code), "error {code}");
+    }
+    // Codes no present device gives: the job ends at once.
+    for code in [1167, 433, 2, 55, 1617, 1110, 1112, 321, 6] {
+        assert_eq!(classify_windows_error(code), ReadFailure::DeviceLost);
+        assert!(!windows_loss_needs_proof(code), "error {code}");
+    }
+    for code in [23, 1117, 87, 995, 0] {
+        assert!(!windows_loss_needs_proof(code), "error {code}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn unix_error_codes_are_classified() {

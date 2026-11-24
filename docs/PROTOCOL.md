@@ -118,7 +118,7 @@ without source (browse only) · **J** carve, recover or image running.
 | `session_load` | `not_found` · `io_error` (not a session file, damaged) · `bad_request` (a `source` disk path that is not `\\.\PhysicalDrive<N>`); a source that cannot be opened or does not match is reported in `source_error`, not as an error |
 | `geometry_set`, `instance_set` | N, O, S `no_catalog` · wrong epoch `stale_catalog` · unknown instance `not_found` · bad values, `strays` `bad_request` |
 | `catalog_info`, `list_children`, `node_info`, `search`, `selection_summary` | N, O, S `no_catalog` · wrong epoch `stale_catalog` · unknown id `not_found` · answered in J |
-| `check_destination` | N, B `no_source` · otherwise answered, also in S and J |
+| `check_destination` | N, B `no_source` · unknown purpose, bad `start`/`end` `bad_request` · otherwise answered, also in S and J |
 | `recover_start`, `carve_start` | N, O, S `no_catalog` · B `no_source` · J `busy` · wrong epoch `stale_catalog` · unknown id `not_found` · empty selection, a selection of folders only `bad_request` · `destination_refused` · `no_space` (`data`: `free_bytes`, `need_bytes`) · `source_lost` (recover: the check of what was overwritten since the scan, ALGORITHMS H1) · carve without stored hits, or without a main instance, `unsupported` |
 | `image_start` | N, B `no_source` · S, J `busy` · `destination_refused` · `no_space` · `exists` · `source_lost` · `source_mismatch` |
 | `read_file` | N, O, S `no_catalog` · B `no_source` · wrong epoch `stale_catalog` · unknown id `not_found` · folder `bad_request` · unsupported file `unsupported` · `source_lost` · `io_error` (unreadable, or reading stopped after about 5 s on a failing disk) |
@@ -373,8 +373,12 @@ Any `scan_start` discards the current catalog and carved nodes at once; until
 `scan_done`, catalog queries answer `no_catalog`. With `resume: true` the
 loaded session continues: `start` / `end` / `collect_carve_hits` must be
 absent or equal to the session's; `session_path` defaults to the file the
-session was loaded from or last saved to; resuming a complete session just
-emits `scan_done`.
+session was loaded from or last saved to. Resuming a complete session reads
+nothing but is otherwise a scan like any other: one `scan_progress` of
+phase `sweep` with the final counters, the `analyzing` events, then
+`scan_done` with a catalog rebuilt under a new epoch; the current-volume
+snapshot is taken again and the session's scan time (ALGORITHMS D2) becomes
+the end of this run.
 
 → `{"job": "scan", "bytes_total": 4000785104896}`
 
@@ -412,7 +416,7 @@ the catalog is not built (`catalog` is `null`), also when the shutdown comes
 in phase `analyzing`, after the whole range was read. The session file
 holds what was read either way: `session_load` builds the catalog from it
 (`scan_complete` is true when the read had finished), and resuming a
-complete session just emits `scan_done`.
+complete session reads nothing and rebuilds the catalog (see `scan_start`).
 
 The last `scan_progress` of the read phases (`mft_probe`, `sweep`) is sent
 when reading ends and carries the final counters; the `analyzing` events
@@ -602,7 +606,8 @@ directories that will be created.
 ### check_destination
 
 args `{"path": "D:\\Rescued", "purpose": "recover", "need_bytes": null}`
-(`purpose`: `"recover"`, `"image"`, `"session"`, `"app_data"`)
+(`purpose`: `"recover"`, `"image"`, `"session"`, `"app_data"`; optional
+`start` and `end`, numbers, see below)
 
 →
 
@@ -637,7 +642,13 @@ purpose, `image_start` included. Once a session exists the session range is
 protected, then, with a catalog, the `lost_volume` ranges of
 `CatalogInfo.protected`; `image_start` adds the imaged range. `scan_start`
 checks its `session_path` against the new range plus the current catalog's
-lost volumes.
+lost volumes. With `start` or `end` (the range of a scan about to start;
+`start` defaults to 0, `end` to the size of the source, validated as in
+`scan_start`: `bad_request` when not sector-aligned, empty or beyond the
+source) that range is protected first, in addition to the ranges protected
+now: a client that creates the session file's folder before `scan_start`
+checks it this way, so that nothing is created inside the range the scan is
+about to protect (S2).
 
 ### recover_start
 

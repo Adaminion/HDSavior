@@ -29,11 +29,15 @@ enum EngineStatus {
 
 /// Starts the engine, checks its protocol version and notices when it dies.
 class EngineController extends ChangeNotifier {
-  EngineController(this._api) {
+  EngineController(this._api, {this.helloTimeout = const Duration(seconds: 15)}) {
     _exits = _api.client.exits.listen(_onExit);
   }
 
   final EngineApi _api;
+
+  /// How long a started engine may take to answer `hello`. An engine that
+  /// does not answer in time is ended and [status] becomes `failed`.
+  final Duration helloTimeout;
   late final StreamSubscription<EngineExit> _exits;
 
   EngineStatus _status = EngineStatus.stopped;
@@ -76,7 +80,13 @@ class EngineController extends ChangeNotifier {
       if (_api.client.state == EngineRunState.stopped) {
         await _api.client.start();
       }
-      final hello = await _api.hello();
+      final hello = await _api.hello().timeout(
+        helloTimeout,
+        onTimeout: () => throw EngineException.client(
+          EngineErrorCode.engineStartFailed,
+          'The engine was started but did not answer within ${helloTimeout.inSeconds} seconds.',
+        ),
+      );
       _hello = hello;
       _status = hello.protocol == supportedProtocolVersion
           ? EngineStatus.ready
@@ -118,7 +128,11 @@ class EngineController extends ChangeNotifier {
   void _onExit(EngineExit exit) {
     _hello = null;
     if (exit.expected) {
-      if (_status != EngineStatus.starting) _status = EngineStatus.stopped;
+      // An engine that failed to start is ended on purpose: the failure,
+      // with its reason and the restart button, stays on screen.
+      if (_status != EngineStatus.starting && _status != EngineStatus.failed) {
+        _status = EngineStatus.stopped;
+      }
     } else {
       _lastExit = exit;
       _status = EngineStatus.failed;

@@ -266,10 +266,32 @@ fn is_cancelled(cancel: &AtomicBool) -> bool {
     cancel.load(Ordering::Relaxed)
 }
 
+/// Win32 codes of the *device lost* class that a disk which is still
+/// present can also answer for a single bad sector: some USB-SATA bridges
+/// and UAS stacks complete a medium error as `STATUS_UNSUCCESSFUL`
+/// (`ERROR_GEN_FAILURE`), and `ERROR_NOT_READY`, `ERROR_BAD_UNIT` and
+/// `ERROR_ACCESS_DENIED` are seen the same way. They end the job only when
+/// [`BlockSource::is_alive`] fails; on a device that answers they count as
+/// media errors (and are proven again before a sector is recorded as bad).
+/// Codes that no present device gives (`ERROR_DEVICE_NOT_CONNECTED`,
+/// `ERROR_DEVICE_REMOVED`, `ERROR_INVALID_HANDLE`, ...) end it at once.
+pub fn windows_loss_needs_proof(code: i32) -> bool {
+    matches!(code, 31 | 21 | 20 | 5)
+}
+
+/// Whether `error`, of the *device lost* class, is one of the ambiguous
+/// codes of [`windows_loss_needs_proof`]. Only Windows reports them.
+fn loss_needs_proof(error: &io::Error) -> bool {
+    cfg!(windows) && error.raw_os_error().is_some_and(windows_loss_needs_proof)
+}
+
 /// Gives the error back when smaller reads may still succeed; turns it into
 /// a [`Stop`] when retrying is pointless.
-fn retryable(error: io::Error) -> Result<io::Error, Stop> {
+fn retryable(src: &dyn BlockSource, error: io::Error) -> Result<io::Error, Stop> {
     match classify_read_error(&error) {
+        // A code a present device may give for one bad sector: lost only if the
+        // device does not answer; otherwise worked around like a media error.
+        ReadFailure::DeviceLost if loss_needs_proof(&error) && src.is_alive() => Ok(error),
         ReadFailure::DeviceLost => Err(Stop::Lost(error)),
         ReadFailure::Caller => Err(Stop::Internal(error)),
         ReadFailure::Cancelled => Err(Stop::Cancelled),
@@ -332,7 +354,7 @@ pub fn read_resilient(
     }
     let first_error = match src.read_at(offset, buf) {
         Ok(()) => return ReadOutcome::Data { bad: Vec::new() },
-        Err(e) => match retryable(e) {
+        Err(e) => match retryable(src, e) {
             Ok(e) => e,
             Err(stop) => return stop.into(),
         },
@@ -407,7 +429,7 @@ fn read_block(
             }
             match src.read_at(pos, block) {
                 Ok(()) => return Ok(()),
-                Err(e) => retryable(e)?,
+                Err(e) => retryable(src, e)?,
             }
         }
     };
@@ -467,7 +489,7 @@ fn read_unit(
             }
         };
         attempts += 1;
-        let error = retryable(error)?;
+        let error = retryable(src, error)?;
         match classify_read_error(&error) {
             ReadFailure::Resource => {
                 // Even one sector cannot be transferred: not the medium's fault.

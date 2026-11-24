@@ -237,6 +237,10 @@ pub(crate) struct Resolved {
     /// The files the location's file system is stored in (Unix: a loop
     /// device's backing file, a file mounted through FUSE). Empty on Windows.
     pub(crate) backing_files: Vec<FileId>,
+    /// Set when the location's file system is stored in a file that cannot be
+    /// identified (Unix: a FUSE file system mounted from a file that has been
+    /// renamed or moved since); the text says why. `None` on Windows.
+    pub(crate) backing_unknown: Option<String>,
 }
 
 /// Why a path was turned down before its location mattered.
@@ -391,6 +395,15 @@ fn decide(
                      image. Choose a location elsewhere."
                         .to_string(),
                     Some(ProtectedReason::SourceImage),
+                )
+            } else if let Some(why) = &resolved.backing_unknown {
+                (
+                    Verdict::UnknownDisk,
+                    format!(
+                        "HDSavior cannot find out what this location is stored in ({why}). If it is the disk \
+                         image being rescued, writing there would change the image."
+                    ),
+                    None,
                 )
             } else {
                 (Verdict::Ok, String::new(), None)

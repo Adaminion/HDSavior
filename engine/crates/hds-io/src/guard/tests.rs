@@ -121,6 +121,7 @@ fn resolved(placement: Placement) -> Resolved {
         on_system_volume: false,
         leaf_id: None,
         backing_files: Vec::new(),
+        backing_unknown: None,
     }
 }
 
@@ -1092,6 +1093,143 @@ fn a_file_system_stored_in_the_source_image_is_refused() {
         assert_eq!(check.reason, Some(ProtectedReason::SourceImage));
         assert!(!check.is_allowed(true, true));
     }
+    // Beside the mount, the same directory is fine.
+    let check = destination_check(
+        &tmp.join("out"),
+        Purpose::Recover,
+        &source,
+        &protected,
+        None,
+    );
+    assert_eq!(check.verdict, Verdict::Ok, "{check:?}");
+}
+
+#[test]
+fn a_location_whose_backing_file_is_unknown_needs_consent_for_an_image_source() {
+    let id = FileId {
+        volume: 7,
+        index: 42,
+    };
+    let mut r = resolved(Placement::Unknown("?".to_string()));
+    r.backing_unknown = Some("mounted from /gone.img".to_string());
+    let (verdict, message, reason) = decide(
+        &r,
+        SourceLocation::File { id },
+        &[Protected::session(0..MIB)],
+        Purpose::Recover,
+    );
+    assert_eq!(verdict, Verdict::UnknownDisk);
+    assert!(message.contains("/gone.img"), "{message}");
+    assert_eq!(reason, None);
+    // A known backing file that is the source still overlaps; nothing overrides it.
+    r.backing_files.push(id);
+    assert_eq!(
+        decide(
+            &r,
+            SourceLocation::File { id },
+            &[Protected::session(0..MIB)],
+            Purpose::Recover
+        )
+        .0,
+        Verdict::OverlapsSource
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn mount_sources_and_vanished_fuse_sources_are_told_apart() {
+    use super::sys::{mount_sources, unresolved_fuse_source};
+    let table = "\
+36 35 0:52 / /mnt/a rw,relatime shared:1 - fuseblk /data/renamed\\040disk.img rw,user_id=0
+37 35 0:53 / /mnt/b rw - fuse.sshfs user@host:/srv rw
+38 35 8:1 / / rw - ext4 /dev/sda1 rw
+39 35 0:52 / /mnt/c rw - fuseblk /data/other.img rw
+";
+    let a = mount_sources(table, "0:52");
+    assert_eq!(
+        a,
+        vec![
+            (
+                "fuseblk".to_string(),
+                std::path::PathBuf::from("/data/renamed disk.img")
+            ),
+            (
+                "fuseblk".to_string(),
+                std::path::PathBuf::from("/data/other.img")
+            ),
+        ]
+    );
+    assert!(unresolved_fuse_source("fuseblk", Path::new("/data/gone.img")).is_some());
+    assert!(unresolved_fuse_source("fuse", Path::new("/data/gone.img")).is_some());
+    assert!(unresolved_fuse_source("fuse.ntfs-3g", Path::new("/x.img")).is_some());
+    // Not a path, or not FUSE: says nothing about local files.
+    let b = mount_sources(table, "0:53");
+    assert_eq!(b[0].0, "fuse.sshfs");
+    assert!(unresolved_fuse_source(&b[0].0, &b[0].1).is_none());
+    assert!(unresolved_fuse_source("fuse.portal", Path::new("portal")).is_none());
+    assert!(unresolved_fuse_source("ext4", Path::new("/dev/gone")).is_none());
+    assert!(mount_sources(table, "9:9").is_empty());
+}
+
+/// Makes an NTFS file system in `image` and mounts it at `mount` through
+/// ntfs-3g (FUSE); `None` when that is not possible.
+#[cfg(target_os = "linux")]
+fn ntfs3g_mount(image: &Path, mount: &Path) -> Option<()> {
+    let run = |cmd: &str, args: &[&std::ffi::OsStr]| {
+        std::process::Command::new(cmd)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()
+            .filter(|s| s.success())
+    };
+    std::fs::File::create(image).ok()?.set_len(16 << 20).ok()?;
+    run(
+        "mkntfs",
+        &[
+            "-q".as_ref(),
+            "-F".as_ref(),
+            "-f".as_ref(),
+            image.as_os_str(),
+        ],
+    )?;
+    run("ntfs-3g", &[image.as_os_str(), mount.as_os_str()])?;
+    Some(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fuse_mount_of_a_renamed_source_image_is_not_ok() {
+    let tmp = crate::test_util::TempDir::new("guard-fuse");
+    let image = tmp.join("disk.img");
+    let mount = tmp.join("mnt");
+    std::fs::create_dir_all(&mount).unwrap();
+    if ntfs3g_mount(&image, &mount).is_none() {
+        eprintln!("SKIPPED: cannot mount through ntfs-3g (needs mkntfs, ntfs-3g, /dev/fuse)");
+        return;
+    }
+    struct Unmount(std::path::PathBuf);
+    impl Drop for Unmount {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("umount").arg(&self.0).status();
+        }
+    }
+    let _unmount = Unmount(mount.clone());
+    let out = mount.join("out");
+    {
+        let source = ImageFile::open(&image, None).unwrap();
+        let protected = [Protected::session(0..source.size())];
+        let check = destination_check(&out, Purpose::Recover, &source, &protected, None);
+        assert_eq!(check.verdict, Verdict::OverlapsSource, "{check:?}");
+    }
+    let renamed = tmp.join("renamed.img");
+    std::fs::rename(&image, &renamed).unwrap();
+    let source = ImageFile::open(&renamed, None).unwrap();
+    let protected = [Protected::session(0..source.size())];
+    let check = destination_check(&out, Purpose::Recover, &source, &protected, None);
+    assert_eq!(check.verdict, Verdict::UnknownDisk, "{check:?}");
+    assert!(!check.is_allowed(true, false));
     // Beside the mount, the same directory is fine.
     let check = destination_check(
         &tmp.join("out"),

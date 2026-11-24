@@ -674,3 +674,106 @@ fn a_destination_that_fills_up_ends_the_job_with_only_whole_chunks() {
     let recorded = read_progress(&tmp.join("full.img.hdsimg")).confirmed;
     assert!(recorded <= written, "{recorded} > {written}");
 }
+
+#[test]
+fn a_record_left_only_under_its_staged_name_is_still_found() {
+    let tmp = TempDir::new("image-staged");
+    let source = disk(48 * MIB);
+    let cancel = Arc::new(AtomicBool::new(false));
+    source.cancel_after_reads(3, cancel.clone());
+    let dest = tmp.join("s.img");
+    let range = 0..48 * MIB;
+    let summary = image(
+        ranged(source.clone(), range.clone()),
+        &dest,
+        &options(false),
+        &mut (),
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(summary.status, JobStatus::Cancelled);
+    let confirmed = read_progress(&tmp.join("s.img.hdsimg")).confirmed;
+    assert!(confirmed > 0);
+    // Nothing is left under the staged name after a rewrite.
+    assert!(!tmp.join("s.img.hdsimg.new").exists());
+    // A stop between removing the old record and renaming the new one: the
+    // only copy is the staged one. A leftover part file is deleted at the
+    // start; the staged record is not.
+    std::fs::rename(tmp.join("s.img.hdsimg"), tmp.join("s.img.hdsimg.new")).unwrap();
+    std::fs::write(tmp.join("~hds-7.part"), b"leftover").unwrap();
+    cancel.store(false, Ordering::SeqCst);
+    let job =
+        ImageJob::prepare(ranged(source.clone(), range.clone()), &dest, &options(true)).unwrap();
+    assert_eq!(job.bytes_confirmed(), confirmed);
+    assert!(!tmp.join("~hds-7.part").exists());
+    let summary = job.run(&mut (), &AtomicBool::new(false));
+    assert_eq!(
+        summary.status,
+        JobStatus::Completed,
+        "{:?}",
+        summary.message
+    );
+    assert_eq!(read_progress(&tmp.join("s.img.hdsimg")).confirmed, 48 * MIB);
+    assert!(!tmp.join("s.img.hdsimg.new").exists());
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        expected_image(48 * MIB, range, &[])
+    );
+
+    // A fresh image refuses a staged record in the way, as it refuses the record.
+    let other = tmp.join("t.img");
+    std::fs::write(tmp.join("t.img.hdsimg.new"), b"stale").unwrap();
+    match ImageJob::prepare(ranged(disk(MIB), 0..MIB), &other, &options(false)) {
+        Err(ImageStartError::Exists(path)) => assert!(path.ends_with("t.img.hdsimg.new")),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_resume_counts_the_space_of_the_unconfirmed_tail_as_free() {
+    let Some(base) = std::env::var_os("HDS_RECOVER_NOSPACE_DIR") else {
+        eprintln!("SKIPPED: set HDS_RECOVER_NOSPACE_DIR to a directory on a small file system (about 1 MiB)");
+        return;
+    };
+    let tmp = TempDir::below(Path::new(&base), "image-tail");
+    let Ok(free) = OutDir::open_root(tmp.path()).unwrap().free_space() else {
+        eprintln!("SKIPPED: the file system at HDS_RECOVER_NOSPACE_DIR does not report its free space here");
+        return;
+    };
+    assert!(
+        free < 64 * MIB,
+        "HDS_RECOVER_NOSPACE_DIR is not small: {free} bytes free"
+    );
+    // An image of 60 % of the free space, complete; then its record is set
+    // back to "nothing confirmed", as after a kill before the first checkpoint.
+    let total = (free / 10 * 6) / 65_536 * 65_536;
+    let dest = tmp.join("tail.img");
+    let source = disk(total);
+    let summary = image(
+        ranged(source.clone(), 0..total),
+        &dest,
+        &options(false),
+        &mut (),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(summary.status, JobStatus::Completed);
+    let mut record = read_progress(&tmp.join("tail.img.hdsimg"));
+    record.confirmed = 0;
+    record.samples.clear();
+    std::fs::write(tmp.join("tail.img.hdsimg"), record.to_text()).unwrap();
+    let left = OutDir::open_root(tmp.path()).unwrap().free_space().unwrap();
+    assert!(
+        left < total,
+        "the tail must be what makes the difference: {left} >= {total}"
+    );
+    let job = ImageJob::prepare(ranged(source, 0..total), &dest, &options(true)).unwrap();
+    assert_eq!(job.bytes_confirmed(), 0);
+    let summary = job.run(&mut (), &AtomicBool::new(false));
+    assert_eq!(
+        summary.status,
+        JobStatus::Completed,
+        "{:?}",
+        summary.message
+    );
+}

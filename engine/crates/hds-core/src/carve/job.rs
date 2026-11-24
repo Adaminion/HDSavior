@@ -324,14 +324,20 @@ impl Carver {
             }
             let offset = hit.disk_offset();
             if offset < carved_until {
-                // I2 (c): inside a file this run carved
+                // I2 (c): inside a file this run carved with a verified end
                 summary.inside_carved = summary.inside_carved.saturating_add(1);
                 summary.candidates_done = summary.candidates_done.saturating_add(1);
                 continue;
             }
             match self.measure(source, hit.kind(), offset, cancel) {
                 Outcome::File(file) => {
-                    carved_until = file.end();
+                    // Only a file whose end its structure verified bounds
+                    // what follows: a length taken from a header or guessed
+                    // may run over foreign clusters (a fragmented file), and
+                    // a file starting there must still be measured (I2 c).
+                    if file.end_verified() {
+                        carved_until = carved_until.max(file.end());
+                    }
                     summary.found = summary.found.saturating_add(1);
                     summary.bytes_found = summary.bytes_found.saturating_add(file.len());
                     observer.found(&file);

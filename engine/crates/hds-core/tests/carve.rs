@@ -364,6 +364,49 @@ fn a_file_inside_a_carved_file_is_not_carved_again_in_the_same_run() {
 }
 
 #[test]
+fn a_file_with_an_unverified_end_does_not_swallow_the_files_after_it() {
+    // A fragmented faststart MP4: its first cluster at cluster 10, the rest
+    // at cluster 30. A lost JPEG sits at cluster 11, inside the length the
+    // MP4's header states.
+    let g = geometry(4096, 0);
+    let mp4 = sample("mp4_ffmpeg_faststart.mp4");
+    let jpg = sample("jpeg_baseline.jpg");
+    assert!(mp4.data.len() > 4096 && jpg.data.len() < 19 * 4096);
+    let mut disk = Disk::new(4 * MIB as usize);
+    disk.put(10 * 4096, &mp4.data[..4096]);
+    disk.put(11 * 4096, &jpg.data);
+    disk.put(30 * 4096, &mp4.data[4096..]);
+    let source = disk.source();
+    let session = scan_source(&source, 0..source.size());
+    let (run, summary) = carve(
+        &source,
+        &session,
+        input(&session, KindSet::all(), g, none(), none(), none()),
+    );
+    let found: Vec<(u64, &str, bool)> = run
+        .files
+        .iter()
+        .map(|f| (f.offset(), f.ext(), f.end_verified()))
+        .collect();
+    let video = found
+        .iter()
+        .find(|f| f.0 == 10 * 4096)
+        .unwrap_or_else(|| panic!("{found:?}"));
+    assert!(
+        !video.2,
+        "the fragmented video's end is not verified: {found:?}"
+    );
+    let photo = run
+        .files
+        .iter()
+        .find(|f| f.offset() == 11 * 4096)
+        .unwrap_or_else(|| panic!("the photo inside the video's span is carved: {found:?}"));
+    assert!(photo.end_verified());
+    assert_eq!(photo.len(), jpg.data.len() as u64);
+    assert_eq!(summary.inside_carved, 0);
+}
+
+#[test]
 fn fragmented_files_are_never_good() {
     // Each sample of more than one cluster is cut after its first cluster
     // (or after its first half): the first part lies on the grid, the rest

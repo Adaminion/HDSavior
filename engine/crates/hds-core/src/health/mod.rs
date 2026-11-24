@@ -87,7 +87,8 @@ pub struct Health {
     /// Per node: [`child_bits`].
     pub(crate) child_dirs: Vec<u8>,
     /// Absolute byte ranges of the data of every file of the
-    /// non-embedded instances: (start, end, node), sorted.
+    /// non-embedded instances, clipped to the bytes the reader returns
+    /// (below min(initialized, real), G1): (start, end, node), sorted.
     pub(crate) extents: Vec<(u64, u64, u32)>,
     /// Running maximum of the ends of [`Health::extents`].
     pub(crate) max_end: Vec<u64>,
@@ -212,17 +213,47 @@ impl Health {
             f = f.union(merged_flags(&m));
             let mut outside = false;
             let mut first = true;
+            // Only the bytes the reader returns count: below
+            // min(initialized, real). Clusters past the real size and bytes at
+            // or after the valid data length are never read (H7), so damage
+            // there does not touch the file.
+            let valid_end = m.initialized.min(m.size);
             for r in &m.runs {
                 let Some(lcn) = r.lcn else {
                     first = false;
                     continue;
                 };
+                let file_start = r.vcn.saturating_mul(cs);
+                let valid_in_run = valid_end.saturating_sub(file_start);
+                let used = if cs == 0 {
+                    r.len
+                } else {
+                    valid_in_run.div_ceil(cs).min(r.len)
+                };
+                if used == 0 {
+                    // Nothing of this run is ever read; its first byte still
+                    // names where the file began (I4) and what its head is.
+                    if first && r.vcn == 0 {
+                        if let Some(bytes) = run_bytes(Some(lcn), r.len, cs, vo) {
+                            if node.deleted() && ci.kind != InstanceKind::Embedded {
+                                h.deleted_first.push((bytes.start, id));
+                            }
+                        }
+                    }
+                    first = false;
+                    continue;
+                }
                 let beyond = g.total_clusters > 0
-                    && lcn.checked_add(r.len).is_none_or(|e| e > g.total_clusters);
-                let Some(bytes) = run_bytes(Some(lcn), r.len, cs, vo) else {
+                    && lcn.checked_add(used).is_none_or(|e| e > g.total_clusters);
+                let Some(bytes) = run_bytes(Some(lcn), used, cs, vo) else {
                     f.insert(Flag::OutOfBounds);
                     outside = true;
                     continue;
+                };
+                let bytes = if cs == 0 {
+                    bytes
+                } else {
+                    bytes.start..bytes.end.min(bytes.start.saturating_add(valid_in_run))
                 };
                 if beyond {
                     f.insert(Flag::OutOfBounds);
@@ -666,6 +697,22 @@ pub(crate) fn rehealth_carved(
     sec
 }
 
+/// Whether `ranges` (sorted by start) together cover every byte of
+/// `target`; touching ranges join.
+fn covers(ranges: impl Iterator<Item = Range<u64>>, target: &Range<u64>) -> bool {
+    let mut reached = target.start;
+    for r in ranges {
+        if r.start > reached {
+            break;
+        }
+        reached = reached.max(r.end);
+        if reached >= target.end {
+            return true;
+        }
+    }
+    reached >= target.end
+}
+
 fn carved_health(
     sec: &mut CarvedSection,
     _tree: &Tree,
@@ -696,19 +743,39 @@ fn carved_health(
         if let Some(slot) = sec.size.get_mut(i) {
             *slot = e.len;
         }
-        // I4: a carved file inside a deleted file's extents makes that
-        // file overwritten, unless it is that file's own content: it
-        // starts at the file's first data byte (the run at VCN 0). A
-        // carved file at the start of a later fragment is another file.
-        for k in health.extents_in(range.start, range.end) {
-            let Some(&(_, _, node)) = health.extents.get(k) else {
+        // I4: a carved file that lies inside a deleted file's extents
+        // (every byte of it) makes that file overwritten, unless it is that
+        // file's own content: it starts at the file's first data byte (the
+        // run at VCN 0) and is no longer than its real size. A carved file
+        // that only runs into a deleted file (a length from a header, over
+        // foreign clusters) says nothing about it; one at the start of a
+        // later fragment is another file.
+        let mut touching: Vec<(u32, u64, u64)> = health
+            .extents_in(range.start, range.end)
+            .filter_map(|k| health.extents.get(k))
+            .filter(|&&(_, _, node)| {
+                health
+                    .flags
+                    .get(usize::try_from(node).unwrap_or(usize::MAX))
+                    .is_some_and(|&b| b & Flag::Deleted.bit() != 0)
+            })
+            .map(|&(a, b, node)| (node, a, b))
+            .collect();
+        touching.sort_unstable();
+        for group in touching.chunk_by(|x, y| x.0 == y.0) {
+            let Some(&(node, _, _)) = group.first() else {
                 continue;
             };
-            let deleted = health
-                .flags
+            if !covers(group.iter().map(|&(_, a, b)| a..b), &range) {
+                continue;
+            }
+            let size = health
+                .size
                 .get(usize::try_from(node).unwrap_or(usize::MAX))
-                .is_some_and(|&b| b & Flag::Deleted.bit() != 0);
-            if deleted && !health.is_deleted_first_byte(range.start, node) {
+                .copied()
+                .unwrap_or(0);
+            let own_content = health.is_deleted_first_byte(range.start, node) && e.len <= size;
+            if !own_content {
                 overwrites.push(node);
             }
         }

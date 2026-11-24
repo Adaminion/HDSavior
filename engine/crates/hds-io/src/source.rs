@@ -430,6 +430,13 @@ pub fn open_source(
     }
 }
 
+/// True when `path` is a name a disk source may have: exactly
+/// `\\.\PhysicalDrive<N>` (the word in any case, `N` decimal without sign or
+/// padding). Says nothing about whether such a disk exists.
+pub fn is_disk_source_name(path: &str) -> bool {
+    crate::winpath::parse_physical_drive(path).is_some()
+}
+
 #[cfg(windows)]
 fn open_disk(path: &Path) -> io::Result<Arc<dyn BlockSource>> {
     let text = path.to_str().ok_or_else(|| {

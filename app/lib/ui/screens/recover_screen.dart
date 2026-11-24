@@ -283,7 +283,7 @@ class _StartBar extends StatelessWidget {
     if (app.selection.isEmpty) return S.recoverWhyNothing;
     final summary = recover.summary;
     if (summary == null) return S.selectionCounting;
-    if (summary.files == 0 && summary.dirs == 0) return S.recoverWhyNoFiles;
+    if (summary.files == 0) return S.recoverWhyNoFiles;
     final check = recover.destinationCheck;
     if (recover.checkedDestination == null) return S.recoverWhyNoDestination;
     if (check == null) return S.recoverWhyChecking;

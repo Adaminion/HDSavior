@@ -189,14 +189,31 @@ pub(crate) fn is_volume_guid_device(path: &[u16]) -> bool {
     path.len() == VOLUME_DEVICE_UNITS && volume_device_prefix(path).is_some()
 }
 
+/// Server names of redirectors that serve files of this machine although the
+/// path looks like a network share: the WSL file servers (`\\wsl$\<distro>`,
+/// `\\wsl.localhost\<distro>`). A distribution's files live in a virtual disk
+/// on a local volume, and its `/mnt/<x>` is the local volume `X:` itself.
+const LOCAL_REDIRECTOR_SERVERS: [&str; 2] = ["wsl$", "wsl.localhost"];
+
 /// True when a UNC server name can only mean this machine: `localhost`, a
 /// loopback or unspecified IP address (dotted IPv4, bracketed IPv6 or the
-/// `ipv6-literal.net` transcription Windows uses in UNC paths), or one of
-/// `own_names` (the computer's NetBIOS and DNS names), compared without
-/// regard to ASCII case and to a trailing dot.
+/// `ipv6-literal.net` transcription Windows uses in UNC paths), one of
+/// `own_names` (the computer's NetBIOS and DNS names), or a WSL server name
+/// (`wsl$`, `wsl.localhost`), compared without regard to ASCII case and to a
+/// trailing dot. A WebDAV suffix (`@SSL`, `@8080`, `@SSL@8080`) is ignored:
+/// `\\localhost@8080\share` is this machine as much as `\\localhost\share`.
 pub(crate) fn is_local_server(server: &str, own_names: &[String]) -> bool {
-    let name = server.strip_suffix('.').unwrap_or(server);
+    // No host name contains `@`; everything from the first one on is the
+    // WebDAV redirector's port and transport.
+    let host = server.split('@').next().unwrap_or(server);
+    let name = host.strip_suffix('.').unwrap_or(host);
     if name.is_empty() || name.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if LOCAL_REDIRECTOR_SERVERS
+        .iter()
+        .any(|local| name.eq_ignore_ascii_case(local))
+    {
         return true;
     }
     if let Ok(v4) = name.parse::<Ipv4Addr>() {
@@ -430,6 +447,20 @@ mod tests {
             "Workstation.Corp.Example",
             "workstation.corp.example.",
             "",
+            // WSL file servers: the files are on local volumes.
+            "wsl$",
+            "WSL$",
+            "wsl.localhost",
+            "WSL.LOCALHOST.",
+            // WebDAV forms of local names.
+            "localhost@8080",
+            "localhost@SSL",
+            "LOCALHOST@SSL@8443",
+            "127.0.0.1@SSL",
+            "127.0.0.1@8080",
+            "workstation@SSL@443",
+            "[::1]@8080",
+            "wsl.localhost@SSL",
         ] {
             assert!(is_local_server(local, &own), "{local:?} is this machine");
         }
@@ -443,6 +474,12 @@ mod tests {
             "2001-db8--1.ipv6-literal.net",
             "[2001:db8::1]",
             "fe80--1s4.ipv6-literal.net",
+            "nas@SSL",
+            "nas@8080",
+            "192.168.1.20@SSL@8443",
+            "wsl",
+            "wsl.example",
+            "tsclient",
         ] {
             assert!(
                 !is_local_server(remote, &own),

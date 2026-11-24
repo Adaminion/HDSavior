@@ -238,6 +238,35 @@ void main() {
     await closeApp(tester, fake);
   });
 
+  testWidgets('opening an image over unsaved results asks first, like the other ways to another source', (
+    tester,
+  ) async {
+    final fake = await pumpApp(tester);
+    await fake.scan(); // without a session file
+    expect(fake.app.source.sessionPath, isNull);
+    fake.app.screen.value = AppScreen.source;
+    await settle(tester);
+    final opens = fake.commands.where((c) => c == 'open_source').length;
+    fake.pickers.answers.add(r'D:\images\other.img');
+    await tester.tap(find.text(S.openImage).first);
+    await settle(tester);
+    expect(find.text(S.closeSourceTitle), findsOneWidget);
+    expect(find.text(S.closeSourceBodyUnsaved), findsOneWidget);
+    await tester.tap(find.text(S.cancel));
+    await settle(tester);
+    expect(fake.pickers.requests, isEmpty, reason: 'nothing is picked before the user agrees');
+    expect(fake.commands.where((c) => c == 'open_source'), hasLength(opens));
+    expect(fake.app.catalog.hasCatalog, isTrue, reason: 'the scan is kept');
+
+    await tester.tap(find.text(S.openImage).first);
+    await settle(tester);
+    await tester.tap(find.text(S.closeSourceConfirm));
+    await settle(tester);
+    expect(fake.commands.where((c) => c == 'open_source'), hasLength(opens + 1));
+    expect(fake.lastArgs('open_source')['path'], r'D:\images\other.img');
+    await closeApp(tester, fake);
+  });
+
   testWidgets('a saved scan opens on the Results screen', (tester) async {
     final fake = await pumpApp(tester);
     fake.pickers.answers.add(r'D:\scans\disk1.hdsc');

@@ -572,6 +572,18 @@ fn session_load_and_attach() {
         NotFound
     );
     assert_eq!(s.h.code("session_load", json!({"path": ""})), BadRequest);
+    // A disk source that is not named \\.\PhysicalDrive<N> is a bad request
+    // (PROTOCOL error table), not a source that was not found.
+    for bad in ["/dev/null", "D:", r"\\.\PhysicalDrive01", r"\\.\C:"] {
+        assert_eq!(
+            s.h.code(
+                "session_load",
+                json!({"path": s.dir.join("a.hds"), "source": {"kind": "disk", "path": bad}})
+            ),
+            BadRequest,
+            "{bad}"
+        );
+    }
     // Without a source: browse only (B).
     let loaded = s.h.ok("session_load", json!({"path": s.dir.join("a.hds")}));
     assert_eq!(loaded["source_attached"], false);
@@ -797,6 +809,30 @@ fn check_destination_results() {
         s.h.code("check_destination", json!({"purpose": "recover"})),
         BadRequest
     );
+    // The range of a scan about to start: protected on top of the current
+    // ranges, validated like scan_start's.
+    let ranged = s.h.ok(
+        "check_destination",
+        json!({"path": s.dir.join("dest"), "purpose": "session", "start": 0}),
+    );
+    assert_eq!(ranged["verdict"], "ok");
+    let ranged = s.h.ok(
+        "check_destination",
+        json!({"path": s.image, "purpose": "session", "start": 0, "end": 512}),
+    );
+    assert_eq!(ranged["verdict"], "overlaps_source");
+    for bad in [
+        json!({"start": 1}),
+        json!({"start": 0, "end": 513}),
+        json!({"end": u64::MAX - 511}),
+        json!({"start": 512, "end": 512}),
+    ] {
+        let mut args = json!({"path": s.dir.join("dest"), "purpose": "session"});
+        for (k, v) in bad.as_object().unwrap() {
+            args[k] = v.clone();
+        }
+        assert_eq!(s.h.code("check_destination", args), BadRequest, "{bad}");
+    }
 }
 
 #[test]

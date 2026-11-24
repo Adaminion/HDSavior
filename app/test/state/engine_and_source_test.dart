@@ -47,6 +47,40 @@ void main() {
       expect(app().source.disks, hasLength(7));
     });
 
+    test('a hello that cannot be read: failed, and the failure stays after the engine is ended', () async {
+      final transport = ScriptedTransport();
+      final scripted = AppController(transport: transport, platform: InertPlatformServices());
+      addTearDown(scripted.dispose);
+      final started = scripted.engine.start();
+      await pumpEventQueue();
+      final connection = transport.connection;
+      expect(connection.lastRequest['cmd'], 'hello');
+      // An engine of another build: its hello lacks members.
+      connection.respond(connection.lastId, {'engine_version': '0.1.0'});
+      await started;
+      await pumpEventQueue();
+      expect(connection.killed, isTrue, reason: 'an engine that cannot say hello is of no use');
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(scripted.engine.status, EngineStatus.failed, reason: 'not the endless "Starting…"');
+      expect(scripted.engine.error, isNotNull);
+    });
+
+    test('an engine that never answers hello: failed after the timeout', () async {
+      final transport = ScriptedTransport();
+      final scripted = AppController(
+        transport: transport,
+        platform: InertPlatformServices(),
+        helloTimeout: const Duration(milliseconds: 50),
+      );
+      addTearDown(scripted.dispose);
+      await scripted.engine.start();
+      await pumpEventQueue();
+      expect(transport.connection.killed, isTrue);
+      expect(scripted.engine.status, EngineStatus.failed);
+      expect(scripted.engine.error!.kind, EngineErrorCode.engineStartFailed);
+      expect(scripted.engine.error!.message, contains('did not answer'));
+    });
+
     test('an engine with another protocol version is not used', () async {
       fake = FakeApp(protocol: 2);
       await fake.start();
@@ -489,7 +523,7 @@ void main() {
       final plan = await app().source.prepareSessionFile(now: DateTime(2026, 11, 24, 3, 15, 0));
       expect(plan.check.isOk, isTrue);
       expect(plan.fileName, 'WDC WD40EZRZ-00GXCB0 WD-WCC7K0000000 at 0 2026-11-24 031500.hdsc');
-      expect(fake.lastArgs('check_destination'), {'path': plan.path, 'purpose': 'session'});
+      expect(fake.lastArgs('check_destination'), {'path': plan.path, 'purpose': 'session', 'start': 0});
       expect(fake.platform.createdDirectories, [fake.platform.defaultSessionDirectory]);
     });
 
@@ -503,7 +537,31 @@ void main() {
       expect(plan.path, '$directory/WDC WD40EZRZ-00GXCB0 WD-WCC7K0000000 at 0 2026-11-24 031500.hdsc');
       expect(plan.path, isNot(contains(r'\')));
       expect(plan.fileName, 'WDC WD40EZRZ-00GXCB0 WD-WCC7K0000000 at 0 2026-11-24 031500.hdsc');
-      expect(fake.lastArgs('check_destination'), {'path': plan.path, 'purpose': 'session'});
+      expect(fake.lastArgs('check_destination'), {'path': plan.path, 'purpose': 'session', 'start': 0});
+    });
+
+    test('prepareSessionFile protects the new scan range, not only the current session range', () async {
+      // The system disk: its first partition was scanned, with the session elsewhere.
+      await app().source.openDisk(app().source.disks![0]);
+      final efi = app().source.current!.partitions.first;
+      await fake.run(() => app().scan.start(range: efi.range, sessionPath: r'D:\sessions\efi.hdsc'));
+      await fake.finishJob();
+      expect(app().catalog.hasCatalog, isTrue);
+      fake.platform.createdDirectories.clear();
+
+      // Now the whole disk: the usual place on C: lies inside the new range.
+      final plan = await app().source.prepareSessionFile();
+      final args = fake.lastArgs('check_destination');
+      expect(args['start'], 0);
+      expect(args.containsKey('end'), isFalse, reason: 'the whole source');
+      expect(plan.check.verdict, DestinationVerdict.overlapsSource);
+      expect(fake.platform.createdDirectories, isEmpty, reason: 'nothing is created inside the new range');
+
+      // A partial scan names its range.
+      final partition = app().source.current!.partitions.last;
+      await app().source.prepareSessionFile(range: partition.range);
+      expect(fake.lastArgs('check_destination')['start'], partition.offset);
+      expect(fake.lastArgs('check_destination')['end'], partition.end);
     });
 
     test('prepareSessionFile creates nothing when the guard refuses', () async {
@@ -617,6 +675,22 @@ void main() {
         ),
       );
       expect(app().source.sessionPath, r'D:\backup\copy.hdsc');
+    });
+
+    test('a successful save clears the warning about the session file on screen', () async {
+      await fake.openDisk();
+      final partition = app().source.current!.partitions.single;
+      // Inside the lost volume, which nobody knew before the scan.
+      await fake.run(
+        () => app().scan.start(range: partition.range, sessionPath: r'L:\scans\s.hdsc', allowSameDisk: true),
+      );
+      await fake.finishJob();
+      List<String> codes() => [for (final w in app().catalog.info!.warnings) w.code];
+      expect(codes(), contains('session_file_at_risk'));
+      final epoch = app().catalog.info!.epoch;
+      await app().source.saveSession(r'D:\backup\copy.hdsc');
+      expect(codes(), isNot(contains('session_file_at_risk')));
+      expect(app().catalog.info!.epoch, epoch, reason: 'the same catalog, its warnings up to date');
     });
   });
 }

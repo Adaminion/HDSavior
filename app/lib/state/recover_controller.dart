@@ -297,7 +297,8 @@ class RecoverController
         _catalog.hasCatalog &&
         _catalog.sourceAttached &&
         summary != null &&
-        (summary.files > 0 || summary.dirs > 0) &&
+        // Folders without a file are refused by the engine (`bad_request`).
+        summary.files > 0 &&
         check != null &&
         allows(check) &&
         check.enoughSpace != false;

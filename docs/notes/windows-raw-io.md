@@ -757,6 +757,13 @@ pub fn classify_read_error(code: Option<i32>) -> ReadFailure {
 }
 ```
 
+`31`, `21`, `20` and `5` are *device lost* only when the device does not answer: some USB-SATA
+bridges and UAS stacks complete a single medium error as `STATUS_UNSUCCESSFUL` (`31`) on a disk
+that is still present, and a job that ended on it would stop at the same chunk on every resume.
+The engine asks the device first (`BlockSource::is_alive`, below) and treats the error like a
+media error when it answers (`hds_io::windows_loss_needs_proof`). The other codes of the class
+cannot come from a present device and end the job at once.
+
 Because 1117 and 121 also appear while a device is dropping off the bus, confirm that the device
 is alive before recording a bad range: `IOCTL_STORAGE_CHECK_VERIFY2`, `IOCTL_DISK_GET_LENGTH_INFO`
 returning the known size, and a re-read of a sector that was read successfully earlier. If that

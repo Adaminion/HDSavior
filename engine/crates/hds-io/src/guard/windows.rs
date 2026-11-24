@@ -13,8 +13,8 @@ use super::{Extent, Placement, Purpose, Refusal, Resolved};
 use crate::source::FileId;
 use crate::win::device::{open_device, Access};
 use crate::win::volumes::{
-    computer_names, final_path, free_space, local_volume_serials, open_for_query,
-    system_volume_device, volume_info_by_handle, FILE_READ_ONLY_VOLUME,
+    computer_names, final_path, free_space, local_volume_serials, open_for_query, remote_protocol,
+    system_volume_device, volume_info_by_handle, FILE_READ_ONLY_VOLUME, WNNC_NET_SMB,
 };
 use crate::win::{full_path, handle_info, wide_units};
 use crate::winpath::{self, WinPath};
@@ -155,7 +155,18 @@ fn placement_without_volume(handle: &File, volume_serial: u32) -> Placement {
             "the share on \\\\{server} appears to be a volume of this computer"
         ));
     }
-    Placement::Network
+    // Only an SMB share is taken to be on another machine. Other redirectors
+    // (the 9P server of WSL, WebDAV, the shares of local virtual machines'
+    // integration services) can serve files that live on a local disk.
+    match remote_protocol(handle) {
+        Ok(WNNC_NET_SMB) => Placement::Network,
+        Ok(_) => Placement::Unknown(format!(
+            "the path on \\\\{server} is not an SMB share and may be stored on a disk of this computer"
+        )),
+        Err(e) => Placement::Unknown(format!(
+            "the kind of network share on \\\\{server} cannot be determined: {e}"
+        )),
+    }
 }
 
 pub(super) fn resolve(path: &Path, purpose: Purpose) -> Result<Resolved, Refusal> {
@@ -247,5 +258,6 @@ pub(super) fn resolve(path: &Path, purpose: Purpose) -> Result<Resolved, Refusal
         // An image attached as a virtual disk is opened with share mode
         // read only, which conflicts with any read-write attach.
         backing_files: Vec::new(),
+        backing_unknown: None,
     })
 }
