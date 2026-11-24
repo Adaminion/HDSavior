@@ -13,6 +13,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The toolchain the code is developed and linted with; newer clippy versions
+  # add lints, so the bump is a deliberate change.
+  RUST_TOOLCHAIN: 1.97.0
   # Crates that are finished; the others join as they are completed.
   CRATES: -p hds-ntfs -p hds-io -p hds-carve
 
@@ -22,15 +25,22 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install fixture tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ntfs-3g fuse3 fdisk ffmpeg python3-pil
+          # man-db triggers take minutes on hosted runners and are not needed.
+          sudo rm -f /var/lib/man-db/auto-update
+          pkgs="ntfs-3g fdisk python3-pil"
+          command -v ffmpeg >/dev/null || pkgs="$pkgs ffmpeg"
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends $pkgs
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
@@ -74,10 +84,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -108,9 +119,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -149,3 +162,26 @@ jobs:
           name: hdsavior-windows-preview
           path: app/build/windows/x64/runner/Release
           retention-days: 7
+
+  windows-facts:
+    name: Windows quick-format facts (informational)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Measure what a quick format leaves behind
+        shell: pwsh
+        run: scripts/windows/format-facts.ps1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: format-facts
+          path: ${{ runner.temp }}/format-facts
+          retention-days: 30
