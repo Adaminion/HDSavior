@@ -60,6 +60,20 @@ public static class HdsFileId {
             return ((ulong)i.IndexHigh << 32) | i.IndexLow;
         }
     }
+    [StructLayout(LayoutKind.Sequential)]
+    struct BasicInfo { public long Created, Accessed, Written, Changed; public uint Attributes; }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandleEx(SafeFileHandle h, int cls, out BasicInfo info, uint size);
+    // Created, accessed, written and MFT-changed time (FILETIME, UTC) as the system reports them.
+    public static long[] Times(string path) {
+        using (var h = CreateFileW(path, 0x80, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero)) {
+            if (h.IsInvalid) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), path);
+            BasicInfo b;
+            if (!GetFileInformationByHandleEx(h, 0, out b, (uint)Marshal.SizeOf(typeof(BasicInfo))))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), path);
+            return new long[] { b.Created, b.Accessed, b.Written, b.Changed };
+        }
+    }
 }
 '@
 
@@ -187,14 +201,15 @@ try {
     # A folder large enough for INDX blocks.
     New-Item -ItemType Directory -Path 'T:\B_Documents\Inbox' | Out-Null
     foreach ($i in 1..600) { Write-TestFile ("T:\B_Documents\Inbox\message-{0:D4}.eml" -f $i) 700 $seed; $seed++ }
-    # A file with thousands of runs: sparse, every other cluster written.
+    # A file with well over a thousand runs: sparse files allocate in 64 KiB units, so one
+    # 4 KiB block every 128 KiB leaves a hole between every two allocated units.
     $many = 'T:\D_Projects\many-runs.bin'
     New-Item -ItemType File -Path $many | Out-Null
     fsutil sparse setflag $many | Out-Null
     $fs = [IO.File]::Open($many, 'Open', 'Write')
     $chunk = New-Object byte[] 4096
     (New-Object System.Random 4242).NextBytes($chunk)
-    for ($i = 0; $i -lt 3000; $i++) { $fs.Position = [int64]$i * 8192; $fs.Write($chunk, 0, 4096) }
+    for ($i = 0; $i -lt 1500; $i++) { $fs.Position = [int64]$i * 131072; $fs.Write($chunk, 0, 4096) }
     $fs.Flush($true); $fs.Close()
     $phaseOf[$many] = 'many_runs'
     # A large contiguous file.
@@ -218,7 +233,7 @@ try {
         }
     }
     $sourceTimes = @{}
-    Get-ChildItem U:\ -Recurse -File | ForEach-Object { $sourceTimes[$_.Name + '|' + $_.Directory.Name] = @($_.CreationTimeUtc.ToFileTimeUtc(), $_.LastWriteTimeUtc.ToFileTimeUtc()) }
+    Get-ChildItem U:\ -Recurse -File | ForEach-Object { $sourceTimes[$_.Name + '|' + $_.Directory.Name] = [HdsFileId]::Times($_.FullName) }
     $copyStarted = Now-FileTime
     robocopy U:\src-robo T:\Robo /E /COPY:DAT /DCOPY:DAT /NJH /NJS /NP | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "robocopy failed: $LASTEXITCODE" }
@@ -238,7 +253,13 @@ try {
         if ($e.phase -in @('robocopy', 'moved', 'copyitem')) {
             $key = $_.Name + '|' + @{ 'Robo' = 'src-robo'; 'Moved' = 'src-move'; 'Copied' = 'src-copy' }[$_.Directory.Name]
             $e['copy_started'] = $copyStarted
-            if ($sourceTimes.ContainsKey($key)) { $e['source_created'] = $sourceTimes[$key][0]; $e['source_modified'] = $sourceTimes[$key][1] }
+            if ($sourceTimes.ContainsKey($key)) {
+                $st = $sourceTimes[$key]
+                $e['source_created'] = $st[0]; $e['source_modified'] = $st[2]; $e['source_mft_changed'] = $st[3]
+            }
+            # The copy's own times as the system reports them (the raw $SI may not be flushed yet).
+            $ct = [HdsFileId]::Times($_.FullName)
+            $e['os_times'] = @{ created = $ct[0]; accessed = $ct[1]; modified = $ct[2]; mft_changed = $ct[3] }
         }
         $entries.Add($e)
     }
@@ -284,4 +305,4 @@ finally {
 
 $facts | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $Out 'facts.json') -Encoding utf8
 Write-Host '== summary'
-Write-Host ($facts | ConvertTo-Json -Depth 4)
+Write-Host ($facts | ConvertTo-Json -Depth 10)

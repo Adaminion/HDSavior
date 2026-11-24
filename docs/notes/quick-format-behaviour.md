@@ -246,9 +246,19 @@ volume was quick-formatted, the raw disk was searched for the marker afterwards.
 on a dynamic VHDX, with `DisableDeleteNotify` 0 and 1, all 256 marker blocks survived in all four
 cases, although `fsutil` reports trim limits for these volumes. This shows only that Windows' quick
 format did not discard data on these virtual disks; it says nothing about a physical SSD, where the
-summary's TRIM row stands. Not yet measured: per-file survival and timestamps after robocopy /
-Move-Item / Copy-Item (the first run read file ids wrongly; fixed), the attribute list of a file
-with thousands of runs.
+summary's TRIM row stands. Per file (second run, file ids fixed): every one of the 606 intact old files that
+were checked had byte-identical content through its old runlist after the format; the 10 deleted
+files' slots (471–480) were taken at once by the next 10 files created, so a deleted file's record is
+normally gone as soon as anything new is written. Copies from another volume: robocopy `/COPY:DAT`
+keeps creation and modified time, Copy-Item and Move-Item (copy + delete across volumes) keep only the
+modified time. **Open and important for ALGORITHMS D2/D3:** in the raw `$SI` of all 60 copies the
+MFT-change time was *older* than the start of the copy. The third run records the four times the
+system reports for source and copy, to tell "the copy tools carry the MFT-change time over" from "the
+raw record was not flushed yet". If copies do carry old MFT-change times, a volume restored from a
+backup with robocopy has a whole generation of records whose times say nothing about when they were
+written, and the D2 fallback (at most a quarter of timed records out of order) would not cover it.
+The file meant to have thousands of runs got one run (sparse files allocate in 64 KiB units); the
+third run writes one block every 128 KiB.
 
 ## 8. Samples and how to re-check
 

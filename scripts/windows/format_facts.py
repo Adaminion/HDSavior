@@ -331,6 +331,16 @@ def cmd_post(a):
             t["modified_preserved"] += 1
         if e.get("source_mft_changed") is not None and si["mft_changed"] == e["source_mft_changed"]:
             t["mft_changed_preserved"] += 1
+        os_t = e.get("os_times") or {}
+        if os_t.get("mft_changed") is not None and os_t["mft_changed"] >= e["copy_started"]:
+            t["os_mft_changed_after_copy_start"] = t.get("os_mft_changed_after_copy_start", 0) + 1
+        if os_t.get("mft_changed") is not None and os_t["mft_changed"] == si["mft_changed"]:
+            t["raw_si_equals_os"] = t.get("raw_si_equals_os", 0) + 1
+        if len(t.setdefault("examples", [])) < 3:
+            t["examples"].append({"copy_started": e["copy_started"], "raw_si": si, "os": os_t,
+                                  "source": {"created": e.get("source_created"),
+                                             "modified": e.get("source_modified"),
+                                             "mft_changed": e.get("source_mft_changed")}})
     facts["timestamps_after_copy"] = ts
 
     # 5. Slot reuse: deleted files and the files created right after them.
