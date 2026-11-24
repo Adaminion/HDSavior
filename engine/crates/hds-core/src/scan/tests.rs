@@ -275,8 +275,9 @@ fn every_field_of_a4_is_stored() {
     );
     assert_eq!(si.flags, 0x20);
     assert_eq!(r.mft_changed(), Some(30));
-    // The names carry the times 1 to 4: the latest is 4, the record time 30.
-    assert_eq!(r.latest_name_time(), Some(4));
+    // The names carry the times 1 to 4: the latest without the last-access
+    // time (4) is 3, the record time 30.
+    assert_eq!(r.latest_name_time(), Some(3));
     assert_eq!(r.record_time(), Some(30));
     assert!(r.has_wof_stream());
     assert_eq!(r.reparse(), Reparse::Tag(0x8000_0017));
@@ -336,8 +337,9 @@ fn every_field_of_a4_is_stored() {
     assert_eq!(e.parent, FileRef::new(101, 1));
     assert!(e.name.eq_str("sub"));
     assert_eq!(e.namespace, Namespace::Win32);
-    // The entry time: the latest of the four times of the key.
-    assert_eq!(e.time, 8);
+    // The entry time: the latest of the key's creation, modification and
+    // MFT-change times (8 is its last-access time).
+    assert_eq!(e.time, 7);
     assert_eq!(e.source.offset, 0x10_0400);
     assert_eq!(e.source.lsn, r.lsn());
     assert_eq!(e.source.kind, EntrySourceKind::RecordRoot);
@@ -394,6 +396,69 @@ fn every_field_of_a4_is_stored() {
 
     let c = store.counters();
     assert_eq!((c.records, c.files, c.dirs, c.index_entries), (5, 3, 1, 1));
+}
+
+/// The last-access time of a `$FILE_NAME` takes part in neither the record
+/// time nor the entry time (ALGORITHMS, vocabulary). Windows keeps an
+/// `$I30` entry's four times in step with the child's
+/// `$STANDARD_INFORMATION`, access time included (measured on a Windows
+/// volume: the entries of `Windows` and `System32` carry an access time
+/// minutes after their record time), so a folder listed after its last
+/// change would otherwise look newer than every record of its file system.
+#[test]
+fn last_access_times_are_not_record_or_entry_times() {
+    let mut img = vec![0u8; 2 * MIB];
+    // A directory whose own name and whose entries were last accessed long
+    // after their last change.
+    let dir = Rec::new(101)
+        .flags(3)
+        .si([100, 200, 300, 9_000], 0)
+        .name_at(fref(5, 5), "Docs", 1, 0x1000_0000, [100, 200, 250, 9_000])
+        .index_root(&[index_entry(
+            fref(200, 2),
+            fref(101, 1),
+            "sub",
+            1,
+            0x1000_0000,
+            [150, 260, 270, 9_500],
+        )])
+        .build();
+    put(&mut img, 0x10_0000, &dir);
+    // The same in an index block.
+    let block = indx_block(
+        0,
+        7,
+        4096,
+        &[index_entry(
+            fref(300, 1),
+            fref(101, 1),
+            "other",
+            1,
+            0x1000_0000,
+            [10, 20, 30, 8_000],
+        )],
+    );
+    put(&mut img, 0x10_1000, &block);
+    let (session, summary, _) = scan_fresh(
+        mem(img),
+        0..2 * MIB as u64,
+        ScanOptions::default(),
+        &quick(),
+    );
+    assert_eq!(summary.status, ScanStatus::Completed);
+    let store = session.store();
+    let r = store.record(store.record_at(0x10_0000).unwrap()).unwrap();
+    assert_eq!(r.latest_name_time(), Some(250));
+    assert_eq!(r.record_time(), Some(300));
+    let mut times: Vec<_> = store
+        .index_entries()
+        .map(|(_, e)| (e.name.to_string_lossy(), e.time))
+        .collect();
+    times.sort();
+    assert_eq!(
+        times,
+        vec![("other".to_string(), 30), ("sub".to_string(), 270)]
+    );
 }
 
 #[test]

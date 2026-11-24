@@ -186,7 +186,7 @@ class IndexEntry:
     __slots__ = ('child', 'cseq', 'parent', 'pseq', 'ns', 'name', 'chtime', 'etime', 'is_dir',
                  'src_off', 'src_lsn', 'src_kind', 'block', 'current')
     # chtime: the MFT-change time of the $FILE_NAME copy; etime: the entry time (ALGORITHMS.md
-    # vocabulary), the latest of its four times
+    # vocabulary), the latest of its creation, modification and MFT-change times (not last access)
 
 
 class Record:
@@ -214,8 +214,9 @@ class Record:
 
     @property
     def rtime(self):
-        """Record time (ALGORITHMS.md vocabulary): the latest of the $SI MFT-change time and the four
-        times of every $FILE_NAME; None when the record has neither."""
+        """Record time (ALGORITHMS.md vocabulary): the latest of the $SI MFT-change time and the
+        creation, modification and MFT-change times of every $FILE_NAME (not last access); None when
+        the record has neither."""
         ts = [fn.tmax for fn in self.names]
         if self.si:
             ts.append(self.si[2])
@@ -246,7 +247,9 @@ def _parse_file_name(c):
     fn.pseq = pref >> 48
     fn.ctime = struct.unpack_from('<Q', c, 8)[0]
     fn.chtime = struct.unpack_from('<Q', c, 0x18)[0]
-    fn.tmax = max(struct.unpack_from('<QQQQ', c, 8))
+    # creation, modification, MFT change; last access is left out (Windows keeps an $I30 entry's
+    # times in step with the child's $SI, access included: it says when a folder was listed)
+    fn.tmax = max(struct.unpack_from('<QQQ', c, 8))
     fn.flags = struct.unpack_from('<I', c, 0x38)[0]
     nl = c[0x40]
     fn.ns = c[0x41]

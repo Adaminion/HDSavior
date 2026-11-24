@@ -107,6 +107,9 @@ enum WarningCode implements WireEnum {
   /// The session file lies inside the lost volume: save the session
   /// elsewhere.
   sessionFileAtRisk('session_file_at_risk'),
+
+  /// The session was written by an older engine; its times are approximate.
+  oldSessionFormat('old_session_format'),
   unknown('');
 
   const WarningCode(this.wire);

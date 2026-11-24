@@ -218,9 +218,9 @@ enum Step {
     Lost(u64, u16),
 }
 
-/// An index entry that may name a lost folder: source LSN, namespace, name,
-/// parent reference.
-type Offer = (u64, u8, String, FileRef);
+/// An index entry that may name a lost folder: entry time, source LSN,
+/// namespace, name, parent reference.
+type Offer = (u64, u64, u8, String, FileRef);
 
 /// E4 to E8 for every shown entry of an instance that is not `strays`.
 fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
@@ -314,21 +314,32 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
         .collect();
     let (range_start, range_end) = m.scan_range;
 
-    let mut offers: HashMap<Key, Vec<Offer>> = HashMap::new();
-    let mut offer = |c: u32, lsn: u64, e: &crate::facts::IndexEntryFact, source: u64| {
-        let t = records::entry_time(&e.key.times);
-        if e.key.flags & FN_DIRECTORY == 0
-            || current_data(t)
-            || !on_side(c, t)
-            || inside_file(c, source)
-        {
-            return;
+    // per instance: the oldest record time of its records (E6's floor for
+    // blocks whose owner number no instance holds)
+    let mut oldest_of: BTreeMap<u32, u64> = BTreeMap::new();
+    for (i, r) in m.records.iter().enumerate() {
+        if let (Some(c), Some(t)) = (catalog.of_record[i], records::timed(r)) {
+            let o = oldest_of.entry(c).or_insert(t);
+            *o = (*o).min(t);
         }
-        offers
-            .entry((c, e.child.number, e.child.seq))
-            .or_default()
-            .push((lsn, e.key.namespace, e.key.name.clone(), e.key.parent));
-    };
+    }
+    let mut offers: HashMap<Key, Vec<Offer>> = HashMap::new();
+    let mut offer =
+        |c: u32, lsn: u64, e: &crate::facts::IndexEntryFact, source: u64, floor: bool| {
+            let t = records::entry_time(&e.key.times);
+            if e.key.flags & FN_DIRECTORY == 0
+                || current_data(t)
+                || !on_side(c, t)
+                || inside_file(c, source)
+                || (floor && oldest_of.get(&c).is_some_and(|&o| t + crate::time::DAY < o))
+            {
+                return;
+            }
+            offers
+                .entry((c, e.child.number, e.child.seq))
+                .or_default()
+                .push((t, lsn, e.key.namespace, e.key.name.clone(), e.key.parent));
+        };
     for b in m
         .index_blocks
         .iter()
@@ -345,6 +356,10 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
             .copied()
             .filter(|&c| folders.contains_key(&(c, b.owner.number, b.owner.seq)))
             .collect();
+        // failing an owner of the instance: an owner number no instance
+        // holds, with entries not more than a day older than the
+        // instance's oldest record
+        let floor = owners.is_empty();
         let users: Vec<u32> = if !owners.is_empty() {
             owners
         } else if !present.contains(&b.owner.number) {
@@ -354,7 +369,7 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
         };
         for &c in &users {
             for e in &b.entries {
-                offer(c, b.lsn, e, b.offset);
+                offer(c, b.lsn, e, b.offset, floor);
             }
         }
     }
@@ -366,7 +381,7 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
             continue;
         }
         for e in r.index_root.iter().flatten() {
-            offer(c, r.lsn, e, r.offset);
+            offer(c, r.lsn, e, r.offset, false);
         }
     }
     // E6 (b): in-use directory records among the strays
@@ -412,13 +427,15 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
     };
     let lost_name = |key: Key| -> Result<Option<(String, FileRef)>, ()> {
         if let Some(list) = offers.get(&key) {
-            let non_dos = list.iter().any(|o| o.1 != 2);
-            let usable: Vec<&Offer> = list.iter().filter(|o| !non_dos || o.1 != 2).collect();
-            let top = usable.iter().map(|o| o.0).max().expect("not empty");
+            // skip DOS names when another exists; then the latest entry
+            // time, then the highest source LSN
+            let non_dos = list.iter().any(|o| o.2 != 2);
+            let usable: Vec<&Offer> = list.iter().filter(|o| !non_dos || o.2 != 2).collect();
+            let top = usable.iter().map(|o| (o.0, o.1)).max().expect("not empty");
             let mut best: Vec<(&String, FileRef)> = usable
                 .iter()
-                .filter(|o| o.0 == top)
-                .map(|o| (&o.2, o.3))
+                .filter(|o| (o.0, o.1) == top)
+                .map(|o| (&o.3, o.4))
                 .collect();
             best.sort();
             best.dedup();

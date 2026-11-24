@@ -605,7 +605,9 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
                 entry.kind == EntryKind::File && !entry.deleted && !entry.system
             })
             .collect();
-        let mut holders: BTreeMap<u32, usize> = BTreeMap::new();
+        // per holding file: X's records inside it and the oldest timed
+        // record time among them
+        let mut holders: BTreeMap<u32, (usize, Option<u64>)> = BTreeMap::new();
         let mut inside = 0usize;
         for &i in &u.records {
             let at = m.records[i].offset;
@@ -616,21 +618,29 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
                     .any(|x| x.offset.is_some_and(|o| at >= o && at < o + x.bytes))
             }) {
                 inside += 1;
-                *holders.entry(e).or_default() += 1;
+                let h = holders.entry(e).or_default();
+                h.0 += 1;
+                if let Some(t) = records::timed(&m.records[i]) {
+                    h.1 = Some(h.1.map_or(t, |o| o.min(t)));
+                }
             }
         }
-        let Some((&container, _)) = holders.iter().max_by_key(|(_, &count)| count) else {
+        // the file holding most of them; ties to the lowest entry
+        let Some((&container, &(_, oldest))) = holders
+            .iter()
+            .max_by(|p, q| p.1 .0.cmp(&q.1 .0).then(q.0.cmp(p.0)))
+        else {
             continue;
         };
         if inside * 10 < u.records.len() * 9 {
             continue;
         }
-        let newest = u.span.map(|s| s.1);
-        // D7: the container's record time (its base record)
+        // D7: the container's record time (its base record) not more than a
+        // day older than the oldest record time of X's records inside it
         let container_time = inputs.base_record[container as usize]
             .and_then(|i| records::record_time(&m.records[i]))
             .unwrap_or(0);
-        let fresh = newest.is_none_or(|newest| container_time + time::DAY >= newest);
+        let fresh = oldest.is_none_or(|oldest| container_time + time::DAY >= oldest);
         match validated {
             Some(true) if fresh => embedded[x] = Some(container),
             Some(true) => {

@@ -162,12 +162,42 @@ def cmd_placement(a):
     print(json.dumps(out))
 
 
+def index_entries(raw, poff, cs, rec):
+    """The $I30 entries of a directory record: its $INDEX_ROOT and every INDX block of its
+    $INDEX_ALLOCATION:$I30. Returns [(child number, child sequence, parent number, four times)]."""
+    out = []
+    block_size = None
+    found = []
+    for at in rec.get("attributes", []):
+        if at.get("type") == 0x90 and at.get("index_root"):
+            block_size = at["index_root"].get("index_block_size")
+            found += at["index_root"].get("entries") or []
+    for at in rec.get("attributes", []):
+        if at.get("type") != 0xA0 or not at.get("non_resident") or at.get("name") != "$I30" or not block_size:
+            continue
+        for r in at.get("runs") or []:
+            if r.get("lcn") is None:
+                continue
+            data = raw.read(poff + r["lcn"] * cs, r["length"] * cs)
+            for o in range(0, len(data) - block_size + 1, block_size):
+                blk = ins.parse_index_block(data[o:o + block_size])
+                if blk and blk.get("fixup_ok"):
+                    found += blk["entries"]
+    for e in found:
+        fn = e.get("file_name")
+        if fn:
+            out.append((e["record"], e["sequence"], fn["parent_record"],
+                        {k: fn[k] for k in ("created", "modified", "mft_changed", "accessed")}))
+    return out
+
+
 def cmd_pre(a):
     raw = Raw(a.raw, a.size)
     boot = boot_at(raw, a.partition_offset)
     lay = mft_layout(raw, a.partition_offset, boot)
     rs = lay["record_size"]
     records = {}
+    entries = {}
     for n in range(lay["initialized_size"] // rs):
         off = record_offset(a.partition_offset, lay, n)
         if off is None:
@@ -179,7 +209,11 @@ def cmd_pre(a):
             s["offset"] = off
             s["raw_sha1"] = hashlib.sha1(b).hexdigest()
             records[str(n)] = s
-    out = {"boot": boot, "mft": lay, "records": records}
+            if rec.get("is_directory") and rec.get("in_use"):
+                # The $I30 entries (duplicated information of each child), by child FRN.
+                for child, cseq, parent, times in index_entries(raw, a.partition_offset, boot["cluster_size"], rec):
+                    entries.setdefault(str(frn(child, cseq)), []).append(dict(times, parent=parent))
+    out = {"boot": boot, "mft": lay, "records": records, "entries": entries}
     json.dump(out, open(a.out, "w", encoding="utf-8"))
     print("old volume: %d records with attributes below the initialized size %d; MFT at LCN %d, runs %s"
           % (len(records), lay["initialized_size"], lay["mft_lcn"], lay["runs"]))
@@ -342,8 +376,23 @@ def cmd_post(a):
         fn_latest = max((v for n in fn for v in n.values() if isinstance(v, int)), default=None)
         if fn_latest is not None and fn_latest >= e["copy_started"]:
             t["fn_latest_after_copy_start"] = t.get("fn_latest_after_copy_start", 0) + 1
+        # The copy's entry in its parent's index ($FILE_NAME copy with Windows' duplicated
+        # information): does it hold the copy time or the source's times, and its access time?
+        ent = (pre.get("entries") or {}).get(str(e["frn"])) or []
+        for x in ent:
+            t["entries"] = t.get("entries", 0) + 1
+            written = max(x["created"], x["modified"], x["mft_changed"])
+            if written >= e["copy_started"]:
+                t["entry_written_after_copy_start"] = t.get("entry_written_after_copy_start", 0) + 1
+            if x["mft_changed"] == si["mft_changed"]:
+                t["entry_mft_changed_equals_si"] = t.get("entry_mft_changed_equals_si", 0) + 1
+            if all(x[k] == si[k] for k in ("created", "modified", "mft_changed", "accessed")):
+                t["entry_times_equal_si"] = t.get("entry_times_equal_si", 0) + 1
+            if x["accessed"] > written:
+                t["entry_accessed_after_written"] = t.get("entry_accessed_after_written", 0) + 1
         if len(t.setdefault("examples", [])) < 3:
             t["examples"].append({"copy_started": e["copy_started"], "raw_si": si, "os": os_t, "raw_fn": fn,
+                                  "raw_entries": ent,
                                   "source": {"created": e.get("source_created"),
                                              "modified": e.get("source_modified"),
                                              "mft_changed": e.get("source_mft_changed")}})

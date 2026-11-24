@@ -325,9 +325,14 @@ fn encode_name(name: &Utf16Name<'_>, out: &mut Vec<u8>) -> bool {
     narrow
 }
 
-/// The latest of four times.
+/// The latest of the creation, modification and MFT-change times of a
+/// `$FILE_NAME` (ALGORITHMS, vocabulary: record time and entry time). The
+/// last-access time is left out: Windows keeps an `$I30` entry's
+/// duplicated information in step with the child's `$STANDARD_INFORMATION`,
+/// access time included, so it says when a file was last read or listed,
+/// not when anything was written on the volume.
 fn latest_time(t: &Times) -> u64 {
-    t.created.max(t.modified).max(t.mft_changed).max(t.accessed)
+    t.created.max(t.modified).max(t.mft_changed)
 }
 
 /// An index entry record for `file_name`; its name is appended to `names`

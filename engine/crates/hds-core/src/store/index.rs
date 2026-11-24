@@ -24,8 +24,9 @@ pub(crate) mod entry_bits {
 pub(crate) struct IndexEntryRec {
     pub child: u64,
     pub parent: u64,
-    /// The entry time: the latest of the four times of the key's
-    /// `$FILE_NAME` copy (FILETIME).
+    /// The entry time: the latest of the creation, modification and
+    /// MFT-change times of the key's `$FILE_NAME` copy (FILETIME); the
+    /// last-access time is left out.
     pub time: u64,
     pub source_offset: u64,
     pub source_lsn: u64,

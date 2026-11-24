@@ -1215,6 +1215,16 @@ fn a_version_1_file_loads_and_is_rewritten_before_it_is_appended_to() {
         }
     }
     assert!(with_names > 0);
+    // The approximate times are announced, and only for the old format.
+    let has_warning = |s: &Session| {
+        s.store()
+            .warnings()
+            .iter()
+            .any(|w| w.code == WARN_OLD_SESSION_FORMAT)
+    };
+    assert!(has_warning(&loaded));
+    assert!(!has_warning(&session));
+    assert!(!has_warning(&Session::load(&path).unwrap().0));
     // Going on in the file rewrites it in the current format first.
     loaded.attach_file(&v1, &guard).unwrap();
     loaded
@@ -1226,6 +1236,20 @@ fn a_version_1_file_loads_and_is_rewritten_before_it_is_appended_to() {
     let (again, _) = Session::load(&v1).unwrap();
     assert_eq!(again.opaque(OpaqueKind::Overrides), &[b"geometry".to_vec()]);
     assert_eq!(again.store(), loaded.store());
+    // The rewritten file still says its times came from format 1.
+    assert!(has_warning(&again));
+    assert_eq!(records_with_name_times(&again), 0);
+}
+
+/// Records of `s` that carry a `$FILE_NAME` time (none after a version-1
+/// file: the rewrite cannot invent them).
+fn records_with_name_times(s: &Session) -> usize {
+    let store = s.store();
+    store
+        .records_by_offset()
+        .iter()
+        .filter(|&&id| store.record(id).unwrap().latest_name_time().is_some())
+        .count()
 }
 
 #[test]

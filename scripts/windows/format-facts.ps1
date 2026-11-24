@@ -16,7 +16,8 @@
       old MFT record is classified (intact, zeroed, blank, rewritten), the
       content of every surviving file is hashed through its old runs,
       timestamps after robocopy / Move-Item / Copy-Item from another volume
-      are compared with the copy time, slot reuse after deletions is
+      (the record's and those of its entry in the parent's $I30 index) are
+      compared with the copy time and the source's times, slot reuse after deletions is
       recorded, and the attribute list of a file with thousands of runs is
       inspected.
 

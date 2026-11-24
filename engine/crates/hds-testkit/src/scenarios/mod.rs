@@ -81,6 +81,7 @@ catalog![
     accidents::restored_from_backup,
     accidents::embedded_volume,
     accidents::embedded_volume_fragmented,
+    accidents::embedded_volume_guest_ahead,
     accidents::old_volume_larger_than_range,
     accidents::whole_disk_two_volumes,
     instances::generations_by_references,

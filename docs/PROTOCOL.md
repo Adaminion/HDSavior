@@ -151,7 +151,9 @@ the disk itself, is the result of `open_source`.
 `writes_not_detectable`, `scan_incomplete`, `out_of_range_files`,
 `identity_differs`, `mixed_generations` (records of an older file system
 could not be separated cleanly), `session_file_at_risk` (the session file
-lies inside the lost volume; save the session elsewhere).
+lies inside the lost volume; save the session elsewhere), `old_session_format`
+(the session was written by an older engine; its times are approximate, scan
+again for exact ones).
 
 ### Geometry
 

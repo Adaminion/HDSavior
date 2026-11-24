@@ -919,7 +919,11 @@ fn generations_are_separable_exactly_when_the_scenario_says_so() {
 
 #[test]
 fn embedded_volumes_live_inside_one_file() {
-    for (name, fragments) in [("embedded_volume", 1), ("embedded_volume_fragmented", 5)] {
+    for (name, fragments, ahead) in [
+        ("embedded_volume", 1, false),
+        ("embedded_volume_fragmented", 5, false),
+        ("embedded_volume_guest_ahead", 1, true),
+    ] {
         each(name, |built| {
             let m = &built.manifest;
             let inner = m
@@ -1015,7 +1019,8 @@ fn embedded_volumes_live_inside_one_file() {
                 .filter(|r| r.instance == inner.id)
                 .all(|r| r.expect.class != Some(RecordClass::Live)));
             // D7: an embedded catalog instance whose container is the image
-            // file, newer than everything inside it
+            // file, not more than a day older than the oldest record inside
+            // it (and, unless the guest's clock ran ahead, newer than all)
             let embedded: Vec<_> = m.catalog_of_kind(InstanceKind::Embedded).collect();
             assert_eq!(embedded.len(), 1, "{name}");
             let c = embedded[0];
@@ -1023,14 +1028,21 @@ fn embedded_volumes_live_inside_one_file() {
                 (c.container, c.sources.as_slice()),
                 (Some(host.id), &[inner.id][..])
             );
-            let newest = inner_records
-                .iter()
-                .filter_map(|r| r.standard_information.map(|s| s.0[2]))
-                .max()
-                .unwrap();
+            let si_changed = || {
+                inner_records
+                    .iter()
+                    .filter_map(|r| r.standard_information.map(|s| s.0[2]))
+            };
+            let (oldest, newest) = (si_changed().min().unwrap(), si_changed().max().unwrap());
+            let day = hds_testkit::time::DAY;
             assert!(
-                host.times.mft_changed + hds_testkit::time::DAY >= newest,
+                host.times.mft_changed + day >= oldest,
                 "the container is not stale"
+            );
+            assert_eq!(
+                host.times.mft_changed + day < newest,
+                ahead,
+                "{name}: guest records newer than the container"
             );
             let main = m.main_instance().expect("a main instance");
             assert_eq!(

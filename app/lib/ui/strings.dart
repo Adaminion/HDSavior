@@ -144,6 +144,7 @@ abstract final class S {
     WarningCode.identityDiffers => 'The disk reports a different model or serial number',
     WarningCode.mixedGenerations => 'Some records of an older file system could not be separated',
     WarningCode.sessionFileAtRisk => 'The scan progress file is inside the lost file system',
+    WarningCode.oldSessionFormat => 'This scan was saved by an older version of HDSavior',
     WarningCode.unknown => 'Note from the disk engine',
   };
 
@@ -178,6 +179,8 @@ abstract final class S {
     WarningCode.mixedGenerations =>
       'Some files may be shown with an older version. Their condition is marked as uncertain.',
     WarningCode.sessionFileAtRisk => 'Save the scan to another disk, or the next save could overwrite lost files.',
+    WarningCode.oldSessionFormat =>
+      'Its file times are approximate, so old and new files may be told apart less well. Scan again for exact results.',
     WarningCode.unknown => null,
   };
 

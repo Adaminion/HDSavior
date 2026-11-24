@@ -59,6 +59,13 @@ None of this shares code with the engine or with `scripts/linux/inspect-ntfs.py`
   files are copied through the driver and, with the volume unmounted, the four `$SI` times of every
   in-use record of the restored tree are overwritten in place with seeded times of a source written
   in the scenario's backup period.  `$FILE_NAME` attributes and index entries keep the copy time.
+- **Windows' duplicated information in `$I30` entries** (`Scenario.sync_entry_times`,
+  `restore_backup_win`).  Windows keeps a parent's index entry in step with the child's `$SI` times,
+  last access included (the Windows-written `windows_volume.raw`: every entry's four times equal
+  the child's `$SI` times); ntfs-3g writes its own `$FILE_NAME` times there.  With the volume
+  unmounted, `from_si=True` gives every entry of the volume the `$SI` times of the record it names
+  (so the entry of a copy holds the backup's old times), `access_days=N` sets every entry's
+  last-access time N days after its latest other time (folders listed, files read).
 - **The accident** is `mkntfs -Q` on the same region.  Windows' rewrite of `$MFT` slots 0..255 at
   format and first mount is imitated afterwards: every slot from the new `$MFT`'s initialized size
   up to 255 that lies in a cluster free in the new volume is zeroed (Windows 10 style; `windows=
@@ -142,6 +149,8 @@ Builds are deterministic in layout and content; sub-second timestamps vary betwe
 | restore_backup | older generation 2018-2020; lost generation refilled from a backup (`$SI` times 2015-2017) in 2021, then used | record time: D2 D3 D8 D9 E6 G2 | lost = main, older = older, no mixing |
 | restore_backup_both | both generations filled from backups, the lost one from the older archive (`$SI` 2011-2013 over 2014-2016) | record time: D2 D3 D8 D9 E6 G2 | lost = main, older = older, no mixing |
 | restore_after_accident | 500 files restored from a 2019-2020 backup onto the new volume after the accident, 350 deleted again | record time: C3 C4 C5 | lost = main, the deleted copies `post_format` |
+| restore_backup_win | restore_backup with Windows-style entry times: older entries accessed 30 days after their last change, the lost generation's entries carry the `$SI` times of their children | entry time: D3 E6 C4 | lost = main, older = older, no mixing, lost names kept |
+| e6_tiebreak | half of 24 lost folders renamed after a raw copy of their parent's index blocks was written at a lower offset (all LSNs 0) | E6 tie-break | renamed folders carry their new names (`prefer_names`) |
 
 ## Ground-truth format (`hds-instance-truth/1`)
 
@@ -160,6 +169,7 @@ volumes         {id: VOLUME}            every file system ever created on the di
 lost_folders    [LOST]                  every lost folder a correct catalog has
 records         [RECORD]                every FILE record the lab's scan finds in the range
 notes           [text]
+prefer_names    [name]                  names a lost folder must carry when its entries offer them
 ```
 
 `VOLUME` (ids are stable names chosen by the scenario: `lost`, `older`, `gen0`, `guest`,
@@ -235,7 +245,8 @@ to file systems by majority, so instance ids may be anything.
 
 Hard failures (verdict FAIL): `class` (C3), `mix` (a non-strays instance holds records of two file
 systems), `main`, `kind`, `parent` / `foreign` (a file attached to a directory of another file
-system), `lostname` (a name no entry of that file system supplies), `lostparent`, `geometry` (main
+system), `lostname` (a name no entry of that file system supplies), `lostname_stale` (a lost folder
+whose entries offer a name of the scenario's `prefer_names` carries another), `lostparent`, `geometry` (main
 and other file systems), `range` (lost-volume range does not cover its files), `overwritten_missed`
 / `overwritten_false`, `older_missed` / `older_false`, `validated` where the truth expects a value.
 Soft findings: `lostname_missing` (left as `Folder #P` although an entry exists), `split` (records of
@@ -269,7 +280,7 @@ ambiguous sentence (defaults = the most literal reading):
 | `f2_mft_ext` | F2 MFT map through every `$MFT` extent, also those in record 0's extension records | record 0's own extents only (first model) |
 | `oob_literal` | G1 out_of_bounds: a run whose LCN is >= total_clusters | a run reaching beyond total_clusters (first model) |
 | `c5_embedded` | G1 overwritten from C5 also for embedded instances | embedded instances skipped (first model) |
-| `time_basis` | `record`: the record time and the entry time as the vocabulary of ALGORITHMS.md defines them, in C3, C4, D2/D3 (timed records, changepoints, B_c/A_c), D7, D8, D9, E6 (floor, cut side, tie-break) and G2 | `si`: the raw `$SI` MFT-change time and the `$FILE_NAME` copy's MFT-change time (the text before 2c63bdc; fails the `restore_*` scenarios) |
+| `time_basis` | `record`: the record time and the entry time as the vocabulary of ALGORITHMS.md defines them (`$FILE_NAME` times without the last-access time), in C3, C4, D2/D3 (timed records, changepoints, B_c/A_c), D7, D8, D9, E6 (floor, cut side, tie-break) and G2 | `si`: the raw `$SI` MFT-change time and the `$FILE_NAME` copy's MFT-change time (the text before 2c63bdc; fails the `restore_*` scenarios) |
 
 The lab's proposed rule changes are switches (`Params.fixes`, `run-all.py --fixes`), off by
 default, so a run without `--fixes` is the text as written:
@@ -305,13 +316,16 @@ surviving record then count as "before" and name lost folders of the older insta
 - mkntfs puts every `$MFT` at 16 KiB (LCN 2 above 8 KiB clusters) and the `$MFTMirr` in the middle
   of the volume; Windows uses one third of the volume or 3 GiB and byte 8192.  The wipe imitates
   only the loss of slots up to 255.  First user record is 64 here, about 38 on Windows.
-- ntfs-3g writes LSN 0 everywhere (LSN tie-breaks of E6 and G2 are untested), POSIX names only
+- ntfs-3g writes LSN 0 everywhere (LSN tie-breaks of E6 and G2 are untested; E6's entry-time
+  tie-break is, by `e6_tiebreak`), POSIX names only
   (no Win32/DOS pairs), non-resident attribute lists only, and reuses the lowest free record only
   after a remount.
 - Windows' MFT-change time after moves, robocopy and Explorer copies is reproduced only by patching
   the `$SI` times of the unmounted volume (`backdate_si`, see *Copies from a backup*).  What Windows
-  puts in the parent's index entry (`$FILE_NAME` copy) of a copied file is not measured; the lab
-  leaves the copy time there, as ntfs-3g writes it.  Elsewhere the scenarios assume the driver sets
+  puts in the parent's index entry (`$FILE_NAME` copy) of a copied file is not measured for the copy
+  tools; on the Windows-written image every entry carries the child's `$SI` times.  The `restore_*`
+  scenarios leave the copy time there, as ntfs-3g writes it; `restore_backup_win` writes the `$SI`
+  times (both pass).  Elsewhere the scenarios assume the driver sets
   the MFT-change time at every change (ntfs-3g does).
 - The XP-era case of an old `$MFTMirr` that survives in the middle of the volume while the new
   volume mirrors at byte 8192 cannot be built (mkntfs puts both mirrors at the same place).

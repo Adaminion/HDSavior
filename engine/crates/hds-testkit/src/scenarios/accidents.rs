@@ -726,32 +726,7 @@ pub fn generations_not_separable(seed: u64) -> Built {
     built
 }
 
-fn embedded(name: &str, seed: u64, fragments: u64) -> Built {
-    // the inner disk: a plain volume image with more records than its host
-    let mut inner = Disk::new("inner", derive(seed, "inner"), 24 * MIB);
-    // the inner volume was used before the image file was copied onto the
-    // host: the container is newer than everything inside it (D7)
-    let inner_params = VolumeParams::new(0, 24 * MIB)
-        .label("volume")
-        .volume_name("VM disk")
-        .mft_capacity(1024)
-        .formatted_at(time::ymd(2020, 9, 1));
-    let inner_volume = inner.format(inner_params);
-    let inner_tree = TreeSpec {
-        folders: 30,
-        subfolders: 30,
-        files: 500,
-        media: 12,
-        early_media: 6,
-        big_folder: 120,
-        deleted: 6,
-        max_bytes: 9000,
-        name_shift: 11,
-    };
-    populate(inner.volume(inner_volume), &inner_tree);
-    inner.render(inner_volume);
-    let inner_records = inner.volume_ref(inner_volume).user_nodes().len();
-
+fn embedded(name: &str, seed: u64, fragments: u64, guest_ahead: bool) -> Built {
     let mut disk = Disk::new(name, seed, 128 * MIB);
     let (old, tree) = old_volume(
         &mut disk,
@@ -778,6 +753,43 @@ fn embedded(name: &str, seed: u64, fragments: u64) -> Built {
     } else {
         FileSpec::tagged(0, 0)
     };
+    // the inner disk: a plain volume image with more records than its host
+    let mut inner = Disk::new("inner", derive(seed, "inner"), 24 * MIB);
+    // the inner volume was used before the image file was copied onto the
+    // host: the container is newer than everything inside it (D7)
+    let inner_params = VolumeParams::new(0, 24 * MIB)
+        .label("volume")
+        .volume_name("VM disk")
+        .mft_capacity(1024)
+        .formatted_at(time::ymd(2020, 9, 1));
+    let inner_volume = inner.format(inner_params);
+    let inner_tree = TreeSpec {
+        folders: 30,
+        subfolders: 30,
+        files: 500,
+        media: 12,
+        early_media: 6,
+        big_folder: 120,
+        deleted: 6,
+        max_bytes: 9000,
+        name_shift: 11,
+    };
+    populate(inner.volume(inner_volume), &inner_tree);
+    if guest_ahead {
+        // the virtual machine's clock ran three days ahead: its last files
+        // carry times after the moment the host wrote the image file
+        let at = disk.volume_ref(old).clock() + 3 * time::DAY;
+        let iv = inner.volume(inner_volume);
+        assert!(iv.clock() < at, "the inner volume was used before the copy");
+        iv.set_clock(at);
+        let root = iv.root();
+        for i in 0..5 {
+            iv.add_tagged(root, format!("ahead-{i}.dat").as_str(), 900);
+        }
+    }
+    inner.render(inner_volume);
+    let inner_records = inner.volume_ref(inner_volume).user_nodes().len();
+
     let host = disk.embed(old, documents, "old-laptop.img", inner, spec);
     assert!(
         disk.volume_ref(old).reference(host).number >= 256,
@@ -812,7 +824,7 @@ fn embedded(name: &str, seed: u64, fragments: u64) -> Built {
 /// and 36 media files, enough for a validated geometry. The image file is
 /// stored in one piece.
 pub fn embedded_volume(seed: u64) -> Built {
-    let mut built = embedded("embedded_volume", seed, 1);
+    let mut built = embedded("embedded_volume", seed, 1, false);
     built.manifest.description =
         "Quick-formatted volume holding a 24 MiB disk image file with an NTFS volume of its own."
             .into();
@@ -829,10 +841,27 @@ pub fn embedded_volume(seed: u64) -> Built {
 /// offset: `Instance::offset_in_host` and the host file's extents say
 /// where each of its clusters is.
 pub fn embedded_volume_fragmented(seed: u64) -> Built {
-    let mut built = embedded("embedded_volume_fragmented", seed, 5);
+    let mut built = embedded("embedded_volume_fragmented", seed, 5, false);
     built.manifest.description =
         "Like embedded_volume, with the image file in five fragments.".into();
     built.manifest.rules = ["D1", "D4", "D7"].map(String::from).to_vec();
+    built
+}
+
+/// [`embedded_volume`] with the guest's clock three days ahead.
+///
+/// **Tests ALGORITHMS D7 (the container's record time is compared with the
+/// *oldest* record time of the records inside it).** The virtual machine
+/// that used `old-laptop.img` ran with a clock three days ahead of the
+/// host's, so its last five files carry times after the image file's own
+/// record time. The container is still not more than a day older than the
+/// oldest record inside it: the guest is `embedded`, the image file is not
+/// a stale file.
+pub fn embedded_volume_guest_ahead(seed: u64) -> Built {
+    let mut built = embedded("embedded_volume_guest_ahead", seed, 1, true);
+    built.manifest.description =
+        "Like embedded_volume, with the guest's clock three days ahead of the host's.".into();
+    built.manifest.rules = ["D7"].map(String::from).to_vec();
     built
 }
 

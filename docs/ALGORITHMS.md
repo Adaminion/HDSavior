@@ -17,8 +17,9 @@ Vocabulary
   `N` when `R` is in use and `R.seq == s`, or `R` is not in use and
   `R.seq == next(s)` (freeing a record bumps its sequence; reuse does not).
 - *Record time* — the latest of a record's `$STANDARD_INFORMATION` MFT-change
-  time (its third timestamp) and the four times of each of its `$FILE_NAME`
-  attributes; a record with neither has none. It stands for "when this record was
+  time (its third timestamp) and the creation, modification and MFT-change
+  times of each of its `$FILE_NAME` attributes; last-access times never count,
+  and a record with neither has none. It stands for "when this record was
   last written on its volume". The MFT-change time alone does not: Windows' copy
   tools (robocopy, Copy-Item and Explorer's copy, Move-Item across volumes) copy
   the source's MFT-change time to the tick, so a volume filled from a backup holds
@@ -27,8 +28,14 @@ Vocabulary
   for files that were not copied they are never later than the MFT-change time,
   so the record time equals it (measured on Windows 11 24H2's kernel:
   docs/notes/quick-format-behaviour.md, 7a).
-- *Entry time* — of an `IndexEntry`: the latest of the four times of its
-  `$FILE_NAME` copy.
+- *Entry time* — of an `IndexEntry`: the latest of the creation, modification
+  and MFT-change times of its `$FILE_NAME` copy. The last-access time is left
+  out: Windows keeps an entry's times in step with the child's
+  `$STANDARD_INFORMATION`, last access included, so it says when a folder was
+  listed or a file read. For the same reason the entry of a file copied with its
+  source's times may carry those old times instead of the copy time; C4 then
+  excludes it by its source (a live-allocated block or a current-volume record),
+  not by its time.
 
 ---
 
@@ -78,7 +85,8 @@ disk offset; record size; record number (absent for pre-3.1 headers); sequence;
 header flags; link count; LSN; base reference; `hash`; fixup status;
 `$STANDARD_INFORMATION` (four times, file-attribute flags) when present; every
 `$FILE_NAME` (parent reference, namespace, flags, attribute id, name as UTF-16
-units), and the latest of all `$FILE_NAME` times (for the record time); the unnamed `$DATA` extents present in this record — resident
+units), and the latest creation, modification or MFT-change time over its
+`$FILE_NAME`s (for the record time); the unnamed `$DATA` extents present in this record — resident
 (attribute offset and length **inside the record**; content is not stored) or
 non-resident (start VCN, header last VCN, runs, attribute flags, and
 allocated / real / initialized size, which are meaningful only when the start
@@ -127,7 +135,11 @@ payload`. Block types: `RECORDS`, `INDEX_ENTRIES`, `INDEX_BLOCKS`, `BOOT_HITS`,
 everything up to its last valid `CHECKPOINT`; later bytes are ignored and
 truncated on the next append. Payloads use one pure-Rust binary serde codec,
 fixed per format version. A file with a newer format version is refused
-(`unsupported`).
+(`unsupported`). Older versions are read; such a file is rewritten in the
+current format (a compacted copy, as `session_save` does) before anything is
+appended to it, and its session carries the warning `old_session_format`. In
+version-1 files the record time falls back to the `$SI` MFT-change time and the
+entry time to the entry's MFT-change time.
 
 **B3. Saving.** During a scan, every 5 minutes and at the end (or stop, or
 `source_lost`, or shutdown): append the new data blocks and a `CHECKPOINT`,
@@ -364,7 +376,7 @@ strays, `main` is the first that exists in this order: (1) an anchor (if there
 are several, one of the current volume with the newest `format_time` first —
 the accident is the latest format — then the one with most records); (2) an instance with
 validated geometry whose volume offset equals the range start or a partition
-start, newest record time first; (3) the instance with the newest change
+start, newest record time first; (3) the instance with the newest record
 time; (4) the one with most records. `instance_set` overrules the choice; the
 choice is stored in the session. Two accidents on the same volume (formatted,
 used, formatted again) are handled the same way: the file system lost last is
@@ -580,7 +592,8 @@ of the group), `missing_fragments`, `size_estimated`, `out_of_bounds`,
 **G2. Overlap conflicts.** All extents of all non-embedded instances are
 compared in absolute bytes (sort, sweep). For two files that share bytes, the
 winner is decided by, in order: instance kind (`main` over `other` over
-`older` over `strays`); in use over deleted; later record time; higher LSN.
+`older` over `strays`); in use over deleted; later record time (of the
+file's base record); higher LSN.
 The loser gets `overwritten`. The winner gets `overlap` only when both are in
 use and of the same instance kind. A full tie gives both `overlap`.
 

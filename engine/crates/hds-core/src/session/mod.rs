@@ -406,6 +406,18 @@ pub struct SaveReport {
 /// Payloads of more than this many bytes are refused by the opaque API.
 pub const MAX_OPAQUE_PAYLOAD: usize = (1 << 30) - 1;
 
+/// Warning raised when a session file of format version 1 is loaded: its
+/// records carry no `$FILE_NAME` time and its index entries the MFT-change
+/// time of their `$FILE_NAME` copy, so the record and entry times
+/// (ALGORITHMS, vocabulary) are approximations. It is kept in every
+/// checkpoint written afterwards, also after the file is rewritten in the
+/// current format, so the session never passes for one with exact times.
+pub const WARN_OLD_SESSION_FORMAT: &str = "old_session_format";
+const OLD_SESSION_FORMAT_MESSAGE: &str = "This session was saved by an earlier version of \
+HDSavior that did not keep every time a file system records for its files. Files that were \
+restored from a backup onto the lost volume may be sorted less well into file systems. Scanning \
+the disk again gives the best result.";
+
 /// A session: store, facts and (optionally) its file.
 pub struct Session {
     meta: SessionMeta,
@@ -503,11 +515,15 @@ impl Session {
             list.items = items;
         }
         let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut store = loaded.store;
+        if loaded.origin.version < file::FORMAT_VERSION {
+            store.raise_warning(WARN_OLD_SESSION_FORMAT, OLD_SESSION_FORMAT_MESSAGE);
+        }
         Ok((
             Session {
-                persisted: Persisted::all(&loaded.store),
+                persisted: Persisted::all(&store),
                 meta: loaded.meta,
-                store: loaded.store,
+                store,
                 opaque,
                 writer: None,
                 origin: Some((path, loaded.origin)),

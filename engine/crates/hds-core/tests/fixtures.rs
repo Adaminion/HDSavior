@@ -107,9 +107,11 @@ fn u(v: &Value) -> u64 {
     v.as_u64().unwrap_or_else(|| panic!("not a number: {v}"))
 }
 
-/// The latest of the four times of an inspector `$FILE_NAME` object.
+/// The latest of the creation, modification and MFT-change times of an
+/// inspector `$FILE_NAME` object (the record and entry times leave the
+/// last-access time out).
 fn fn_latest(f: &Value) -> u64 {
-    ["created", "modified", "mft_changed", "accessed"]
+    ["created", "modified", "mft_changed"]
         .iter()
         .map(|k| u(&f[*k]))
         .max()

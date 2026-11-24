@@ -460,6 +460,100 @@ class Scenario:
         self.events.append(('backdate_si', vol.vid, lo, hi, n))
         return n
 
+    def sync_entry_times(self, vol, from_si=False, access_days=None, until=None):
+        """Imitate Windows' duplicated information in the $I30 entries of vol (INDX blocks and
+        $INDEX_ROOTs in vol's region whose names carry vol's tag; the volume must be unmounted).
+        Windows keeps a parent's index entry in step with the child's $STANDARD_INFORMATION, access
+        time included (windows_volume.raw: every entry's four times equal the child's $SI times);
+        ntfs-3g writes the times of its own $FILE_NAME instead.
+        from_si: every entry gets the four $SI times of the record it names (number, sequence, name
+          and parent equal; for a deleted child the sequence before the free), so a copy restored
+          from a backup (backdate_si) carries the source's old times in its entry, not the copy time.
+        access_days: every entry's last-access time becomes its latest other time + that many days
+          (capped at `until`, epoch seconds): folders listed and files read after their last change.
+        Returns the number of entries changed."""
+        from . import scan as hs
+        res = hs.scan(vol.device, vol.offset, vol.offset + vol.length, use_cache=False)
+        si = {}
+        if from_si:
+            for r in res.records:
+                if r.num is None or not r.si or r.base:
+                    continue
+                for fn in r.names:
+                    si[(r.num, r.seq, fn.name, fn.parent)] = r.si[:4]
+                    si.setdefault((r.num, (r.seq - 1) or 0xFFFF, fn.name, fn.parent), r.si[:4])
+        cap = nr.unix_to_ft(until) if until is not None else None
+        dt = int(access_days * 86400 * 10 ** 7) if access_days is not None else None
+
+        def patch(b, start, end):
+            q, n = start, 0
+            while q + 16 <= end:
+                cref, elen, klen, efl = struct.unpack_from('<QHHH', b, q)
+                if elen < 16 or q + elen > end or efl & 2:
+                    break
+                fn = nr._parse_file_name(b[q + 16:q + 16 + klen]) if klen >= 66 else None
+                if fn is not None and fn.name.startswith(vol.tag):
+                    k = q + 16 + 8
+                    if from_si:
+                        t = si.get((cref & 0xFFFFFFFFFFFF, cref >> 48, fn.name, fn.parent))
+                        if t is not None:
+                            struct.pack_into('<4Q', b, k, *t)
+                            n += 1
+                    if dt is not None:
+                        a = max(struct.unpack_from('<3Q', b, k)) + dt
+                        struct.pack_into('<Q', b, k + 24, a if cap is None else min(a, cap))
+                        n += 1
+                q += elen
+            return n
+
+        def protect(b):
+            usa_ofs, usa_cnt = struct.unpack_from('<HH', b, 4)
+            usn = bytes(b[usa_ofs:usa_ofs + 2])
+            for i in range(1, usa_cnt):
+                e = i * 512
+                b[usa_ofs + 2 * i:usa_ofs + 2 * i + 2] = b[e - 2:e]
+                b[e - 2:e] = usn
+            return b
+
+        total = 0
+        with open(vol.device, 'r+b') as f:
+            for blk in res.blocks:
+                f.seek(blk.off)
+                fx = nr.apply_fixups(f.read(blk.size), blk.size)
+                if fx is None or fx[1]:
+                    continue
+                b = fx[0]
+                eo, isz = struct.unpack_from('<II', b, 0x18)
+                n = patch(b, 0x18 + eo, min(blk.size, 0x18 + isz))
+                if n:
+                    f.seek(blk.off)
+                    f.write(protect(b))
+                    total += n
+            for r in res.records:
+                f.seek(r.off)
+                fx = nr.apply_fixups(f.read(r.size), r.size)
+                if fx is None or fx[1]:
+                    continue
+                b = fx[0]
+                p = struct.unpack_from('<H', b, 0x14)[0]
+                n = 0
+                while p + 0x18 <= r.size:
+                    t, ln = struct.unpack_from('<II', b, p)
+                    if t == 0xFFFFFFFF or ln < 0x18 or p + ln > r.size:
+                        break
+                    if t == 0x90 and b[p + 8] == 0:
+                        hdr = p + struct.unpack_from('<H', b, p + 0x14)[0] + 0x10
+                        eo, isz = struct.unpack_from('<II', b, hdr)
+                        n += patch(b, hdr + eo, min(r.size, hdr + isz))
+                    p += ln
+                if n:
+                    f.seek(r.off)
+                    f.write(protect(b))
+                    total += n
+        vol.notes.append('sync_entry_times from_si=%s access_days=%s: %d changes' % (from_si, access_days, total))
+        self.events.append(('sync_entry_times', vol.vid, from_si, access_days, total))
+        return total
+
     @contextlib.contextmanager
     def mount(self, vol, at=None):
         if at is None:

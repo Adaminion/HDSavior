@@ -1647,10 +1647,8 @@ class Model:
         nondos = [e for e in cands if e.ns != 2]
         if nondos:
             cands = nondos
-        if 'e6-newest' in self.fixes:
-            cands.sort(key=lambda e: (-self.et(e), -e.src_lsn, e.src_off))
-        else:
-            cands.sort(key=lambda e: (-e.src_lsn, e.src_off))
+        # E6: the latest entry time, then the highest source LSN, then the lowest source offset
+        cands.sort(key=lambda e: (-self.et(e), -e.src_lsn, e.src_off))
         return cands[0]
 
     # ------------------------------------------------------------------ G

@@ -31,8 +31,9 @@ pub const MAGIC: [u8; 4] = *b"HDSC";
 /// * 1 - the first format.
 /// * 2 - a record carries the latest of its `$FILE_NAME` times (ALGORITHMS
 ///   A4, for the record time), and an index entry's time is the entry time
-///   (the latest of the four times of its `$FILE_NAME` copy) instead of the
-///   copy's MFT-change time.
+///   instead of the copy's MFT-change time. Both are the latest of the
+///   creation, modification and MFT-change times of a `$FILE_NAME`; the
+///   last-access time is left out.
 pub const FORMAT_VERSION: u32 = 2;
 /// The oldest format version this code reads. A version-1 file loads with
 /// no `$FILE_NAME` time per record (the record time falls back to the

@@ -10,7 +10,7 @@ import struct
 from . import ntfsraw as nr
 from . import sniff as sn
 
-CACHE_VERSION = 6
+CACHE_VERSION = 7
 
 
 class ScanResult:

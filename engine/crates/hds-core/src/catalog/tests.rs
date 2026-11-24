@@ -525,7 +525,7 @@ fn e6_lost_folders_named_by_index_entries() {
 }
 
 #[test]
-fn e6_the_entry_time_is_the_latest_of_the_four_times() {
+fn e6_the_entry_time_is_the_latest_written_time() {
     let mut lab = base_lab(32, 24);
     // Two entries for lost 190. "Copied" was created at day 12, but its
     // MFT-change time is day 5 (a copy keeps the source's times in the
@@ -586,6 +586,42 @@ fn e6_the_entry_time_is_the_latest_of_the_four_times() {
         store,
         "[Lost folders]/Folder #196/Restored/in-194.txt",
     );
+}
+
+#[test]
+fn e6_a_later_access_time_does_not_make_an_entry_newer() {
+    let mut lab = base_lab(32, 24);
+    // Two entries for lost 190. "Listed" was written at day 5 and its
+    // folder listed at day 20 (Windows syncs the access time into the
+    // entry); "Renamed" was written at day 8. The entry time leaves the
+    // access time out: "Renamed" (8) beats "Listed" (5, not 20).
+    lab.rec(
+        ORIGIN,
+        &dir(191, 1, ROOT, "a", t(10)).index_root(&[index_entry(
+            fref(190, 1),
+            ROOT,
+            "Listed",
+            1,
+            DIR_FLAG,
+            [t(5), t(5), t(5), t(20)],
+        )]),
+    );
+    lab.rec(
+        ORIGIN,
+        &dir(192, 1, ROOT, "b", t(10)).index_root(&[index_entry(
+            fref(190, 1),
+            ROOT,
+            "Renamed",
+            1,
+            DIR_FLAG,
+            [t(8); 4],
+        )]),
+    );
+    lab.rec(ORIGIN, &file(193, 1, fref(190, 1), "x.txt", t(10), None));
+    let run = lab.run(None);
+    let store = run.store();
+    let cat = catalog(&run);
+    at(&cat, store, "Renamed/x.txt");
 }
 
 #[test]

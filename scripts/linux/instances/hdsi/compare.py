@@ -9,6 +9,8 @@ Hard failures (verdict FAIL):
   parent     a file or folder is attached to a different node than expected
   foreign    ... attached to a directory of another file system (the reviewers' worst case)
   lostname   a lost folder carries a name that no usable entry of its file system supplies
+  lostname_stale   a lost folder whose entries offer a name the truth prefers (`prefer_names`, the
+             name with the latest entry time) carries another one
   geometry   cluster size or volume offset of a main/other file system wrong
   range      the lost-volume range of a main/other file system does not cover its files
   overwritten / older_generation   flag missing where the truth requires it, or set on an intact file
@@ -171,6 +173,10 @@ def compare(truth, cat):
             note('lostname', '%s #%d.%d: got %r, expected %s' % (vid, L['key'][0], L['key'][1], cl['name'],
                                                                  names or 'no name'))
         else:
+            pref = set(T.get('prefer_names', ())) & set(names)
+            if pref and cl['name'] not in pref:
+                note('lostname_stale', '%s #%d.%d: got %r, expected %s' % (vid, L['key'][0], L['key'][1],
+                                                                       cl['name'], sorted(pref)))
             if not any(_node_eq(p, cl['parent']) for p in L['parents']):
                 note('lostparent', '%s #%d.%d (%s): parent %s, expected %s' % (
                     vid, L['key'][0], L['key'][1], cl['name'], cl['parent'], L['parents']))

@@ -101,8 +101,9 @@ pub struct RawRecord {
     pub(crate) base: u64,
     /// Creation, modification, MFT change, access (FILETIME).
     pub(crate) si_times: [u64; 4],
-    /// The latest of the four times of every `$FILE_NAME` of the record
-    /// (FILETIME); 0 when the record has no decodable `$FILE_NAME` (or only
+    /// The latest of the creation, modification and MFT-change times of
+    /// every `$FILE_NAME` of the record (FILETIME; the last-access time is
+    /// left out); 0 when the record has no decodable `$FILE_NAME` (or only
     /// names whose times are all 0).
     pub(crate) fn_time: u64,
     /// Address of the record's aux region in the store's arena.
@@ -313,16 +314,18 @@ impl RawRecord {
         self.bits & bits::HAS_SI != 0
     }
 
-    /// The latest of the four times of all `$FILE_NAME` attributes of the
-    /// record, when it has one with a non-zero time.
+    /// The latest of the creation, modification and MFT-change times of all
+    /// `$FILE_NAME` attributes of the record, when it has one with a
+    /// non-zero time. The last-access time is left out: it does not say
+    /// when anything was written.
     #[must_use]
     pub fn latest_name_time(&self) -> Option<u64> {
         (self.fn_time != 0).then_some(self.fn_time)
     }
 
     /// The *record time* (ALGORITHMS, vocabulary): the latest of the
-    /// `$STANDARD_INFORMATION` MFT-change time and all `$FILE_NAME` times;
-    /// `None` when the record has neither. Copy tools carry the source's
+    /// `$STANDARD_INFORMATION` MFT-change time and the
+    /// [latest `$FILE_NAME` time](Self::latest_name_time); `None` when the record has neither. Copy tools carry the source's
     /// MFT-change time over, while the `$FILE_NAME` times of a copy are the
     /// moment it was created on the volume, so this is the time a record
     /// was last written on its volume.

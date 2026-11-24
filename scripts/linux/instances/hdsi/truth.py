@@ -446,6 +446,8 @@ def make_truth(build_dir, scan_spec, scan_result):
                              'format_time': vols[k]['snapshots']['eol']['format_time_ft']} for k in current],
         'main': exp.get('main'), 'volumes': vout, 'records': out_recs, 'lost_folders': lf,
         'notes': exp.get('notes', []) + B.get('notes', []),
+        # names a lost folder must carry when its entries offer them (E6 tie-break checks)
+        'prefer_names': sorted(exp.get('prefer_names', [])),
     }
     return truth
 

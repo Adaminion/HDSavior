@@ -115,14 +115,15 @@ pub(crate) fn current_mfts(m: &Manifest) -> Vec<CurrentMft> {
 }
 
 /// The record time (ALGORITHMS, vocabulary): the latest of the
-/// `$STANDARD_INFORMATION` MFT-change time and the four times of every
-/// `$FILE_NAME` of the record; `None` when it has neither.
+/// `$STANDARD_INFORMATION` MFT-change time and the creation, modification
+/// and MFT-change times of every `$FILE_NAME` of the record (the last-access
+/// time is left out); `None` when it has neither.
 pub(crate) fn record_time(r: &RecordFact) -> Option<u64> {
     let si = r.standard_information.map(|(times, _, _)| times[2]);
     let names = r
         .names
         .iter()
-        .flat_map(|n| n.times)
+        .map(|n| entry_time(&n.times))
         .max()
         .filter(|&t| t != 0);
     match (si, names) {
@@ -131,10 +132,13 @@ pub(crate) fn record_time(r: &RecordFact) -> Option<u64> {
     }
 }
 
-/// The entry time (ALGORITHMS, vocabulary): the latest of the four times of
-/// an index entry's `$FILE_NAME` copy.
+/// The entry time (ALGORITHMS, vocabulary): the latest of the creation,
+/// modification and MFT-change times of an index entry's `$FILE_NAME` copy.
+/// The last-access time is left out: Windows keeps an entry's times in step
+/// with the child's `$STANDARD_INFORMATION`, last access included.
 pub(crate) fn entry_time(times: &[u64; 4]) -> u64 {
-    times.iter().copied().max().unwrap_or(0)
+    let [created, modified, mft_changed, _accessed] = *times;
+    created.max(modified).max(mft_changed)
 }
 
 /// A plausible record time (D2 "timed"): not 0, not before 1980, not
