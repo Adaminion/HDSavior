@@ -232,8 +232,14 @@ pub fn portable(lines: &[String], scratch: &Path, fixtures: &Path) -> Vec<String
         .collect()
 }
 
-/// Members whose values differ from run to run or from host to host.
-const VOLATILE: [&str; 13] = [
+/// Members whose values differ from run to run or from host to host, or
+/// from one build of the fixtures to the next (mkntfs picks a new volume
+/// serial, and the fixtures' records carry the time they were made).
+const VOLATILE: [&str; 17] = [
+    "serial",
+    "time_from",
+    "time_to",
+    "format_time",
     "speed_bps",
     "eta_seconds",
     "elapsed_seconds",

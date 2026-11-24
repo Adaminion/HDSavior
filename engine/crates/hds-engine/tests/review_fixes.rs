@@ -655,6 +655,9 @@ fn shutdown_during_the_analysis_does_not_wait_for_the_catalog() {
 // robustness 6: image_start on a source that is already lost.
 // ----------------------------------------------------------------------------------------------
 
+// Unix only: the test cuts the image short under the engine, and on Windows
+// the engine's read-only open with share mode *read* (S4) refuses that writer.
+#[cfg(unix)]
 #[test]
 fn image_start_on_a_lost_source_answers_source_lost_and_creates_nothing() {
     let scratch = TempDir::new("review-image-lost");
