@@ -362,6 +362,7 @@ pub(super) fn remove_file(dir: &Dir, name: &str) -> io::Result<()> {
     // DeleteFileW removes a file or the link itself, never a link's target, and
     // refuses a directory.
     let path = child(dir, name);
+    refuse_source_image_at(&path)?;
     retry_busy(|| match std::fs::remove_file(&path) {
         // "Access denied" is also what this call answers for a directory (or a
         // link to one): that is final, not a file that is busy for a moment.
@@ -371,6 +372,34 @@ pub(super) fn remove_file(dir: &Dir, name: &str) -> io::Result<()> {
         )),
         other => other,
     })
+}
+
+/// Safety invariant S4 for another name of the source image. The share mode
+/// of the source's handle refuses writes, renames and deletes through the name
+/// it was opened by, but Windows (which deletes with POSIX semantics) lets
+/// another hard link of the same file be removed. The file is protected, not
+/// the name, so every name of an open source image is refused here, with the
+/// error the kernel gives for the first name.
+fn refuse_source_image_at(path: &Path) -> io::Result<()> {
+    let Ok(handle) = OpenOptions::new()
+        .access_mode(0)
+        .share_mode(SHARE_ALL)
+        .custom_flags(NO_FOLLOW)
+        .open(path)
+    else {
+        // Nothing to look at: the delete itself reports what is wrong.
+        return Ok(());
+    };
+    let attributes = handle_info(&handle).map_or(0, |info| info.dwFileAttributes);
+    if attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        return Ok(());
+    }
+    match crate::win::file_id(&handle) {
+        Ok(id) if crate::image::is_open_image(id) => {
+            Err(io::Error::from_raw_os_error(32)) // ERROR_SHARING_VIOLATION
+        }
+        _ => Ok(()),
+    }
 }
 
 fn kind_of_attributes(attributes: u32) -> EntryKind {

@@ -31,8 +31,11 @@ read, by the scan or by anything that later works on its results (S2).
 ascending order, skipping what is done. Probe offsets, duplicates removed:
 the MFT offset from every valid NTFS boot sector at the range start or at a
 partition start inside the range; and for each such partition start `P` (the
-range start if there is no partition table) `P + min(3 GiB, size / 3)` rounded
-down to 4 KiB. A probe reads forward until 64 MiB pass without a `FILE` hit.
+range start if there is no partition table) `P + d` with `d = min(3 GiB, size / 3)`
+rounded down to 4 KiB, and `P + d` rounded down to whole GiB when `d ≥ 1 GiB`
+(Windows' own quick format, measured: 256 MB and 1 GB volumes put the `$MFT`
+at size / 3, a 4 GB volume at 1 GiB, 16 GB and 64 GB volumes at 3 GiB, with 4K
+and 64K clusters alike). A probe reads forward until 64 MiB pass without a `FILE` hit.
 Phase names: `mft_probe`, then `sweep`. The early phase exists so that
 stopping early is worthwhile; no catalog exists while a scan runs.
 

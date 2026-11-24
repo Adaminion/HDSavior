@@ -1250,3 +1250,50 @@ fn mismatched_range_or_options_are_refused_and_a_complete_session_returns_at_onc
     assert_eq!(src.read_count(), 0, "a complete session reads nothing");
     assert_eq!(summary.bytes_read, 0);
 }
+
+/// A large source of zeros that holds no memory, for probe arithmetic on
+/// volume sizes Windows was measured with.
+struct Zeros(u64);
+
+impl BlockSource for Zeros {
+    fn size(&self) -> u64 {
+        self.0
+    }
+    fn sector_size(&self) -> u32 {
+        512
+    }
+    fn physical_sector_size(&self) -> u32 {
+        512
+    }
+    fn read_at(&self, _offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        buf.fill(0);
+        Ok(())
+    }
+    fn info(&self) -> hds_io::SourceInfo {
+        MemSource::new(vec![0; 512]).info()
+    }
+    fn is_alive(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn probe_offsets_cover_where_windows_puts_the_mft() {
+    const GIB: u64 = 1 << 30;
+    // Volume size -> where Windows' quick format was measured to put the $MFT.
+    for (size, measured) in [
+        (256 * MIB as u64, (256 * MIB as u64 / 3) & !4095),
+        (GIB, (GIB / 3) & !4095),
+        (4 * GIB, GIB),
+        (16 * GIB, 3 * GIB),
+        (64 * GIB, 3 * GIB),
+    ] {
+        let src: Arc<dyn BlockSource> = Arc::new(Zeros(size));
+        let ranged = RangedSource::new(src, 0..size).unwrap();
+        let probes = plan::probe_offsets(&ranged, &AtomicBool::new(false)).unwrap();
+        assert!(
+            probes.contains(&measured),
+            "{size}: {probes:?} misses {measured}"
+        );
+    }
+}

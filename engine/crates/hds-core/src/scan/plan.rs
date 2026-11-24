@@ -29,6 +29,7 @@ pub(crate) const PROBE_QUIET: u64 = 64 << 20;
 
 /// The heuristic probe lies at most this far behind a partition start.
 const PROBE_MAX_DISTANCE: u64 = 3 << 30;
+const GIB: u64 = 1 << 30;
 
 /// A chunk handed out by the planner.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,7 +178,8 @@ fn mft_offset_at(
 /// The probe offsets of ALGORITHMS A2, duplicates removed: first the
 /// `$MFT` of every valid NTFS boot sector at the range start or at a
 /// partition start inside the range (ascending), then `P + min(3 GiB,
-/// size / 3)` rounded down to 4 KiB for each partition start `P` inside the
+/// size / 3)` rounded down to 4 KiB, and that distance rounded down to whole
+/// GiB when it is at least 1 GiB, for each partition start `P` inside the
 /// range (the range start and the range length when there is none),
 /// ascending. The boot sectors come first because they are the stronger
 /// evidence of where an `$MFT` is.
@@ -219,10 +221,17 @@ pub(crate) fn probe_offsets(source: &RangedSource, cancel: &AtomicBool) -> Resul
     };
     let mut heuristic: Vec<u64> = bases
         .into_iter()
-        .filter_map(|(start, size)| {
+        .flat_map(|(start, size)| {
             let distance = PROBE_MAX_DISTANCE.min(size / 3) & !4095;
-            start.checked_add(distance).filter(|p| range.contains(p))
+            // Windows rounds a distance of a GiB or more down to whole GiB
+            // (measured: 4 GB volume -> 1 GiB, 16 and 64 GB -> 3 GiB).
+            let whole_gib = (distance >= GIB).then_some(distance & !(GIB - 1));
+            [Some(distance), whole_gib]
+                .into_iter()
+                .flatten()
+                .filter_map(move |d| start.checked_add(d))
         })
+        .filter(|p| range.contains(p))
         .collect();
     heuristic.sort_unstable();
     heuristic.dedup();

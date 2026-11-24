@@ -116,8 +116,9 @@ fn open_read_only(path: &Path) -> io::Result<(File, PathBuf)> {
 /// rewriting a file that is open elsewhere. The output primitives therefore
 /// look here and refuse to delete, rename or open for writing a file that is
 /// being read as a source - safety invariant S4 for the engine's own writes,
-/// the only ones it can answer for on such a system.
-#[cfg(unix)]
+/// the only ones it can answer for on such a system. Windows' share modes
+/// cover the name the image was opened by, but not its other hard links, so
+/// the Windows primitives ask here too before they delete.
 mod open_images {
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -147,7 +148,6 @@ mod open_images {
     }
 }
 
-#[cfg(unix)]
 pub(crate) use open_images::contains as is_open_image;
 
 /// Opens the file read-only and returns it with its absolute path. Unix has
@@ -237,7 +237,6 @@ impl ImageFile {
         }
         let id = file_id(&file);
         // Nothing below can fail: the entry is removed again when the value is dropped.
-        #[cfg(unix)]
         if let Some(id) = id {
             open_images::add(id);
         }
@@ -264,7 +263,6 @@ impl ImageFile {
     }
 }
 
-#[cfg(unix)]
 impl Drop for ImageFile {
     fn drop(&mut self) {
         if let Some(id) = self.id {

@@ -228,7 +228,7 @@ try {
     Get-ChildItem T:\Robo, T:\Moved, T:\Copied -File | ForEach-Object { $phaseOf[$_.FullName] = @{ 'Robo' = 'robocopy'; 'Moved' = 'moved'; 'Copied' = 'copyitem' }[$_.Directory.Name] }
 
     # Ground truth for everything on the old volume.
-    Get-ChildItem T:\ -Recurse -Force | Where-Object { $_.FullName -notlike 'T:\System Volume Information*' } | ForEach-Object {
+    Get-ChildItem T:\ -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notlike 'T:\System Volume Information*' } | ForEach-Object {
         $isDir = $_.PSIsContainer
         $e = [ordered]@{ path = $_.FullName; frn = [HdsFileId]::Get($_.FullName); directory = $isDir
             phase = $(if ($phaseOf.ContainsKey($_.FullName)) { $phaseOf[$_.FullName] } else { 'old' })
