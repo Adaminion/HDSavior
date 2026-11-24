@@ -8,7 +8,7 @@
 //! objects "member by member" and leaves the conversion to the engine
 //! (`hds_core::query` module documentation); 5.6 makes the engine the
 //! only crate that knows the protocol. So the adapter lives in the engine
-//! crate: [`convert`] turns `hds-core` values into protocol values, this
+//! crate: `convert` turns `hds-core` values into protocol values, this
 //! module keeps the state and runs the pipelines, and `hds-core` stays free
 //! of protocol types.
 //!
@@ -25,11 +25,11 @@
 //! question during a scan and refuses every command that changes the
 //! session) and puts it back, with its catalog, before the run function
 //! returns `scan_done`. If the run function panics, the work goes back
-//! without catalog ([`WorkSlot`]).
+//! without catalog (`WorkSlot`).
 //!
 //! # Pipelines
 //!
-//! * Catalog build ([`Work::build`], ALGORITHMS C2, D, F, E, G): with a
+//! * Catalog build (`Work::build`, ALGORITHMS C2, D, F, E, G): with a
 //!   source attached a fresh current-volume snapshot is taken (C2: "taken
 //!   whenever a catalog is built with a source attached"), then
 //!   `instances::analyze` (heads read through the source and stored,
@@ -37,7 +37,7 @@
 //!   all of it succeeded are `LIVE`, `HEADS` and the catalog replaced; the
 //!   session file is then checked again by the guard with the new
 //!   protected ranges (B3, `session_file_at_risk`) and checkpointed.
-//! * Scan ([`scan`] module): ALGORITHMS A through `hds_core::scan`, which
+//! * Scan (module `scan`): ALGORITHMS A through `hds_core::scan`, which
 //!   writes the B3 checkpoints every 5 minutes and at every end itself;
 //!   the job records the scan time in `LIVE` (see below), builds the
 //!   catalog unless the engine is shutting down, and checkpoints again.
@@ -54,29 +54,20 @@
 //! before the catalog is built and before the session is checkpointed; a
 //! session loaded from a file keeps the stored value.
 //!
-//! # Seams for the jobs (part B)
+//! # Jobs
 //!
-//! `recover_start`, `carve_start` and `image_start` answer `unsupported`
-//! in this build. Their implementations get everything from here:
-//!
-//! * [`RealBackend::lock`] gives the [`State`]: `state.source` (the
-//!   attached source; `None` in state B) and `state.work` with
-//!   `work.session` (the store: `work.session.store()`), `work.built`
-//!   (`layout` and `catalog`), `work.live`, `work.heads`, `work.carved`.
-//! * [`Work::ranged`] wraps the source in the session range (S2a).
-//! * [`Work::fresh_overwritten`] takes a current-volume snapshot without
-//!   storing it and returns its overwritten set (H1: pass it to
-//!   `Catalog::plan(store, &selection, Some(&set))`).
-//! * [`Work::protected`] is the protected-range list of this moment
-//!   (session range first) for `hds_recover::RecoverOptions` /
-//!   `ImageOptions`.
-//! * [`Work::checkpoint`] writes what changed (for example after
-//!   `hds_core::carve::store_run`), and [`Work::info`] makes the
-//!   `CatalogInfo` of `carve_done`.
-//! * A job's run function captures `Arc<Shared>` ([`RealBackend::shared`])
-//!   and locks it only briefly (queries run beside it).
+//! `recover_start`, `carve_start` and `image_start` are in module `jobs`
+//! (ALGORITHMS H, I, J). Their run functions capture `Arc<Shared>`
+//! ([`RealBackend::shared`]) and lock it only briefly: queries run beside
+//! them. Recovery refreshes the overwritten set first (H1,
+//! [`Work::fresh_overwritten`]), builds its plan from the catalog and runs
+//! with the protected ranges of [`Work::protected`]; what its reads find
+//! joins the catalog (G1). Carving stores its run in the session, the
+//! carved set and the catalog (I5) and keeps the epoch.
 
 mod convert;
+mod deadline;
+mod jobs;
 mod scan;
 
 use std::ops::Range;
@@ -86,7 +77,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hds_core::carve::{discard_carved, CarvedSet};
-use hds_core::catalog::{self, Catalog, CarvedEntry, CatalogInput, InstanceSetError, NodeId};
+use hds_core::catalog::{self, CarvedEntry, Catalog, CatalogInput, InstanceSetError, NodeId};
 use hds_core::geometry::Heads;
 use hds_core::instances::{analyze, AnalysisError, AnalysisInput, KindChoice, Layout, Overrides};
 use hds_core::live::{take_snapshot, LiveError, LiveIndex, LiveSnapshot, LiveState};
@@ -112,11 +103,23 @@ use crate::protocol::{
     SelectionArgs, SelectionSummary, SessionAttachResult, SessionLoadArgs, SessionLoadResult,
     SessionSaveResult, SourceRef,
 };
+use crate::recorded::Recorded;
 
 pub use convert::display_path;
+pub use deadline::{Deadline, READ_FILE_DEADLINE};
 
 /// Warning code: the session file lies inside a lost volume (ALGORITHMS B3).
 pub const WARN_SESSION_FILE_AT_RISK: &str = "session_file_at_risk";
+
+/// Warning code: the last checkpoint of the session file failed (disk
+/// full, disk gone): the file does not hold the session as it is. Cleared
+/// by the next checkpoint that succeeds or by `session_save`.
+pub const WARN_SESSION_FILE_NOT_SAVED: &str = "session_file_not_saved";
+
+/// Warning code of `session_load`: the file ends early (bytes after its
+/// last complete checkpoint were ignored: a crash or a full disk) or holds
+/// no scanned data at all.
+pub const WARN_SESSION_INCOMPLETE: &str = "session_incomplete";
 
 /// The `data` member of an `instance_set` / `geometry_set` error after
 /// which the backend rebuilt its catalog from the session (the previous
@@ -141,7 +144,10 @@ fn never() -> AtomicBool {
 }
 
 fn no_session() -> ProtocolError {
-    ProtocolError::new(ErrorCode::NoSession, "there is no session: scan or load one first")
+    ProtocolError::new(
+        ErrorCode::NoSession,
+        "there is no session: scan or load one first",
+    )
 }
 
 fn no_catalog() -> ProtocolError {
@@ -166,43 +172,6 @@ fn analysis_error(e: &AnalysisError) -> ProtocolError {
     match e {
         AnalysisError::SourceLost(e) => source_lost(e),
         AnalysisError::Cancelled => ProtocolError::new(ErrorCode::Cancelled, "cancelled"),
-    }
-}
-
-/// A source that is not attached, for the guard: where it lives is
-/// unknown, so every destination counts as being on an unknown disk.
-struct NoSource;
-
-impl BlockSource for NoSource {
-    fn size(&self) -> u64 {
-        0
-    }
-    fn sector_size(&self) -> u32 {
-        512
-    }
-    fn physical_sector_size(&self) -> u32 {
-        512
-    }
-    fn read_at(&self, _: u64, _: &mut [u8]) -> std::io::Result<()> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "no source is attached",
-        ))
-    }
-    fn info(&self) -> SourceInfo {
-        SourceInfo {
-            kind: SourceKind::Image,
-            path: String::new(),
-            size: 0,
-            sector_size: 512,
-            physical_sector_size: 512,
-            model: None,
-            serial: None,
-            disk_number: None,
-        }
-    }
-    fn is_alive(&self) -> bool {
-        false
     }
 }
 
@@ -337,16 +306,7 @@ impl Work {
 
     /// The carved files as the catalog takes them.
     fn carved_entries(&self) -> Vec<CarvedEntry> {
-        self.carved
-            .files()
-            .iter()
-            .map(|f| CarvedEntry {
-                offset: f.offset(),
-                len: f.len(),
-                ext: f.ext().to_string(),
-                end_verified: f.end_verified(),
-            })
-            .collect()
+        carved_entries(&self.carved)
     }
 
     /// Builds the catalog (see the module documentation). `progress` gets
@@ -410,10 +370,22 @@ impl Work {
 
     /// Runs the guard again on the session file with the protected ranges
     /// of now (B3): a file inside a lost volume is detached and the
-    /// warning `session_file_at_risk` raised. Needs the source (where the
-    /// file lies is decided against it).
+    /// warning `session_file_at_risk` raised. Without an attached source
+    /// (state B) the guard runs against the recorded source located again
+    /// ([`Recorded`]): the protected ranges change in B too
+    /// (`instance_set`, `geometry_set`).
     fn recheck_file(&mut self, source: Option<&dyn BlockSource>) {
-        let Some(source) = source else { return };
+        if !self.session.has_file() {
+            return;
+        }
+        let recorded;
+        let source = match source {
+            Some(source) => source,
+            None => {
+                recorded = self.recorded();
+                &recorded
+            }
+        };
         let protected = self.protected();
         let guard = SessionGuard {
             source,
@@ -443,6 +415,11 @@ impl Work {
         }
     }
 
+    /// The session's source as recorded, located again (state B).
+    fn recorded(&self) -> Recorded {
+        Recorded::locate(&convert::recorded_source(&self.session.meta().identity))
+    }
+
     fn set_warning(&mut self, code: &str, message: String) {
         self.warnings.retain(|w| w.code != code);
         self.warnings.push(Warning {
@@ -451,11 +428,52 @@ impl Work {
         });
     }
 
-    /// Appends what changed to the session file, if one is attached.
+    /// Appends what changed to the session file, if one is attached. A
+    /// failure raises `session_file_not_saved`; a success clears it.
     pub fn checkpoint(&mut self) {
-        if let Err(e) = self.session.checkpoint() {
-            log_warn(&format!("the session file cannot be updated: {e}"));
+        if !self.session.has_file() {
+            return;
         }
+        match self.session.checkpoint() {
+            Ok(()) => self
+                .warnings
+                .retain(|w| w.code != WARN_SESSION_FILE_NOT_SAVED),
+            Err(e) => {
+                log_warn(&format!("the session file cannot be updated: {e}"));
+                self.not_saved(&e.to_string());
+            }
+        }
+    }
+
+    /// Raises `session_file_not_saved` for the attached file.
+    pub fn not_saved(&mut self, why: &str) {
+        let path = self
+            .session
+            .file_path()
+            .map(display_path)
+            .unwrap_or_default();
+        self.set_warning(
+            WARN_SESSION_FILE_NOT_SAVED,
+            format!(
+                "The session could not be written to its file {path} ({why}). The file does not \
+                 hold the latest state: save the session to another location, or it is lost when \
+                 HDSavior closes."
+            ),
+        );
+    }
+
+    /// Whether the last checkpoint of the attached file failed.
+    pub fn file_behind(&self) -> bool {
+        self.warnings
+            .iter()
+            .any(|w| w.code == WARN_SESSION_FILE_NOT_SAVED)
+    }
+
+    /// Forgets the file warnings after the session was written anew.
+    fn file_written(&mut self) {
+        self.warnings.retain(|w| {
+            w.code != WARN_SESSION_FILE_AT_RISK && w.code != WARN_SESSION_FILE_NOT_SAVED
+        });
     }
 
     /// The `CatalogInfo` of the built catalog (`None` without one).
@@ -499,7 +517,7 @@ impl Work {
             }
         }
         self.consent = Consent::of(dest);
-        self.warnings.retain(|w| w.code != WARN_SESSION_FILE_AT_RISK);
+        self.file_written();
         Ok(())
     }
 
@@ -516,15 +534,15 @@ impl Work {
         let snapshot = self.live.snapshot.as_ref().unwrap_or(&empty);
         let index = LiveIndex::build(store, snapshot);
         let exclude = |id, _: &hds_core::store::RawRecord| !index.is_old(id);
-        check_identity(&self.session, source.clone(), &exclude, force, &never()).map_err(|e| {
-            match e {
+        check_identity(&self.session, source.clone(), &exclude, force, &never()).map_err(
+            |e| match e {
                 IdentityError::SourceLost(e) => source_lost(&e),
                 IdentityError::Cancelled => ProtocolError::new(ErrorCode::Cancelled, "cancelled"),
                 IdentityError::Internal(e) => {
                     ProtocolError::internal(format!("the identity check failed: {e}"))
                 }
-            }
-        })
+            },
+        )
     }
 
     /// Checks `source` (B4) and, when it matches, records its path, model
@@ -572,7 +590,9 @@ impl Work {
             || info.serial != self.session.meta().identity.serial
         {
             if let Err(e) = self.session.set_identity(SourceIdentity::from(&info)) {
-                log_warn(&format!("the session keeps its recorded source identity: {e}"));
+                log_warn(&format!(
+                    "the session keeps its recorded source identity: {e}"
+                ));
             }
         }
         self.warnings.retain(|w| w.code != WARN_IDENTITY_DIFFERS);
@@ -602,12 +622,40 @@ impl Work {
                 self.consent = Consent::default();
                 self.checkpoint();
             }
+            Err(SessionError::DestinationRefused(check))
+                if check.verdict == Verdict::OverlapsSource =>
+            {
+                // B3: a session file inside a lost volume is not written to.
+                log_warn(&format!(
+                    "the session file {} lies inside the rescued area and is not written to",
+                    path.display()
+                ));
+                self.set_warning(
+                    WARN_SESSION_FILE_AT_RISK,
+                    "The session file lies inside a lost file system on the disk being rescued. \
+                     HDSavior does not write to it; save the session to another disk."
+                        .to_string(),
+                );
+            }
             Err(e) => log_info(&format!(
                 "the session file {} is not written to ({e}); session_save keeps the changes",
                 path.display()
             )),
         }
     }
+}
+
+/// The files of a carved set as the catalog takes them.
+fn carved_entries(set: &CarvedSet) -> Vec<CarvedEntry> {
+    set.files()
+        .iter()
+        .map(|f| CarvedEntry {
+            offset: f.offset(),
+            len: f.len(),
+            ext: f.ext().to_string(),
+            end_verified: f.end_verified(),
+        })
+        .collect()
 }
 
 /// What the backend holds.
@@ -769,7 +817,9 @@ impl RealBackend {
     fn discard_carved(work: &mut Work) {
         work.carved = CarvedSet::new();
         if let Err(e) = discard_carved(&mut work.session) {
-            log_warn(&format!("the carved files cannot be discarded in the session: {e}"));
+            log_warn(&format!(
+                "the carved files cannot be discarded in the session: {e}"
+            ));
         }
     }
 }
@@ -805,9 +855,17 @@ impl Backend for RealBackend {
         let mut st = self.lock();
         let source = st.source.clone();
         let work = st.work_mut()?;
-        let none = NoSource;
+        // State B: the recorded source, located again (S2).
+        let recorded;
+        let located: &dyn BlockSource = match &source {
+            Some(source) => &**source,
+            None => {
+                recorded = work.recorded();
+                &recorded
+            }
+        };
         let guard = SessionGuard {
-            source: source.as_deref().unwrap_or(&none),
+            source: located,
             protected: &dest.protected,
             allow_same_disk: dest.allow_same_disk,
             allow_unknown_disk: dest.allow_unknown_disk,
@@ -817,7 +875,7 @@ impl Backend for RealBackend {
             .save_as(Path::new(&dest.path), &guard)
             .map_err(|e| convert::session_error(&e))?;
         work.consent = Consent::of(&dest);
-        work.warnings.retain(|w| w.code != WARN_SESSION_FILE_AT_RISK);
+        work.file_written();
         Ok(SessionSaveResult {
             path: display_path(&report.path),
             bytes: report.bytes,
@@ -837,10 +895,22 @@ impl Backend for RealBackend {
                 "{}: {} bytes after the last checkpoint are ignored ({})",
                 args.path,
                 report.ignored_bytes,
-                report.ignored_reason.unwrap_or_default()
+                report.ignored_reason.clone().unwrap_or_default()
             ));
         }
         let mut work = Work::loaded(session)?;
+        if report.ignored_bytes > 0 {
+            work.set_warning(
+                WARN_SESSION_INCOMPLETE,
+                format!(
+                    "The session file ends early: {} bytes after its last complete checkpoint \
+                     could not be used ({}). The session holds what was saved until then; a \
+                     scan resumed from it reads the rest again.",
+                    report.ignored_bytes,
+                    report.ignored_reason.clone().unwrap_or_default()
+                ),
+            );
+        }
         task.progress(0.1);
         let (mut source, mut source_error) = Self::find_source(&mut work, args.source.as_ref());
         task.progress(0.3);
@@ -870,7 +940,21 @@ impl Backend for RealBackend {
         if let Some(s) = &source {
             work.reattach_file(&**s);
         }
-        let catalog = work.info(source.is_some()).ok_or_else(no_catalog)?;
+        let mut catalog = work.info(source.is_some()).ok_or_else(no_catalog)?;
+        if catalog.scanned_bytes == 0
+            && !work
+                .warnings
+                .iter()
+                .any(|w| w.code == WARN_SESSION_INCOMPLETE)
+        {
+            work.set_warning(
+                WARN_SESSION_INCOMPLETE,
+                "The session file holds no scanned data: the scan stopped (or the file was cut \
+                 off) before its first checkpoint. Resume the scan to read the source."
+                    .to_string(),
+            );
+            catalog = work.info(source.is_some()).ok_or_else(no_catalog)?;
+        }
         st.work = Some(work);
         st.source = source.clone();
         task.progress(1.0);
@@ -1102,83 +1186,101 @@ impl Backend for RealBackend {
             .unwrap_or((0, 0))
     }
 
-    fn recover_start(&self, _: RecoverRequest) -> Result<RecoverJob, ProtocolError> {
-        Err(ProtocolError::new(
-            ErrorCode::Unsupported,
-            "recovery is not connected in this build of the engine yet",
-        ))
+    fn recover_start(&self, request: RecoverRequest) -> Result<RecoverJob, ProtocolError> {
+        jobs::recover_start(&self.shared, request)
     }
 
-    fn carve_start(&self, _: CarveRequest) -> Result<CarveJob, ProtocolError> {
-        Err(ProtocolError::new(
-            ErrorCode::Unsupported,
-            "carving is not connected in this build of the engine yet",
-        ))
+    fn carve_start(&self, request: CarveRequest) -> Result<CarveJob, ProtocolError> {
+        jobs::carve_start(&self.shared, request)
     }
 
-    fn image_start(&self, _: ImageRequest) -> Result<ImageJob, ProtocolError> {
-        Err(ProtocolError::new(
-            ErrorCode::Unsupported,
-            "imaging is not connected in this build of the engine yet",
-        ))
+    fn image_start(&self, request: ImageRequest) -> Result<ImageJob, ProtocolError> {
+        jobs::image_start(&self.shared, request)
     }
 
     fn read_file(&self, args: &ReadFileArgs) -> Result<FileBytes, ProtocolError> {
-        let st = self.lock();
-        let source = st.source.clone().ok_or_else(no_source)?;
-        let work = st.work()?;
-        let built = work.built()?;
-        let store = work.session.store();
-        let id = NodeId::from_wire(args.node)
-            .filter(|&n| built.catalog.contains(n))
-            .ok_or_else(|| {
+        // What the read needs is taken under the lock; the read itself runs
+        // without it, so that a slow or failing disk does not hold up a
+        // running recovery (its G1 updates take the lock after every file).
+        let stop = Arc::new(AtomicBool::new(false));
+        let (catalog, id, file, ext, ranged) = {
+            let st = self.lock();
+            let source = st.source.clone().ok_or_else(no_source)?;
+            let work = st.work()?;
+            let built = work.built()?;
+            let store = work.session.store();
+            let id = NodeId::from_wire(args.node)
+                .filter(|&n| built.catalog.contains(n))
+                .ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorCode::NotFound,
+                        format!("node {} does not exist", args.node),
+                    )
+                })?;
+            built
+                .catalog
+                .readable(id)
+                .map_err(|e| convert::query_error(&e))?;
+            let (file, _) = built
+                .catalog
+                .file_source(store, id.0)
+                .map_err(|e| convert::query_error(&e))?;
+            let ext = built
+                .catalog
+                .row(store, id, true)
+                .map(|r| r.ext)
+                .unwrap_or_default();
+            let range = work.session.meta().range.clone();
+            let deadline: Arc<dyn BlockSource> =
+                Arc::new(Deadline::new(source, READ_FILE_DEADLINE, stop.clone()));
+            let ranged = RangedSource::new(deadline, range).map_err(|e| {
                 ProtocolError::new(
-                    ErrorCode::NotFound,
-                    format!("node {} does not exist", args.node),
+                    ErrorCode::SourceMismatch,
+                    format!("the source does not hold the session range: {e}"),
                 )
             })?;
-        built
-            .catalog
-            .readable(id)
-            .map_err(|e| convert::query_error(&e))?;
-        let (file, _) = built
-            .catalog
-            .file_source(store, id.0)
-            .map_err(|e| convert::query_error(&e))?;
-        let ext = built
-            .catalog
-            .row(store, id, true)
-            .map(|r| r.ext)
-            .unwrap_or_default();
-        let ranged = work.ranged(&source)?;
+            (built.catalog.clone(), id, file, ext, ranged)
+        };
         let length = usize::try_from(args.length).unwrap_or(usize::MAX);
-        let preview = read_preview(&ranged, &file, &ext, args.offset, length, &never()).map_err(
+        let preview = read_preview(&ranged, &file, &ext, args.offset, length, &stop).map_err(
             |e| match e {
                 PreviewError::TooLong { requested } => ProtocolError::bad_request(format!(
                     "length {requested} is more than read_file returns at once"
                 )),
                 PreviewError::Read(ReadError::SourceLost(e)) => source_lost(&e),
-                PreviewError::Read(ReadError::Cancelled) => {
-                    ProtocolError::new(ErrorCode::Cancelled, "cancelled")
-                }
+                PreviewError::Read(ReadError::Cancelled) => ProtocolError::new(
+                    ErrorCode::IoError,
+                    format!(
+                        "reading stopped after {} s: this part of the file lies in an area of \
+                         the disk that is very slow to read (bad sectors); recovering the file \
+                         reads it completely",
+                        READ_FILE_DEADLINE.as_secs()
+                    ),
+                ),
                 PreviewError::Read(ReadError::RecordChanged) => ProtocolError::new(
                     ErrorCode::IoError,
                     "the file's record changed on the disk since the scan",
                 ),
-                PreviewError::Read(e) => ProtocolError::new(
-                    ErrorCode::IoError,
-                    format!("the file cannot be read: {e}"),
-                ),
+                PreviewError::Read(e) => {
+                    ProtocolError::new(ErrorCode::IoError, format!("the file cannot be read: {e}"))
+                }
             },
         )?;
         // What the read found (signature at offset 0, bad sectors) joins
-        // the file's flags (G1).
-        built.catalog.observe(id, preview.flags);
+        // the file's flags (G1); a catalog replaced meanwhile ignores it.
+        catalog.observe(id, preview.flags);
         Ok(FileBytes {
             data: preview.data,
             size: preview.size,
             eof: preview.eof,
         })
+    }
+
+    fn session_source(&self) -> Option<SourceInfo> {
+        let st = self.lock();
+        st.work
+            .as_ref()
+            .map(|w| convert::recorded_source(&w.session.meta().identity))
     }
 
     fn session_sector_size(&self) -> Option<u32> {

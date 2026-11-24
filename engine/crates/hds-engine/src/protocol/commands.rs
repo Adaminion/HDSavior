@@ -342,6 +342,8 @@ pub struct SessionAttachResult {
 /// Arguments of `geometry_set`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct GeometrySetArgs {
+    /// Catalog epoch (instance ids belong to it).
+    pub epoch: u64,
     /// Instance id.
     pub instance: u32,
     /// A power of two from 512 to 2 MiB.
@@ -365,6 +367,8 @@ pub enum InstanceChoice {
 /// Arguments of `instance_set`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct InstanceSetArgs {
+    /// Catalog epoch (instance ids belong to it).
+    pub epoch: u64,
     /// Instance id.
     pub instance: u32,
     /// The new kind.
@@ -397,6 +401,16 @@ pub const MAX_PAGE: u32 = 1000;
 
 /// Largest `length` of `read_file`.
 pub const MAX_READ_LENGTH: u64 = 8_388_608;
+
+/// Reads `null` as the type's default (PROTOCOL conventions: `null` in a
+/// filter means "any").
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 fn default_limit() -> u32 {
     200
@@ -538,8 +552,8 @@ pub struct SearchArgs {
     /// Subtree to search; `null` = the main root.
     #[serde(default)]
     pub under: Option<u64>,
-    /// The filter.
-    #[serde(default)]
+    /// The filter; `null` or absent = any.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub filter: Filter,
     /// Include deleted files.
     #[serde(default)]

@@ -535,6 +535,46 @@ fn geometry_set_keeps_the_tree_and_recomputes_health() {
 }
 
 #[test]
+fn geometry_set_to_the_geometry_in_effect_does_not_change_main() {
+    // PROTOCOL geometry_set: carved nodes are discarded only when the main
+    // instance changes; a pair equal to the one in effect changes nothing.
+    let mut lab = base_lab(32, 24);
+    lab.rec(ORIGIN, &dir(100, 1, ROOT, "d", t(10)));
+    let mut run = lab.run(None);
+    let cat = catalog(&run);
+    let g = cat.instances()[0].geometry.clone();
+    let mut overrides = Overrides::new();
+    let cancel = AtomicBool::new(false);
+    let (c2, main_changed) = crate::catalog::geometry_set(
+        &mut run.session,
+        &mut run.layout,
+        &mut overrides,
+        &mut run.heads,
+        &cat,
+        0,
+        (g.cluster_size, g.volume_offset),
+        &cancel,
+    )
+    .unwrap();
+    assert!(
+        !main_changed,
+        "the same geometry again is no change of main"
+    );
+    let (_, main_changed) = crate::catalog::geometry_set(
+        &mut run.session,
+        &mut run.layout,
+        &mut overrides,
+        &mut run.heads,
+        &c2,
+        0,
+        (g.cluster_size, g.volume_offset + 4096),
+        &cancel,
+    )
+    .unwrap();
+    assert!(main_changed);
+}
+
+#[test]
 fn g2_sweep_is_not_quadratic_in_overlapping_files() {
     // 60 000 files on the same cluster: equal keys (all overlap), then
     // ascending keys (all but the last overwritten).

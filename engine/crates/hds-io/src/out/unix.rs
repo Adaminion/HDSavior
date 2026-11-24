@@ -92,6 +92,22 @@ fn open_dir_at(parent: RawFd, name: &CStr) -> io::Result<File> {
     cvt(|| unsafe { libc::openat(parent, name.as_ptr(), DIR_FLAGS) }).map(owned)
 }
 
+/// A directory below the root must be on the root's file system: a mount
+/// point (another file system mounted on a subdirectory) is refused like a
+/// link, because the destination guard checked only where the root lies.
+/// (On Windows a mounted folder is a reparse point and refused as such.)
+fn same_file_system(parent: &File, child: File) -> io::Result<File> {
+    use std::os::unix::fs::MetadataExt;
+    if parent.metadata()?.dev() == child.metadata()?.dev() {
+        Ok(child)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the name is a mount point of another file system, which is not entered",
+        ))
+    }
+}
+
 fn is_link_or_not_dir(err: &io::Error) -> bool {
     matches!(
         err.raw_os_error(),
@@ -160,7 +176,7 @@ pub(super) fn make_subdir(dir: &Dir, name: &str) -> io::Result<(Dir, bool)> {
     match open_dir_at(fd, &c) {
         Ok(handle) => Ok((
             Dir {
-                handle,
+                handle: same_file_system(&dir.handle, handle)?,
                 path: dir.path.join(name),
                 name_limit: dir.name_limit,
             },
@@ -175,7 +191,7 @@ pub(super) fn open_subdir(dir: &Dir, name: &str) -> io::Result<Option<Dir>> {
     let c = c_name(name)?;
     match open_dir_at(dir.handle.as_raw_fd(), &c) {
         Ok(handle) => Ok(Some(Dir {
-            handle,
+            handle: same_file_system(&dir.handle, handle)?,
             path: dir.path.join(name),
             name_limit: dir.name_limit,
         })),
@@ -326,6 +342,11 @@ fn refuse_source_image(device: u64, inode: u64) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::ResourceBusy,
             "the file is the disk image that is being read; it must not be changed",
+        ))
+    } else if crate::image::is_in_use(id) {
+        Err(io::Error::new(
+            io::ErrorKind::ResourceBusy,
+            "the file is in use by HDSavior (the session file); it must not be changed",
         ))
     } else {
         Ok(())

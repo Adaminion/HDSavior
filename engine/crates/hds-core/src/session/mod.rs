@@ -379,6 +379,22 @@ struct Writer {
     valid_end: u64,
 }
 
+impl Writer {
+    /// The writer of `file`, which is held (`OutFile::hold`): the engine's
+    /// own output primitives refuse to delete or replace it while the
+    /// session writes to it (a recovery with `overwrite` into the folder
+    /// of the session file, S4).
+    fn new(dir: OutDir, path: PathBuf, mut file: OutFile, valid_end: u64) -> Writer {
+        file.hold();
+        Writer {
+            _dir: dir,
+            path,
+            file,
+            valid_end,
+        }
+    }
+}
+
 /// What [`Session::load`] found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadReport {
@@ -942,12 +958,7 @@ impl Session {
             if let Err(e) = dir.remove_file(&name) {
                 let _ = dir.remove_file(&temp_name);
                 if let (Some(valid_end), Ok(file)) = (own_end, dir.open_existing(&name)) {
-                    self.writer = Some(Writer {
-                        _dir: dir.clone(),
-                        path: target.clone(),
-                        file,
-                        valid_end,
-                    });
+                    self.writer = Some(Writer::new(dir.clone(), target.clone(), file, valid_end));
                 }
                 return Err(SessionError::Io(e));
             }
@@ -961,12 +972,7 @@ impl Session {
             // under its temporary name and go on writing to it.
             let temp_path = dir.path().join(&temp_name);
             if let Ok(file) = dir.open_existing(&temp_name) {
-                self.writer = Some(Writer {
-                    _dir: dir,
-                    path: temp_path.clone(),
-                    file,
-                    valid_end: end,
-                });
+                self.writer = Some(Writer::new(dir, temp_path.clone(), file, end));
                 self.written(temp_path.clone(), end, last, sequence);
             }
             return Err(SessionError::Io(io::Error::new(
@@ -979,12 +985,7 @@ impl Session {
             )));
         }
         let file = dir.open_existing(&name)?;
-        self.writer = Some(Writer {
-            _dir: dir,
-            path: target.clone(),
-            file,
-            valid_end: end,
-        });
+        self.writer = Some(Writer::new(dir, target.clone(), file, end));
         self.written(target.clone(), end, last, sequence);
         Ok(SaveReport {
             path: target,
@@ -1054,12 +1055,7 @@ impl Session {
             self.save_as(path, guard)?;
             return Ok(());
         }
-        self.writer = Some(Writer {
-            _dir: dir,
-            path: target,
-            file,
-            valid_end: origin.valid_end,
-        });
+        self.writer = Some(Writer::new(dir, target, file, origin.valid_end));
         Ok(())
     }
 }

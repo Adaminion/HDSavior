@@ -76,6 +76,74 @@ Map<String, int> checkTranscript(Iterable<String> lines) {
   return seen;
 }
 
+Set<String> _wires(List<WireEnum> values) => {for (final v in values) if (v.wire.isNotEmpty) v.wire};
+
+/// Which closed set of strings each member of the protocol holds, by its
+/// path in a message (`result:<cmd>`, `event:<name>` or `error`, then the
+/// members, `[]` for array elements; `*` stands for any command or event).
+final Map<RegExp, Set<String>> enumMembers = {
+  RegExp(r'^\w+:\w+(\.\w+)*\.source\.kind$'): _wires(SourceKind.values),
+  RegExp(r'^result:open_source\.partitions\[\]\.fs$'): _wires(FileSystemKind.values),
+  RegExp(r'^result:open_source\.table$'): _wires(PartitionTableKind.values),
+  RegExp(r'^result:list_disks\.disks\[\]\.(table)$'): _wires(PartitionTableKind.values),
+  RegExp(r'^result:list_disks\.disks\[\]\.media$'): _wires(MediaKind.values),
+  RegExp(r'^result:list_disks\.disks\[\]\.flags\[\]$'): _wires(DiskFlag.values),
+  RegExp(r'\.warnings\[\]\.code$'): _wires(WarningCode.values),
+  RegExp(r'\.instances\[\]\.kind$'): _wires(InstanceKind.values),
+  RegExp(r'\.cluster_source$'): _wires(ClusterSource.values),
+  RegExp(r'\.offset_source$'): _wires(OffsetSource.values),
+  RegExp(r'\.protected\[\]\.reason$'): _wires(ProtectionReason.values),
+  RegExp(r'^result:check_destination\.reason$'): _wires(ProtectionReason.values),
+  RegExp(r'^result:check_destination\.verdict$'): _wires(DestinationVerdict.values),
+  RegExp(r'^(result:(list_children|search)\.rows\[\]|result:node_info\.row)\.kind$'): _wires(NodeKind.values),
+  RegExp(r'^(result:(list_children|search)\.rows\[\]|result:node_info\.row)\.rating$'): _wires(Rating.values),
+  RegExp(r'^(result:(list_children|search)\.rows\[\]|result:node_info\.row)\.flags\[\]$'): _wires(FileFlag.values),
+  RegExp(r'^result:node_info\.flag_details\[\]\.flag$'): _wires(FileFlag.values),
+  RegExp(r'^result:\w+\.job$'): _wires(JobKind.values),
+  RegExp(r'^event:scan_progress\.phase$'): _wires(ScanPhase.values),
+  RegExp(r'^event:\w+_done\.status$'): _wires(JobStatus.values),
+  RegExp(r'^event:task_progress\.task$'): _wires(TaskKind.values),
+  RegExp(r'^event:log\.level$'): _wires(LogLevel.values),
+  RegExp(r'(^error|\.error|\.source_error)\.code$'): _wires(EngineErrorCode.values),
+};
+
+/// Every string value of [transcript] at a path of [enumMembers] that is not
+/// one of the values the app knows, as `path: value`.
+List<String> unknownEnumValues(Iterable<String> transcript) {
+  final problems = <String>{};
+  final commands = <Object?, String>{};
+  void walk(Object? value, String path) {
+    if (value is Map<String, Object?>) {
+      for (final MapEntry(:key, :value) in value.entries) {
+        walk(value, '$path.$key');
+      }
+    } else if (value is List<Object?>) {
+      for (final element in value) {
+        walk(element, '$path[]');
+      }
+    } else if (value is String) {
+      for (final MapEntry(key: pattern, value: known) in enumMembers.entries) {
+        if (pattern.hasMatch(path) && !known.contains(value)) problems.add('$path: "$value"');
+      }
+    }
+  }
+
+  for (final line in transcript) {
+    if (line.trim().isEmpty) continue;
+    final message = jsonDecode(line) as Map<String, Object?>;
+    if (message['cmd'] case final String command) {
+      commands[message['id']] = command;
+    } else if (message['event'] case final String name) {
+      walk(message['data'], 'event:$name');
+    } else if (message['ok'] == true) {
+      walk(message['result'], 'result:${commands[message['id']]}');
+    } else {
+      walk(message['error'], 'error');
+    }
+  }
+  return problems.toList()..sort();
+}
+
 void main() {
   test('the checker accepts a well-formed conversation and rejects a malformed one', () {
     final good = [
@@ -103,5 +171,33 @@ void main() {
     final seen = checkTranscript(file.readAsLinesSync());
     expect(seen['requests'], greaterThan(0));
     expect(seen['responses'], seen['requests']);
+  });
+
+  test('the enum checker finds values the app does not know', () {
+    expect(
+      unknownEnumValues([
+        '{"id": 1, "cmd": "catalog_info"}',
+        '{"id": 1, "ok": true, "result": {"warnings": [{"code": "old_session_format", "message": ""}, {"code": "brand_new", "message": ""}], "instances": [{"kind": "main", "geometry": {"cluster_source": "attr", "offset_source": "guess"}}]}}',
+        '{"event": "scan_done", "data": {"status": "stopped", "error": {"code": "source_lost", "message": "", "data": null}}}',
+        '{"event": "recover_done", "data": {"status": "paused", "error": null}}',
+        '{"id": 2, "cmd": "hello"}',
+        '{"id": 2, "ok": false, "error": {"code": "teapot", "message": "", "data": null}}',
+      ]),
+      [
+        'error.code: "teapot"',
+        'event:recover_done.status: "paused"',
+        'result:catalog_info.instances[].geometry.offset_source: "guess"',
+        'result:catalog_info.warnings[].code: "brand_new"',
+      ],
+    );
+  });
+
+  test('every enum value in the recorded engine transcript is one the app knows', () {
+    final file = File(transcriptPath);
+    if (!file.existsSync()) {
+      markTestSkipped('$transcriptPath does not exist yet (the engine records it)');
+      return;
+    }
+    expect(unknownEnumValues(file.readAsLinesSync()), isEmpty);
   });
 }

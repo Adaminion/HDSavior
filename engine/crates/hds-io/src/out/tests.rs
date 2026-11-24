@@ -1260,3 +1260,65 @@ fn a_directory_in_use_cannot_be_moved_away() {
     drop(photos);
     drop(root);
 }
+
+#[test]
+fn a_held_file_is_neither_deleted_nor_overwritten() {
+    let tmp = TempDir::new("out-held");
+    let dir = OutDir::create_root(&tmp.join("d")).unwrap();
+    let mut held = dir.create_new("session.hds").unwrap();
+    held.write_all(b"session").unwrap();
+    held.hold();
+    // Overwrite by a recovered file of the same name: refused, the file stays.
+    let mut part = part_with(&dir, "recovered");
+    assert!(part
+        .commit("session.hds", OnExists::Overwrite, &never)
+        .is_err());
+    part.discard().unwrap();
+    assert!(dir.remove_file("session.hds").is_err());
+    assert_eq!(read(&dir.path().join("session.hds")), "session");
+    // Once let go of, it is an ordinary file again.
+    drop(held);
+    dir.remove_file("session.hds").unwrap();
+}
+
+/// Mounts a small tmpfs on `dir` (root only); false when that is not possible.
+#[cfg(target_os = "linux")]
+fn mount_tmpfs(dir: &Path) -> bool {
+    std::process::Command::new("mount")
+        .args(["-t", "tmpfs", "-o", "size=1m", "tmpfs"])
+        .arg(dir)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_mount_point_below_the_root_is_never_entered() {
+    let tmp = TempDir::new("out-mount");
+    let root_path = tmp.join("d");
+    std::fs::create_dir_all(root_path.join("mnt")).unwrap();
+    if !mount_tmpfs(&root_path.join("mnt")) {
+        eprintln!("SKIPPED: cannot mount a tmpfs (needs root)");
+        return;
+    }
+    struct Unmount(std::path::PathBuf);
+    impl Drop for Unmount {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("umount").arg(&self.0).status();
+        }
+    }
+    let _unmount = Unmount(root_path.join("mnt"));
+    std::fs::write(root_path.join("mnt").join("~hds-1.part"), b"x").unwrap();
+    let root = OutDir::create_root(&root_path).unwrap();
+    assert!(root.subdir("mnt").is_err(), "subdir entered a mount point");
+    assert!(
+        root.open_subdir("mnt").is_err(),
+        "open_subdir entered a mount point"
+    );
+    let report = root.remove_leftover_parts(true).unwrap();
+    assert_eq!(report.removed, 0);
+    assert!(root_path.join("mnt").join("~hds-1.part").exists());
+    // A plain directory beside it is still entered.
+    assert!(root.subdir("plain").is_ok());
+}

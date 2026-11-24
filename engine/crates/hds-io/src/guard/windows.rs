@@ -244,5 +244,8 @@ pub(super) fn resolve(path: &Path, purpose: Purpose) -> Result<Resolved, Refusal
             volume: u64::from(info.dwVolumeSerialNumber),
             index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
         }),
+        // An image attached as a virtual disk is opened with share mode
+        // read only, which conflicts with any read-write attach.
+        backing_files: Vec::new(),
     })
 }

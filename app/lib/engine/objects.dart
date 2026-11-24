@@ -882,6 +882,25 @@ final class EngineError {
 
   EngineErrorCode get kind => EngineErrorCode.parse(code);
 
+  /// For `source_mismatch`: the names of the identity checks that failed
+  /// (`data.failed`: `size`, `records`, `too_few_samples`); empty otherwise
+  /// or when the engine did not name them.
+  List<String> get failedChecks {
+    if (kind != EngineErrorCode.sourceMismatch) return const [];
+    final failed = data?['failed'];
+    if (failed is! List<Object?>) return const [];
+    return [for (final check in failed) if (check is String) check];
+  }
+
+  /// Whether `session_attach_source` with `force` can attach the source
+  /// anyway: the only failed check is that too few records could be
+  /// compared. A source whose records differ, or that is too small, is
+  /// refused even with `force`.
+  bool get forceMayAttach {
+    final failed = failedChecks;
+    return failed.isNotEmpty && failed.every((check) => check == 'too_few_samples');
+  }
+
   @override
   String toString() =>
       message.isEmpty ? 'EngineError($code)' : 'EngineError($code: $message)';

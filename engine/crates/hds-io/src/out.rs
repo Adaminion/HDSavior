@@ -472,6 +472,7 @@ impl OutDir {
         self.check_entry_name(name)?;
         Ok(OutFile {
             file: sys::create_new(&self.dir, name)?,
+            held: None,
         })
     }
 
@@ -482,6 +483,7 @@ impl OutDir {
         self.check_entry_name(name)?;
         Ok(OutFile {
             file: sys::open_existing(&self.dir, name)?,
+            held: None,
         })
     }
 
@@ -624,9 +626,25 @@ impl OutDir {
 #[derive(Debug)]
 pub struct OutFile {
     file: File,
+    /// Its identity while it is held ([`hold`](OutFile::hold)).
+    held: Option<crate::source::FileId>,
 }
 
 impl OutFile {
+    /// Marks the file as in use by the engine until this value is dropped:
+    /// the output primitives then refuse to delete it, rename over it or
+    /// open it for writing elsewhere, as they do for a source image (S4).
+    /// For files that must survive the engine's own later writes, such as
+    /// the attached session file next to a recovery with `overwrite`.
+    pub fn hold(&mut self) {
+        if self.held.is_none() {
+            if let Some(id) = crate::image::file_id(&self.file) {
+                crate::image::hold_in_use(id);
+                self.held = Some(id);
+            }
+        }
+    }
+
     /// Current length of the file in bytes.
     pub fn len(&self) -> io::Result<u64> {
         Ok(self.file.metadata()?.len())
@@ -652,6 +670,14 @@ impl OutFile {
     /// before the file is dropped.
     pub fn set_times(&self, times: &Timestamps) -> TimesReport {
         apply_times(&self.file, times)
+    }
+}
+
+impl Drop for OutFile {
+    fn drop(&mut self) {
+        if let Some(id) = self.held.take() {
+            crate::image::release_in_use(id);
+        }
     }
 }
 

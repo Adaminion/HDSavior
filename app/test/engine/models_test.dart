@@ -270,6 +270,22 @@ void main() {
       expect(parsed.sourceError!.kind, EngineErrorCode.notFound);
       expect(parsed.sourceError!.message, 'The disk is not connected.');
     });
+
+    test('source_mismatch names the failed checks; only too_few_samples can be forced', () {
+      EngineError mismatch(Object? failed) => EngineError.fromJson(JsonObject.root({
+        'code': 'source_mismatch',
+        'message': 'm',
+        'data': {'failed': failed, 'samples': 3, 'matched': 3, 'mismatched': 0, 'unreadable': 0},
+      }, 'e'));
+      expect(mismatch(['too_few_samples']).failedChecks, ['too_few_samples']);
+      expect(mismatch(['too_few_samples']).forceMayAttach, isTrue);
+      expect(mismatch(['records']).forceMayAttach, isFalse);
+      expect(mismatch(['size', 'too_few_samples']).forceMayAttach, isFalse);
+      expect(mismatch(null).failedChecks, isEmpty);
+      expect(mismatch(null).forceMayAttach, isFalse);
+      const other = EngineError(code: 'not_found', data: {'failed': ['too_few_samples']});
+      expect(other.failedChecks, isEmpty, reason: 'only source_mismatch names checks');
+    });
   });
 
   group('enums', () {
@@ -294,7 +310,7 @@ void main() {
           'trim_supported', 'mounted_volume', 'page_file_on_source', 'system_disk', 'app_on_source', //
           'source_reads_zero', 'carve_hits_capped', 'live_volume_incomplete', 'writes_not_detectable',
           'scan_incomplete', 'out_of_range_files', 'identity_differs', 'mixed_generations',
-          'session_file_at_risk',
+          'session_file_at_risk', 'old_session_format', 'session_file_not_saved', 'session_incomplete',
         ],
         WarningCode.parse,
         WarningCode.unknown,

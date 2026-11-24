@@ -125,7 +125,10 @@ final class EngineApi {
     args: {'kind': _sourceKind(kind), 'path': path, 'sector_size': ?sectorSize},
   );
 
-  /// `close_source`.
+  /// `close_source`: closes the source only. A session and its catalog stay
+  /// in the engine (browse only, like a session loaded without its source)
+  /// until `open_source` or `session_load` replaces them; the epoch does not
+  /// change.
   Future<void> closeSource() => _call('close_source', _nothing);
 
   /// `scan_start`: starts (or with [resume] continues) the scan of the byte
@@ -208,9 +211,11 @@ final class EngineApi {
 
   /// `geometry_set`: overrides the geometry of one file system. Health and
   /// the protected ranges are recomputed; the tree and the epoch stay; carved
-  /// nodes are discarded when the main instance changes. Can take long
-  /// (`task_progress`).
+  /// nodes are discarded when the main instance or its geometry changes. Can
+  /// take long (`task_progress`). [instance] belongs to [epoch]
+  /// (`stale_catalog` otherwise).
   Future<CatalogInfo> geometrySet({
+    required int epoch,
     required int instance,
     required int clusterSize,
     required int volumeOffset,
@@ -218,6 +223,7 @@ final class EngineApi {
     'geometry_set',
     CatalogInfo.fromJson,
     args: {
+      'epoch': epoch,
       'instance': instance,
       'cluster_size': clusterSize,
       'volume_offset': volumeOffset,
@@ -227,18 +233,22 @@ final class EngineApi {
   /// `instance_set`: overrules the engine's verdict about one file system.
   ///
   /// [InstanceOverride.main] makes that instance the main one (the previous
-  /// main becomes `other`); [InstanceOverride.other] turns an `embedded` or
+  /// main becomes `other`, or, if it was main only by an earlier
+  /// [InstanceOverride.main], returns to the kind the engine gives it); [InstanceOverride.other] turns an `embedded` or
   /// `older` instance into a volume of its own, so that its files are read
   /// with its own geometry and can be recovered; [InstanceOverride.auto]
   /// withdraws the override. The catalog is rebuilt (new epoch) and carved
   /// nodes are discarded. `strays` cannot be changed (`bad_request`).
+  /// [instance] belongs to [epoch] (`stale_catalog` otherwise, so that a
+  /// repeated request cannot hit another instance).
   Future<CatalogInfo> instanceSet({
+    required int epoch,
     required int instance,
     required InstanceOverride kind,
   }) => _call(
     'instance_set',
     CatalogInfo.fromJson,
-    args: {'instance': instance, 'kind': kind.wire},
+    args: {'epoch': epoch, 'instance': instance, 'kind': kind.wire},
   );
 
   /// `list_children`: one page of the children of folder [node].

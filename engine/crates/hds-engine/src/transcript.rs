@@ -251,6 +251,11 @@ const VOLATILE: [&str; 13] = [
 
 fn mask(value: &mut Value) {
     match value {
+        // A path below the scratch or fixture directory: the separator is
+        // the host's.
+        Value::String(s) if s.starts_with("<tmp>") || s.starts_with("<fixtures>") => {
+            *s = s.replace('\\', "/");
+        }
         Value::Object(members) => {
             for (key, member) in members.iter_mut() {
                 if VOLATILE.contains(&key.as_str()) {
@@ -259,7 +264,11 @@ fn mask(value: &mut Value) {
                     if let Value::String(s) = member {
                         *s = s
                             .chars()
-                            .map(|c| if c.is_ascii_digit() { '0' } else { c })
+                            .map(|c| match c {
+                                '0'..='9' => '0',
+                                '\\' => '/',
+                                c => c,
+                            })
                             .collect();
                     }
                 } else {
@@ -272,22 +281,78 @@ fn mask(value: &mut Value) {
     }
 }
 
-/// The form two recordings are compared in: portable lines without
-/// progress events, with volatile members masked and the size of saved
-/// session files left out.
+/// The form two recordings are compared in: portable lines with volatile
+/// members masked and the size of saved session files left out.
+///
+/// How many progress events a job sends depends on its speed (at most 4 a
+/// second), so they are compared by what does not: a run of read-phase
+/// `scan_progress` events (`mft_probe`, `sweep`) becomes its last event,
+/// which carries the final counters; a run of `recover_progress`,
+/// `carve_progress` or `image_progress` events becomes one entry with its
+/// members' names. `analyzing` and `task_progress` events are kept. Every
+/// event of a run must have the members of the run's first event. `log`
+/// events are left out.
 pub fn comparable(lines: &[String]) -> Vec<Value> {
     let mut out = Vec::new();
     let mut save_ids = Vec::new();
+    // The pending run of timing-dependent progress events: name, its
+    // members' names, the last event, and whether every event matched.
+    let mut run: Option<(String, Vec<String>, Value, bool)> = None;
+    let keys = |data: &Value| -> Vec<String> {
+        data.as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    let flush = |run: &mut Option<(String, Vec<String>, Value, bool)>, out: &mut Vec<Value>| {
+        if let Some((name, keys, last, same_shape)) = run.take() {
+            let mut entry = if name == "scan_progress" {
+                let mut last = last;
+                mask(&mut last);
+                last
+            } else {
+                serde_json::json!({"event": name, "members": keys})
+            };
+            if !same_shape {
+                entry["members_differ"] = Value::Bool(true);
+            }
+            out.push(entry);
+        }
+    };
     for line in lines {
         let Ok(mut value) = serde_json::from_str::<Value>(line) else {
+            flush(&mut run, &mut out);
             out.push(Value::String(line.clone()));
             continue;
         };
-        if let Some(event) = value.get("event").and_then(Value::as_str) {
-            if event.ends_with("_progress") || event == "log" {
+        if let Some(event) = value
+            .get("event")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            if event == "log" {
+                continue;
+            }
+            let phase = value["data"]["phase"].as_str().unwrap_or("");
+            let timed = matches!(
+                event.as_str(),
+                "recover_progress" | "carve_progress" | "image_progress"
+            ) || (event == "scan_progress" && phase != "analyzing");
+            if timed {
+                let members = keys(&value["data"]);
+                match &mut run {
+                    Some((name, first, last, same)) if *name == event => {
+                        *same &= *first == members;
+                        *last = value;
+                    }
+                    _ => {
+                        flush(&mut run, &mut out);
+                        run = Some((event, members, value, true));
+                    }
+                }
                 continue;
             }
         }
+        flush(&mut run, &mut out);
         if value.get("cmd").and_then(Value::as_str) == Some("session_save") {
             save_ids.push(value["id"].clone());
         }
@@ -299,6 +364,7 @@ pub fn comparable(lines: &[String]) -> Vec<Value> {
         mask(&mut value);
         out.push(value);
     }
+    flush(&mut run, &mut out);
     out
 }
 
@@ -317,12 +383,40 @@ mod tests {
         let portable = portable(&lines, Path::new("/s"), Path::new("/f"));
         assert!(portable[0].contains("<tmp>/x"));
         let c = comparable(&portable);
-        assert_eq!(c.len(), 3, "progress events are left out");
+        assert_eq!(c.len(), 4);
         assert_eq!(c[1]["result"], json!({"path": "<tmp>/x"}));
+        assert_eq!(c[2]["data"]["speed_bps"], "<volatile>");
         assert_eq!(
-            c[2]["data"]["report_path"],
+            c[3]["data"]["report_path"],
             "<tmp>/HDSavior-report-00000000-000000.csv"
         );
-        assert_eq!(c[2]["data"]["eta_seconds"], "<volatile>");
+        assert_eq!(c[3]["data"]["eta_seconds"], "<volatile>");
+        // The host's path separator does not matter below <tmp>.
+        let windows = vec![r#"{"id":2,"ok":true,"result":{"path":"<tmp>\\x\\y"}}"#.to_string()];
+        assert_eq!(comparable(&windows)[0]["result"]["path"], "<tmp>/x/y");
+    }
+
+    #[test]
+    fn progress_runs_are_compared_by_their_last_event_and_shape() {
+        let read = |done: u64| {
+            format!(r#"{{"event":"scan_progress","data":{{"phase":"sweep","bytes_done":{done}}}}}"#)
+        };
+        let fast = vec![read(4), read(8)];
+        let slow = vec![read(1), read(2), read(4), read(8)];
+        assert_eq!(comparable(&fast), comparable(&slow));
+        assert_eq!(comparable(&fast).len(), 1);
+        assert_ne!(comparable(&fast), comparable(&[read(4), read(7)]));
+        // A member missing in one event of a run is seen.
+        let odd = vec![
+            r#"{"event":"recover_progress","data":{"files_done":1,"current":"a"}}"#.to_string(),
+            r#"{"event":"recover_progress","data":{"files_done":2}}"#.to_string(),
+        ];
+        assert_eq!(comparable(&odd)[0]["members_differ"], true);
+        // Analysis steps and task progress are kept one by one.
+        let analyzing = r#"{"event":"scan_progress","data":{"phase":"analyzing","bytes_done":1}}"#;
+        assert_eq!(
+            comparable(&[analyzing.to_string(), analyzing.to_string()]).len(),
+            2
+        );
     }
 }

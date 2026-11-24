@@ -123,3 +123,35 @@ fn transcript_matches_the_engine() {
         "the transcript's length changed; HDS_TRANSCRIPT=write regenerates it"
     );
 }
+
+/// The stored transcript (no fixture needed): every job runs to its
+/// `*_done`, and no path of the machine that recorded it is left.
+#[test]
+fn the_stored_transcript_shows_every_job_and_no_machine_path() {
+    let stored = common::docs_dir().join("protocol-examples.jsonl");
+    let Ok(text) = std::fs::read_to_string(&stored) else {
+        eprintln!("SKIPPED: {} does not exist yet", stored.display());
+        return;
+    };
+    let mut done = Vec::new();
+    for line in text.lines() {
+        let value: Value = serde_json::from_str(line).expect("one JSON object per line");
+        for prefix in ["/tmp/", "/home/", "/root/", "C:\\"] {
+            assert!(!line.contains(prefix), "a machine path in {line}");
+        }
+        if let Some(event) = value["event"].as_str() {
+            if event.ends_with("_done") {
+                assert_eq!(value["data"]["status"], "completed", "{line}");
+                done.push(event.to_string());
+            }
+        }
+        if value.get("ok").is_some() {
+            assert_eq!(value["ok"], true, "{line}");
+        }
+    }
+    assert_eq!(
+        done,
+        ["scan_done", "recover_done", "carve_done", "image_done"],
+        "the script's jobs, in order"
+    );
+}

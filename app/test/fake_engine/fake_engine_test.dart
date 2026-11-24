@@ -292,9 +292,9 @@ void main() {
           {'N': 'ok', 'O': 'ok', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
       expectByState('session_attach_source', (_) => {'kind': 'disk', 'path': disk1},
           {'N': 'no_session', 'O': 'no_session', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
-      expectByState('geometry_set', (_) => {'instance': 0, 'cluster_size': 4096, 'volume_offset': 1048576},
+      expectByState('geometry_set', (h) => {'epoch': h.engine.catalog?.epoch ?? 0, 'instance': 0, 'cluster_size': 4096, 'volume_offset': 1048576},
           {'N': 'no_catalog', 'O': 'no_catalog', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
-      expectByState('instance_set', (_) => {'instance': 1, 'kind': 'other'},
+      expectByState('instance_set', (h) => {'epoch': h.engine.catalog?.epoch ?? 0, 'instance': 1, 'kind': 'other'},
           {'N': 'no_catalog', 'O': 'no_catalog', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
       expectByState('session_save', (_) => {'path': r'C:\s\copy.hdsc'},
           {'N': 'no_session', 'O': 'no_session', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
@@ -363,6 +363,7 @@ void main() {
           reason: 'the two consents are separate');
       expect(h.outcome('recover_start', recover({'dest': 'Rescued'})), 'destination_refused');
       expect(h.outcome('recover_start', recover({'dest': r'T:\Rescued'})), 'no_space');
+      expect(h.error('recover_start', recover({'dest': r'T:\Rescued'}))['data'], {'free_bytes': isA<int>(), 'need_bytes': isA<int>()});
       expect(h.outcome('recover_start', recover({'dest': r'S:\Rescued', 'allow_same_disk': true})), 'ok');
 
       final noHits = Harness()..open();
@@ -381,6 +382,8 @@ void main() {
       expect(h.outcome('image_start', {'dest': r'E:\disk.img'}), 'destination_refused');
       expect(h.outcome('image_start', {'dest': r'T:\disk.img'}), 'no_space');
       expect(h.outcome('image_start', {'dest': r'K:\disk.img'}), 'no_space', reason: 'larger than a FAT32 file can be');
+      expect((h.error('image_start', {'dest': r'K:\disk.img'})['data']! as Map).keys, unorderedEquals(['need_bytes', 'max_file_bytes']));
+      expect((h.error('image_start', {'dest': r'T:\disk.img'})['data']! as Map).keys, unorderedEquals(['free_bytes', 'need_bytes']));
       expect(h.outcome('image_start', {'dest': r'D:\already-exists.img'}), 'exists');
       expect(h.outcome('image_start', {'dest': r'D:\already-exists.img', 'resume': true}), 'ok');
       h.finishJob();
@@ -398,6 +401,24 @@ void main() {
       expect(h.outcome('read_file', {'epoch': h.epoch + 1, 'node': h.landmarks.sampleText}), 'stale_catalog');
     });
 
+    test('close_source keeps a session and its catalog: state B', () {
+      final h = Harness()..scan();
+      final epoch = h.engine.catalog!.epoch;
+      h.ok('close_source');
+      final info = h.ok('catalog_info');
+      expect(info['epoch'], epoch, reason: 'the epoch does not change');
+      expect(info['source_attached'], isFalse);
+      expect(h.outcome('check_destination', {'path': r'C:\out', 'purpose': 'recover'}), 'no_source');
+      expect(h.outcome('read_file', {'epoch': epoch, 'node': 0}), 'no_source');
+      expect(h.ok('session_save', {'path': r'C:\s\copy.hdsc'})['path'], r'C:\s\copy.hdsc');
+      expect(h.outcome('session_attach_source', {'kind': 'disk', 'path': disk1}), 'ok');
+
+      final opened = Harness()..open();
+      opened.ok('close_source');
+      expect(opened.outcome('catalog_info'), 'no_catalog', reason: 'without a session: state N');
+      expect(opened.outcome('scan_start'), 'no_source');
+    });
+
     test('session_save and session_attach_source', () {
       final h = Harness()..scan();
       final refused = h.error('session_save', {'path': r'E:\copy.hdsc'});
@@ -407,7 +428,10 @@ void main() {
 
       final mismatch = h.error('session_attach_source', {'kind': 'disk', 'path': r'\\.\PhysicalDrive2-mismatch'});
       expect(mismatch['code'], 'source_mismatch');
-      expect(mismatch['data'], isNotNull, reason: 'it names the failed checks');
+      expect((mismatch['data']! as Map)['failed'], ['records'], reason: 'it names the failed checks');
+      expect((h.error('session_attach_source', {'kind': 'image', 'path': r'D:\fewsamples.img'})['data']! as Map)['failed'], [
+        'too_few_samples',
+      ]);
       expect(h.outcome('session_attach_source', {'kind': 'image', 'path': r'D:\fewsamples.img'}), 'source_mismatch');
       expect(h.outcome('session_attach_source', {'kind': 'image', 'path': r'D:\fewsamples.img', 'force': true}), 'ok');
       expect(h.outcome('session_attach_source', {'kind': 'image', 'path': r'D:\mismatch.img', 'force': true}), 'source_mismatch',
@@ -582,8 +606,21 @@ void main() {
       final newJpg = h.children(carvedRoot).firstWhere((r) => r['name'] == 'jpg')['id']! as int;
       expect(h.children(newJpg).map((r) => r['id']), isNot(contains(oldJpg)), reason: 'ids are never reused');
 
+      // The geometry in effect, set again, changes nothing: the carved
+      // nodes stay (as in the real engine).
+      final main = (h.ok('catalog_info')['instances']! as List<Object?>).first! as Map<String, Object?>;
+      final geometry = main['geometry']! as Map<String, Object?>;
+      final same = h.ok('geometry_set', {
+        'epoch': h.epoch,
+        'instance': 0,
+        'cluster_size': geometry['cluster_size'],
+        'volume_offset': geometry['volume_offset'],
+      });
+      expect(same['carved'], isPositive);
+      expect(h.outcome('node_info', {'epoch': epoch, 'node': oldPng}), 'ok');
+
       // A new geometry of the main instance discards all carved nodes.
-      final info = h.ok('geometry_set', {'instance': 0, 'cluster_size': 8192, 'volume_offset': 1048576});
+      final info = h.ok('geometry_set', {'epoch': h.epoch, 'instance': 0, 'cluster_size': 8192, 'volume_offset': 1048576});
       expect(info['epoch'], epoch);
       expect(info['carved'], 0);
       expect((((info['instances']! as List<Object?>).first! as Map)['virtual']! as Map)['carved'], isNull);
@@ -865,19 +902,19 @@ void main() {
     test('a geometry that is not validated lowers good files to uncertain', () {
       final before = h.search({'filter': {'ratings': ['good']}}).length;
       expect(before, greaterThan(0));
-      final info = h.ok('geometry_set', {'instance': 0, 'cluster_size': 512, 'volume_offset': 2097152});
+      final info = h.ok('geometry_set', {'epoch': h.epoch, 'instance': 0, 'cluster_size': 512, 'volume_offset': 2097152});
       final geometry = ((info['instances']! as List<Object?>).first! as Map)['geometry']! as Map;
       expect(geometry['cluster_source'], 'manual');
       expect(geometry['offset_source'], 'manual');
       expect(geometry['validated'], isFalse);
       expect(h.search({'filter': {'ratings': ['good']}}), isEmpty);
       // Choosing a candidate again restores it.
-      final back = h.ok('geometry_set', {'instance': 0, 'cluster_size': 4096, 'volume_offset': 1048576});
+      final back = h.ok('geometry_set', {'epoch': h.epoch, 'instance': 0, 'cluster_size': 4096, 'volume_offset': 1048576});
       expect((((back['instances']! as List<Object?>).first! as Map)['geometry']! as Map)['offset_source'], 'index');
       expect(h.search({'filter': {'ratings': ['good']}}), hasLength(before));
-      expect(h.outcome('geometry_set', {'instance': 0, 'cluster_size': 1000, 'volume_offset': 0}), 'bad_request');
-      expect(h.outcome('geometry_set', {'instance': 0, 'cluster_size': 4096, 'volume_offset': 100}), 'bad_request');
-      expect(h.outcome('geometry_set', {'instance': 9, 'cluster_size': 4096, 'volume_offset': 0}), 'not_found');
+      expect(h.outcome('geometry_set', {'epoch': h.epoch, 'instance': 0, 'cluster_size': 1000, 'volume_offset': 0}), 'bad_request');
+      expect(h.outcome('geometry_set', {'epoch': h.epoch, 'instance': 0, 'cluster_size': 4096, 'volume_offset': 100}), 'bad_request');
+      expect(h.outcome('geometry_set', {'epoch': h.epoch, 'instance': 9, 'cluster_size': 4096, 'volume_offset': 0}), 'not_found');
     });
   });
 
@@ -1362,7 +1399,13 @@ void main() {
       final other = h.ok('session_load', {'path': r'C:\s\detached.hdsc', 'source': {'kind': 'image', 'path': r'D:\copy.img'}});
       expect(other['source_attached'], isTrue);
       expect((other['source']! as Map)['path'], r'D:\copy.img');
-      expect(h.outcome('session_load', {'path': r'C:\s\x.hdsc', 'source': {'kind': 'image', 'path': r'D:\mismatch.img'}}), 'source_mismatch');
+      // One that does not match is reported in source_error, not as an
+      // error: the session is loaded without a source.
+      final wrong = h.ok('session_load', {'path': r'C:\s\x.hdsc', 'source': {'kind': 'image', 'path': r'D:\mismatch.img'}});
+      expect(wrong['source_attached'], isFalse);
+      expect((wrong['source_error']! as Map)['code'], 'source_mismatch');
+      expect(((wrong['source_error']! as Map)['data']! as Map)['failed'], ['records']);
+      expect((wrong['source']! as Map)['path'], isNot(r'D:\mismatch.img'), reason: 'source is the recorded one');
     });
 
     test('a saved session is found by the next engine', () {
@@ -1400,7 +1443,7 @@ void main() {
       final carvedRoot = h.engine.catalog!.carvedRoot!;
       final epoch = h.epoch;
 
-      final after = h.ok('instance_set', {'instance': older['id'], 'kind': 'main'});
+      final after = h.ok('instance_set', {'epoch': h.epoch, 'instance': older['id'], 'kind': 'main'});
       expect(after['epoch'], isNot(epoch), reason: 'instance_set starts a new epoch');
       expect(h.outcome('node_info', {'epoch': epoch, 'node': olderRoot}), 'stale_catalog');
       final instances = instancesOf(after);
@@ -1438,7 +1481,7 @@ void main() {
       expect(h.ok('node_info', {'epoch': h.epoch, 'node': demoted['root']})['instance'], demoted['id']);
 
       // "auto" withdraws the override: the engine's verdict again.
-      final auto = h.ok('instance_set', {'instance': 0, 'kind': 'auto'});
+      final auto = h.ok('instance_set', {'epoch': h.epoch, 'instance': 0, 'kind': 'auto'});
       expect(instancesOf(auto).map((i) => (i['id'], i['kind'], i['manual'])), [
         for (final i in instancesOf(before)) (i['id'], i['kind'], false),
       ]);
@@ -1455,7 +1498,7 @@ void main() {
       expect(file['rating'], 'unsupported');
       expect(h.outcome('read_file', {'epoch': h.epoch, 'node': file['id']}), 'unsupported');
 
-      final after = h.ok('instance_set', {'instance': embedded['id'], 'kind': 'other'});
+      final after = h.ok('instance_set', {'epoch': h.epoch, 'instance': embedded['id'], 'kind': 'other'});
       final changed = instancesOf(after).firstWhere((i) => i['root'] == embedded['root']);
       expect(changed['kind'], 'other');
       expect(changed['manual'], isTrue);
@@ -1474,23 +1517,23 @@ void main() {
       final instances = instancesOf(h.scan());
       final strays = instances.firstWhere((i) => i['kind'] == 'strays')['id'];
       final epoch = h.epoch;
-      expect(h.outcome('instance_set', {'instance': strays, 'kind': 'main'}), 'bad_request');
+      expect(h.outcome('instance_set', {'epoch': h.epoch, 'instance': strays, 'kind': 'main'}), 'bad_request');
       expect(h.epoch, epoch, reason: 'a refused change changes nothing');
-      expect(h.outcome('instance_set', {'instance': strays, 'kind': 'other'}), 'bad_request');
-      expect(h.outcome('instance_set', {'instance': 0, 'kind': 'other'}), 'bad_request',
+      expect(h.outcome('instance_set', {'epoch': h.epoch, 'instance': strays, 'kind': 'other'}), 'bad_request');
+      expect(h.outcome('instance_set', {'epoch': h.epoch, 'instance': 0, 'kind': 'other'}), 'bad_request',
           reason: 'choose another main file system instead');
       final other = instances.firstWhere((i) => i['kind'] == 'other')['id'];
-      expect(h.outcome('instance_set', {'instance': other, 'kind': 'other'}), 'bad_request',
+      expect(h.outcome('instance_set', {'epoch': h.epoch, 'instance': other, 'kind': 'other'}), 'bad_request',
           reason: '"other" is for embedded and older file systems');
       // The previous main one cannot be pushed aside for good either: there
       // is always a main file system.
-      h.ok('instance_set', {'instance': 1, 'kind': 'main'});
+      h.ok('instance_set', {'epoch': h.epoch, 'instance': 1, 'kind': 'main'});
       final demoted = instancesOf(h.ok('catalog_info')).firstWhere((i) => i['root'] == 0)['id'];
-      expect(h.outcome('instance_set', {'instance': demoted, 'kind': 'other'}), 'bad_request');
-      h.ok('instance_set', {'instance': 0, 'kind': 'auto'});
+      expect(h.outcome('instance_set', {'epoch': h.epoch, 'instance': demoted, 'kind': 'other'}), 'bad_request');
+      h.ok('instance_set', {'epoch': h.epoch, 'instance': 0, 'kind': 'auto'});
       expect(instancesOf(h.ok('catalog_info')).first['root'], 0);
-      expect(h.outcome('instance_set', {'instance': 1, 'kind': 'embedded'}), 'bad_request');
-      expect(h.outcome('instance_set', {'instance': 99, 'kind': 'main'}), 'not_found');
+      expect(h.outcome('instance_set', {'epoch': h.epoch, 'instance': 1, 'kind': 'embedded'}), 'bad_request');
+      expect(h.outcome('instance_set', {'epoch': h.epoch, 'instance': 99, 'kind': 'main'}), 'not_found');
       expect(h.outcome('instance_set', {'kind': 'main'}), 'bad_request');
     });
   });
@@ -1526,7 +1569,7 @@ void main() {
       }
 
       // A geometry that is not validated protects nothing of its own.
-      final changed = h.ok('geometry_set', {'instance': 0, 'cluster_size': 8192, 'volume_offset': 1048576});
+      final changed = h.ok('geometry_set', {'epoch': h.epoch, 'instance': 0, 'cluster_size': 8192, 'volume_offset': 1048576});
       expect(protectedOf(changed), hasLength(2));
       expect(protectedOf(changed).first['reason'], 'session_range');
       expect(protectedOf(h.ok('catalog_info')), protectedOf(changed));

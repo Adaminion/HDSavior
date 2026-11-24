@@ -22,6 +22,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::backend::Backend;
+use crate::output::log_warn;
 use crate::protocol::{OutputLine, ProtocolError, SourceKind};
 use crate::server::{serve, InProcess};
 
@@ -37,7 +38,7 @@ pub const USAGE: &str = r"usage:
   hdsavior-engine serve
   hdsavior-engine disks
   hdsavior-engine scan    <source> --session <file> [--kind disk|image] [--partition K | --start N --end N]
-                          [--no-carve-hits] [--resume]
+                          [--no-carve-hits] [--resume | --force]
   hdsavior-engine info    --session <file> [--source <path>]
   hdsavior-engine ls      --session <file> [--node ID | --path P] [--deleted] [--limit N]
   hdsavior-engine find    --session <file> <query> [--ext a,b] [--deleted] [--limit N]
@@ -45,10 +46,14 @@ pub const USAGE: &str = r"usage:
                           [--include-deleted] [--skip-damaged] [--allow-same-disk] [--allow-unknown-disk]
                           [--on-exists rename|skip|overwrite]
   hdsavior-engine carve   --session <file> [--source <path>] [--kinds a,b]
+                          [--allow-same-disk] [--allow-unknown-disk]
   hdsavior-engine image   <source> --dest <file> [--partition K | --start N --end N] [--resume]
                           [--allow-same-disk] [--allow-unknown-disk]
 
 A source is \\.\PhysicalDrive<N> (a disk) or the path of an image file.
+scan refuses to replace an existing session file unless --force is given;
+--resume continues it. recover and carve save the session back to --session.
+info fails when --source is given and is not the session's source.
 Results and events are printed as JSON lines on stdout, logs on stderr.
 Exit codes: 0 ok, 1 failed, 2 usage error.";
 
@@ -250,12 +255,16 @@ pub fn parse_command_line(args: &[String]) -> Result<Subcommand, UsageError> {
                         ("--kind", Val),
                         ("--no-carve-hits", Flag),
                         ("--resume", Flag),
+                        ("--force", Flag),
                     ],
                     &RANGE,
                 ]),
                 1,
             )?;
             p.required("--session")?;
+            if p.flag("--resume") && p.flag("--force") {
+                return usage("--resume and --force cannot be combined");
+            }
             if let Some(kind) = p.value("--kind") {
                 if kind != "disk" && kind != "image" {
                     return usage("--kind must be disk or image");
@@ -329,7 +338,11 @@ pub fn parse_command_line(args: &[String]) -> Result<Subcommand, UsageError> {
             Ok(Subcommand::Recover(p))
         }
         "carve" => {
-            let p = parse(rest, &[session, source, ("--kinds", Val)], 0)?;
+            let p = parse(
+                rest,
+                &spec(&[&[session, source, ("--kinds", Val)], &CONSENT]),
+                0,
+            )?;
             p.required("--session")?;
             if p.value("--kinds").is_some_and(|k| parse_list(k).is_empty()) {
                 return usage("--kinds names no kind");
@@ -531,15 +544,37 @@ impl Client {
                 let session = absolute(p.required("--session")?);
                 if p.flag("--resume") {
                     let kind = opened["source"]["kind"].clone();
-                    self.call(
+                    let loaded = self.call(
                         "session_load",
                         &json!({"path": session, "source": {"kind": kind, "path": absolute(source)}}),
                     )?;
+                    if loaded["source_attached"] != true {
+                        // The user named the source. A session too young to
+                        // be compared (fewer than 8 stored records) is
+                        // attached with force; any other mismatch fails.
+                        if !too_few_samples_only(&loaded["source_error"]) {
+                            return Err(Failure::Failed(format!(
+                                "{source} is not the source of the session {session}"
+                            )));
+                        }
+                        log_warn(&format!(
+                            "the session {session} holds too few records to recognise {source};                              attaching it because it was named on the command line"
+                        ));
+                        self.call(
+                            "session_attach_source",
+                            &json!({"kind": kind, "path": absolute(source), "force": true}),
+                        )?;
+                    }
                     self.call(
                         "scan_start",
                         &json!({"resume": true, "start": start, "end": end, "session_path": session}),
                     )?;
                 } else {
+                    if !p.flag("--force") && is_session_file(&session) {
+                        return Err(Failure::Failed(format!(
+                            "{session} exists: --resume continues that session, --force replaces it"
+                        )));
+                    }
                     self.call(
                         "scan_start",
                         &json!({
@@ -550,7 +585,16 @@ impl Client {
                 }
                 self.wait_done("scan_done").map(|_| ())
             }
-            Subcommand::Info(p) => self.load(&p).map(|_| ()),
+            Subcommand::Info(p) => {
+                let loaded = self.load(&p)?;
+                if p.value("--source").is_some() && loaded["source_attached"] != true {
+                    return Err(Failure::Failed(format!(
+                        "{} is not the source of this session",
+                        p.value("--source").unwrap_or_default()
+                    )));
+                }
+                Ok(())
+            }
             Subcommand::Ls(p) => {
                 let loaded = self.load(&p)?;
                 let epoch = loaded["catalog"]["epoch"].clone();
@@ -611,13 +655,19 @@ impl Client {
                         "on_exists": p.value("--on-exists").unwrap_or("rename"),
                     }),
                 )?;
-                self.wait_done("recover_done").map(|_| ())
+                let done = self.wait_done("recover_done");
+                // What the reads found (G1) is part of the session.
+                self.save_back(&p)?;
+                done.map(|_| ())
             }
             Subcommand::Carve(p) => {
                 self.load(&p)?;
                 let kinds = p.value("--kinds").map(parse_list);
                 self.call("carve_start", &json!({ "kinds": kinds }))?;
-                self.wait_done("carve_done").map(|_| ())
+                let done = self.wait_done("carve_done");
+                // The carved files are part of the session (I5).
+                self.save_back(&p)?;
+                done.map(|_| ())
             }
             Subcommand::Image(p) => {
                 let opened = self.open(&p.positional[0], None)?;
@@ -633,6 +683,29 @@ impl Client {
                     }),
                 )?;
                 self.wait_done("image_done").map(|_| ())
+            }
+        }
+    }
+
+    /// Saves the session back to `--session` (with the consent options):
+    /// the loaded file is not always written to (it may need consents the
+    /// load does not give), and what a job added must not be lost.
+    /// Only an error is printed: the job's `*_done` event stays the last
+    /// line of a successful run.
+    fn save_back(&mut self, p: &Parsed) -> Result<(), Failure> {
+        let called = self.engine.call(
+            "session_save",
+            &json!({
+                "path": absolute(p.required("--session")?),
+                "allow_same_disk": p.flag("--allow-same-disk"),
+                "allow_unknown_disk": p.flag("--allow-unknown-disk"),
+            }),
+        );
+        match called.result {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                print_line(&json!({ "error": error }));
+                Err(Failure::Failed(describe("session_save", &error)))
             }
         }
     }
@@ -676,6 +749,23 @@ impl Client {
     }
 }
 
+/// Whether `path` holds an HDSavior session file (its magic bytes). Reads
+/// four bytes; anything else at the path is the engine's to refuse.
+fn is_session_file(path: &str) -> bool {
+    use std::io::Read;
+    let mut magic = [0_u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_ok_and(|()| magic == hds_core::session::file::MAGIC)
+}
+
+/// Whether a `session_load` `source_error` says only that the session is
+/// too young to be compared (`source_mismatch` with `failed` exactly
+/// `["too_few_samples"]`).
+fn too_few_samples_only(error: &Value) -> bool {
+    error["code"] == "source_mismatch" && error["data"]["failed"] == json!(["too_few_samples"])
+}
+
 fn main_root(loaded: &Value) -> u64 {
     loaded["catalog"]["instances"][0]["root"]
         .as_u64()
@@ -703,6 +793,8 @@ mod tests {
             "scan img --session s",
             r"scan \\.\PhysicalDrive1 --session s --kind disk --partition 2 --no-carve-hits --resume",
             "scan img --session=s --start 0 --end 1048576",
+            "scan img --session s --force",
+            "carve --session s --allow-same-disk --allow-unknown-disk",
             "info --session s --source img",
             "ls --session s --node 4 --deleted --limit 10",
             "ls --session s --path Photos/2024",
@@ -734,6 +826,7 @@ mod tests {
             "scan img --session s --session t",
             "scan img --session",
             "scan img --session s --resume=yes",
+            "scan img --session s --resume --force",
             "ls --session s --node 1 --path a",
             "ls --session s --node x",
             "find --session s",

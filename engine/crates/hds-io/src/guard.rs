@@ -234,6 +234,9 @@ pub(crate) struct Resolved {
     pub(crate) on_system_volume: bool,
     /// Identity of the path itself when it exists (not of an ancestor).
     pub(crate) leaf_id: Option<FileId>,
+    /// The files the location's file system is stored in (Unix: a loop
+    /// device's backing file, a file mounted through FUSE). Empty on Windows.
+    pub(crate) backing_files: Vec<FileId>,
 }
 
 /// Why a path was turned down before its location mattered.
@@ -377,6 +380,15 @@ fn decide(
                 (
                     Verdict::OverlapsSource,
                     "This is the disk image that is being rescued. Choose another file."
+                        .to_string(),
+                    Some(ProtectedReason::SourceImage),
+                )
+            } else if resolved.backing_files.contains(&id) {
+                (
+                    Verdict::OverlapsSource,
+                    "This location is on a file system stored inside the disk image that is being \
+                     rescued (the image is attached as a disk). Writing there would change the \
+                     image. Choose a location elsewhere."
                         .to_string(),
                     Some(ProtectedReason::SourceImage),
                 )

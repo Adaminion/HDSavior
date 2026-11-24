@@ -189,7 +189,9 @@ class SourceController extends ChangeNotifier {
         return result;
       });
 
-  /// Closes the source and drops its session and catalog (`close_source`).
+  /// Closes the source (`close_source`) and forgets its session and catalog.
+  /// The engine keeps a session browsable after `close_source`; the app does
+  /// not use it, and the next `open_source` or `session_load` replaces it.
   Future<void> close() => _exclusive(() async {
     await _api.closeSource();
     _catalog.clear();

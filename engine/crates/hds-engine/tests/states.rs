@@ -81,9 +81,12 @@ fn requests(s: &Setup) -> Vec<(&'static str, Value)> {
         ),
         (
             "geometry_set",
-            json!({"instance": 0, "cluster_size": 4096, "volume_offset": 0}),
+            json!({"epoch": e, "instance": 0, "cluster_size": 4096, "volume_offset": 0}),
         ),
-        ("instance_set", json!({"instance": 2, "kind": "main"})),
+        (
+            "instance_set",
+            json!({"epoch": e, "instance": 2, "kind": "main"}),
+        ),
         (
             "session_save",
             json!({"path": s.dir.join("saved.hds"), "allow_unknown_disk": true}),
@@ -224,7 +227,7 @@ fn session_without_catalog() {
     assert_eq!(
         s.h.code(
             "geometry_set",
-            json!({"instance": 0, "cluster_size": 4096, "volume_offset": 0})
+            json!({"epoch": 1, "instance": 0, "cluster_size": 4096, "volume_offset": 0})
         ),
         NoCatalog
     );
@@ -305,6 +308,14 @@ fn node_commands_check_epoch_and_arguments() {
             json!({"epoch": stale, "include": [1], "dest": s.dir.join("o")}),
         ),
         ("read_file", json!({"epoch": stale, "node": 2})),
+        (
+            "geometry_set",
+            json!({"epoch": stale, "instance": 0, "cluster_size": 4096, "volume_offset": 0}),
+        ),
+        (
+            "instance_set",
+            json!({"epoch": stale, "instance": 2, "kind": "main"}),
+        ),
     ] {
         assert_eq!(s.h.code(cmd, args.clone()), StaleCatalog, "{cmd} {args}");
     }
@@ -362,18 +373,24 @@ fn node_commands_check_epoch_and_arguments() {
         ("carve_start", json!({"kinds": ["jpeg", "doc"]})),
         (
             "geometry_set",
-            json!({"instance": 0, "cluster_size": 3000, "volume_offset": 0}),
+            json!({"epoch": e, "instance": 0, "cluster_size": 3000, "volume_offset": 0}),
         ),
         (
             "geometry_set",
-            json!({"instance": 0, "cluster_size": 4096, "volume_offset": 100}),
+            json!({"epoch": e, "instance": 0, "cluster_size": 4096, "volume_offset": 100}),
         ),
         (
             "geometry_set",
-            json!({"instance": 0, "cluster_size": 4096, "volume_offset": IMAGE_SIZE}),
+            json!({"epoch": e, "instance": 0, "cluster_size": 4096, "volume_offset": IMAGE_SIZE}),
         ),
-        ("instance_set", json!({"instance": 1, "kind": "main"})),
-        ("instance_set", json!({"instance": 0, "kind": "older"})),
+        (
+            "instance_set",
+            json!({"epoch": e, "instance": 1, "kind": "main"}),
+        ),
+        (
+            "instance_set",
+            json!({"epoch": e, "instance": 0, "kind": "older"}),
+        ),
     ] {
         assert_eq!(s.h.code(cmd, args.clone()), BadRequest, "{cmd} {args}");
     }
@@ -398,16 +415,21 @@ fn node_commands_check_epoch_and_arguments() {
     assert_eq!(
         s.h.code(
             "geometry_set",
-            json!({"instance": 9, "cluster_size": 4096, "volume_offset": 0})
+            json!({"epoch": e, "instance": 9, "cluster_size": 4096, "volume_offset": 0})
         ),
         NotFound
     );
     assert_eq!(
-        s.h.code("instance_set", json!({"instance": 9, "kind": "main"})),
+        s.h.code(
+            "instance_set",
+            json!({"epoch": e, "instance": 9, "kind": "main"})
+        ),
         NotFound
     );
     // Upper-case extensions are folded rather than refused.
     s.h.ok("search", json!({"epoch": e, "filter": {"exts": ["JPG"]}}));
+    // `null` means "any", for the whole filter too (review m2).
+    s.h.ok("search", json!({"epoch": e, "filter": null}));
 }
 
 #[test]
@@ -438,7 +460,7 @@ fn epochs() {
     assert_eq!(s.h.epoch(), e1);
     let geo = s.h.ok(
         "geometry_set",
-        json!({"instance": 0, "cluster_size": 8192, "volume_offset": 1024}),
+        json!({"epoch": e1, "instance": 0, "cluster_size": 8192, "volume_offset": 1024}),
     );
     assert_eq!(geo["epoch"], e1, "geometry_set keeps the epoch");
     assert!(s
@@ -450,10 +472,12 @@ fn epochs() {
     s.h.ok("job_cancel", json!({}));
     let carved = s.h.wait_event("carve_done");
     assert_eq!(carved["catalog"]["epoch"], e1, "carving keeps the epoch");
-    let e2 =
-        s.h.ok("instance_set", json!({"instance": 2, "kind": "main"}))["epoch"]
-            .as_u64()
-            .unwrap();
+    let e2 = s.h.ok(
+        "instance_set",
+        json!({"epoch": e1, "instance": 2, "kind": "main"}),
+    )["epoch"]
+        .as_u64()
+        .unwrap();
     assert!(e2 > e1, "instance_set starts a new epoch");
     assert_eq!(
         s.h.code("node_info", json!({"epoch": e1, "node": 2})),

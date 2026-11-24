@@ -192,7 +192,7 @@ Future<void> converse(EngineTransport transport, String imagePath) async {
   final strays = now.instances.where((i) => i.kind == InstanceKind.strays);
   if (strays.isNotEmpty) {
     await expectLater(
-      api.instanceSet(instance: strays.first.id, kind: InstanceOverride.main),
+      api.instanceSet(epoch: now.epoch, instance: strays.first.id, kind: InstanceOverride.main),
       throwsA(fails(EngineErrorCode.badRequest)),
     );
   }
@@ -203,7 +203,7 @@ Future<void> converse(EngineTransport transport, String imagePath) async {
     (int, int, int) identity(Instance i) => (i.records, i.files, i.bytes);
     final chosen = candidates.first;
     final previousMain = now.instances.first;
-    final changed = await api.instanceSet(instance: chosen.id, kind: InstanceOverride.main);
+    final changed = await api.instanceSet(epoch: now.epoch, instance: chosen.id, kind: InstanceOverride.main);
     expect(changed.epoch, isNot(now.epoch), reason: 'instance_set starts a new epoch');
     expect(identity(changed.instances.first), identity(chosen), reason: 'instances[0] is the main instance');
     expect(changed.instances.first.kind, InstanceKind.main);
@@ -217,7 +217,17 @@ Future<void> converse(EngineTransport transport, String imagePath) async {
       api.listChildren(epoch: now.epoch, node: changed.instances.first.root),
       throwsA(fails(EngineErrorCode.staleCatalog)),
     );
-    final withdrawn = await api.instanceSet(instance: changed.instances.first.id, kind: InstanceOverride.auto);
+    // The instance ids of the old epoch are refused: a repeated request
+    // cannot hit another instance.
+    await expectLater(
+      api.instanceSet(epoch: now.epoch, instance: chosen.id, kind: InstanceOverride.main),
+      throwsA(fails(EngineErrorCode.staleCatalog)),
+    );
+    final withdrawn = await api.instanceSet(
+      epoch: changed.epoch,
+      instance: changed.instances.first.id,
+      kind: InstanceOverride.auto,
+    );
     expect(identity(withdrawn.instances.first), identity(previousMain), reason: "the engine's own verdict again");
     expect(withdrawn.instances.every((i) => !i.manual), isTrue);
   }

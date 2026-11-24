@@ -345,6 +345,9 @@ class _AttachDialogState extends State<_AttachDialog> {
   EngineException? _error;
   bool _working = false;
 
+  /// The source of the last attempt, which "attach anyway" repeats.
+  (SourceKind, String)? _tried;
+
   AppController get app => widget.app;
 
   @override
@@ -362,6 +365,7 @@ class _AttachDialogState extends State<_AttachDialog> {
     setState(() {
       _working = true;
       _error = null;
+      _tried = (kind, path);
     });
     try {
       await app.source.attachSource(kind: kind, path: path, force: force);
@@ -420,9 +424,12 @@ class _AttachDialogState extends State<_AttachDialog> {
                     ErrorNotice(
                       error: _error!,
                       actions: [
-                        if (_error!.kind == EngineErrorCode.sourceMismatch && _diskPath != null)
+                        // Only "too few records to compare" can be
+                        // overruled; a source whose records differ is
+                        // refused even with force.
+                        if (_error!.error.forceMayAttach && _tried != null)
                           TextButton(
-                            onPressed: _working ? null : () => _attach(SourceKind.disk, _diskPath!, force: true),
+                            onPressed: _working ? null : () => _attach(_tried!.$1, _tried!.$2, force: true),
                             child: const Text(S.attachForce),
                           ),
                       ],

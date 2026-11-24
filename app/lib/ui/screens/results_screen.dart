@@ -816,7 +816,7 @@ class _CatalogNotices extends StatelessWidget {
           title: S.warningHeadline(warning.kind),
           body: S.warningAdvice(warning.kind),
           details: warning.message,
-          action: warning.kind == WarningCode.sessionFileAtRisk
+          action: warning.kind == WarningCode.sessionFileAtRisk || warning.kind == WarningCode.sessionFileNotSaved
               ? (S.saveSessionElsewhere, busy ? null : () => saveSessionElsewhere(context, app))
               : null,
         ),

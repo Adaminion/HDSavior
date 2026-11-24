@@ -52,8 +52,11 @@
 /// `identity` -> loads with an `identity_differs` warning; `partial` -> an
 /// incomplete scan; otherwise a complete session of disk 1.
 ///
-/// Sources for `session_attach_source`, by path: `mismatch` ->
-/// `source_mismatch` always; `fewsamples` -> `source_mismatch` unless forced.
+/// Sources for `session_attach_source` (and the `source` of
+/// `session_load`, where the mismatch is reported in `source_error`), by
+/// path: `mismatch` -> `source_mismatch` (`failed: ["records"]`) always;
+/// `fewsamples` -> `source_mismatch` (`failed: ["too_few_samples"]`) unless
+/// forced.
 library;
 
 const int _kib = 1024;

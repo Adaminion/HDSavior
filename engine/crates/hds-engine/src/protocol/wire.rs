@@ -191,8 +191,18 @@ pub fn parse_request(line: &str) -> Result<Request, EnvelopeError> {
         id: None,
         error: ProtocolError::bad_request(message),
     };
-    let value: Value = serde_json::from_str(line)
-        .map_err(|e| no_id(&format!("the line is not valid JSON: {e}")))?;
+    let value: Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        // A lone surrogate escape (`"\uD800"`, from a UTF-16 string a user
+        // typed) is valid JSON text but not a Unicode string. It becomes
+        // U+FFFD, as names from the disk do (`wire_name`), instead of
+        // costing the request its id.
+        Err(e) => match replace_lone_surrogates(line) {
+            Some(fixed) => serde_json::from_str(&fixed)
+                .map_err(|_| no_id(&format!("the line is not valid JSON: {e}")))?,
+            None => return Err(no_id(&format!("the line is not valid JSON: {e}"))),
+        },
+    };
     let Value::Object(mut object) = value else {
         return Err(no_id("the line is not a JSON object"));
     };
@@ -228,6 +238,61 @@ pub fn parse_request(line: &str) -> Result<Request, EnvelopeError> {
         )));
     }
     Ok(Request { id, cmd, args })
+}
+
+/// `line` with every `\uXXXX` escape of an unpaired surrogate replaced by
+/// `\uFFFD`; `None` when it holds none.
+fn replace_lone_surrogates(line: &str) -> Option<String> {
+    fn escape_at(chars: &[char], i: usize) -> Option<u32> {
+        if chars.get(i) != Some(&'\\') || chars.get(i + 1) != Some(&'u') {
+            return None;
+        }
+        let hex: String = chars.get(i + 2..i + 6)?.iter().collect();
+        u32::from_str_radix(&hex, 16).ok()
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut changed = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c != '\\' {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        match escape_at(&chars, i) {
+            Some(0xD800..=0xDBFF) => match escape_at(&chars, i + 6) {
+                Some(0xDC00..=0xDFFF) => {
+                    out.extend(&chars[i..i + 12]);
+                    i += 12;
+                }
+                _ => {
+                    out.push_str("\\uFFFD");
+                    changed = true;
+                    i += 6;
+                }
+            },
+            Some(0xDC00..=0xDFFF) => {
+                out.push_str("\\uFFFD");
+                changed = true;
+                i += 6;
+            }
+            Some(_) => {
+                out.extend(&chars[i..i + 6]);
+                i += 6;
+            }
+            None => {
+                // Any other escape: the backslash and the character after it.
+                out.push(c);
+                if let Some(&next) = chars.get(i + 1) {
+                    out.push(next);
+                }
+                i += 2;
+            }
+        }
+    }
+    changed.then_some(out)
 }
 
 /// Finds a number that the protocol cannot carry: a float with a fractional
@@ -340,6 +405,23 @@ pub trait EventData: Serialize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lone_surrogate_escape_keeps_the_request_and_its_id() {
+        let r = parse_request(r#"{"id": 7, "cmd": "search", "args": {"q": "a\uD800b"}}"#)
+            .expect("parsed");
+        assert_eq!(r.id, 7);
+        assert_eq!(r.args["q"], "a\u{FFFD}b");
+        let r =
+            parse_request(r#"{"id": 8, "cmd": "x", "args": {"q": "\uDC00\uD83D\uDE00\\uD800"}}"#)
+                .expect("parsed");
+        assert_eq!(r.args["q"], "\u{FFFD}\u{1F600}\\uD800");
+        // Other broken JSON still has no id.
+        assert_eq!(
+            parse_request(r#"{"id": 9, "cmd": "x"#).unwrap_err().id,
+            None
+        );
+    }
 
     #[test]
     fn envelope_rules() {

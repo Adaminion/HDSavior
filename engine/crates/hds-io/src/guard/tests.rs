@@ -120,6 +120,7 @@ fn resolved(placement: Placement) -> Resolved {
         max_file_bytes: None,
         on_system_volume: false,
         leaf_id: None,
+        backing_files: Vec::new(),
     }
 }
 
@@ -1022,4 +1023,82 @@ fn the_first_protected_range_that_is_hit_names_the_reason() {
         decide(&itself, image, &protected, Purpose::Image).2,
         Some(ProtectedReason::SourceImage)
     );
+}
+
+/// Creates an ext2 file system in an image file, attaches it to a loop
+/// device and mounts it at `mount` (root, losetup, mkfs.ext2); `None` when
+/// that is not possible. Returns the loop device.
+#[cfg(target_os = "linux")]
+fn loop_mount(image: &Path, mount: &Path) -> Option<String> {
+    let run = |cmd: &str, args: &[&std::ffi::OsStr]| {
+        std::process::Command::new(cmd)
+            .args(args)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+    };
+    std::fs::File::create(image).ok()?.set_len(8 << 20).ok()?;
+    run(
+        "mkfs.ext2",
+        &["-q".as_ref(), "-F".as_ref(), image.as_os_str()],
+    )?;
+    let out = run(
+        "losetup",
+        &["-f".as_ref(), "--show".as_ref(), image.as_os_str()],
+    )?;
+    let device = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    if run("mount", &[device.as_ref(), mount.as_os_str()]).is_none() {
+        run("losetup", &["-d".as_ref(), device.as_ref()]);
+        return None;
+    }
+    Some(device)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_file_system_stored_in_the_source_image_is_refused() {
+    let tmp = crate::test_util::TempDir::new("guard-loop");
+    let image = tmp.join("src.img");
+    let mount = tmp.join("mnt");
+    std::fs::create_dir_all(&mount).unwrap();
+    let Some(device) = loop_mount(&image, &mount) else {
+        eprintln!("SKIPPED: cannot attach a loop device (needs root, losetup, mkfs.ext2)");
+        return;
+    };
+    struct Detach(std::path::PathBuf, String);
+    impl Drop for Detach {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("umount").arg(&self.0).status();
+            let _ = std::process::Command::new("losetup")
+                .args(["-d", &self.1])
+                .status();
+        }
+    }
+    let _detach = Detach(mount.clone(), device);
+    let source = ImageFile::open(&image, None).unwrap();
+    let protected = [Protected::session(0..source.size())];
+    for (path, purpose) in [
+        (mount.join("out"), Purpose::Recover),
+        (mount.join("s.hds"), Purpose::Session),
+        (mount.join("copy.img"), Purpose::Image),
+    ] {
+        let check = destination_check(&path, purpose, &source, &protected, None);
+        assert_eq!(
+            check.verdict,
+            Verdict::OverlapsSource,
+            "{path:?}: {check:?}"
+        );
+        assert_eq!(check.reason, Some(ProtectedReason::SourceImage));
+        assert!(!check.is_allowed(true, true));
+    }
+    // Beside the mount, the same directory is fine.
+    let check = destination_check(
+        &tmp.join("out"),
+        Purpose::Recover,
+        &source,
+        &protected,
+        None,
+    );
+    assert_eq!(check.verdict, Verdict::Ok, "{check:?}");
 }

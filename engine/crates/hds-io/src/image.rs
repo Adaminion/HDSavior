@@ -68,7 +68,7 @@ fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
 use crate::win::read_exact_at;
 
 #[cfg(unix)]
-fn file_id(file: &File) -> Option<FileId> {
+pub(crate) fn file_id(file: &File) -> Option<FileId> {
     use std::os::unix::fs::MetadataExt;
     let meta = file.metadata().ok()?;
     Some(FileId {
@@ -78,7 +78,7 @@ fn file_id(file: &File) -> Option<FileId> {
 }
 
 #[cfg(windows)]
-fn file_id(file: &File) -> Option<FileId> {
+pub(crate) fn file_id(file: &File) -> Option<FileId> {
     crate::win::file_id(file).ok()
 }
 
@@ -149,6 +149,42 @@ mod open_images {
 }
 
 pub(crate) use open_images::contains as is_open_image;
+
+/// Files the engine writes and must not lose while it writes them (the
+/// attached session file), by identity: the output primitives refuse to
+/// delete, rename over or rewrite them like a source image (S4). Windows'
+/// share modes already refuse the deletion of an open file; Unix has none,
+/// so a recovery with `on_exists: overwrite` could otherwise unlink the
+/// session file under its writer.
+mod in_use {
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    use crate::source::FileId;
+
+    static HELD: Mutex<Vec<FileId>> = Mutex::new(Vec::new());
+
+    fn list() -> MutexGuard<'static, Vec<FileId>> {
+        HELD.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn add(id: FileId) {
+        list().push(id);
+    }
+
+    pub(crate) fn remove(id: FileId) {
+        let mut held = list();
+        if let Some(at) = held.iter().position(|&other| other == id) {
+            held.swap_remove(at);
+        }
+    }
+
+    /// True while an [`OutFile`](crate::out::OutFile) for this file is held.
+    pub(crate) fn contains(id: FileId) -> bool {
+        list().contains(&id)
+    }
+}
+
+pub(crate) use in_use::{add as hold_in_use, contains as is_in_use, remove as release_in_use};
 
 /// Opens the file read-only and returns it with its absolute path. Unix has
 /// no mandatory share modes: other programs are not held back, and the

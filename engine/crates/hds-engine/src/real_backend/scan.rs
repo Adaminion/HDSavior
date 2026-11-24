@@ -12,7 +12,6 @@
 
 use std::ops::Range;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -64,11 +63,15 @@ impl Drop for WorkSlot {
 struct Observer<'a> {
     ctx: &'a JobContext<ScanProgress>,
     last: ScanProgress,
+    /// Whether the scanner sent any progress (a resumed complete session
+    /// reads nothing).
+    sent: bool,
 }
 
 impl ScanObserver for Observer<'_> {
     fn progress(&mut self, progress: &hds_core::scan::ScanProgress) {
         self.last = convert::scan_progress(progress);
+        self.sent = true;
         self.ctx.progress(&self.last);
     }
 
@@ -198,6 +201,9 @@ fn run(
     let Some(work) = slot.work() else {
         return failed(ProtocolError::internal("the session is gone"), None);
     };
+    // The scan reads what the loaded file was missing.
+    work.warnings
+        .retain(|w| w.code != super::WARN_SESSION_INCOMPLETE);
     if resume {
         // I5: any scan_start discards the carved files.
         super::RealBackend::discard_carved(work);
@@ -215,6 +221,7 @@ fn run(
     let mut observer = Observer {
         ctx,
         last: ScanProgress::default(),
+        sent: false,
     };
     let summary = scan(
         &ranged,
@@ -228,11 +235,35 @@ fn run(
             LogLevel::Warn,
             format!("the session file is not up to date: {e}"),
         );
+        work.not_saved(e);
     }
     // LIVE: when the scan last ran (the end of this run).
     work.live.scan_time = Some(now_filetime());
     if let Err(e) = work.live.save(&mut work.session) {
         log_warn(&format!("the LIVE block cannot be stored: {e}"));
+    }
+    // The scanner sends at most 4 progress events a second, so its last
+    // one is older than the end: one more with the final counters closes
+    // the read phases (and the analysis carries them on).
+    if !matches!(summary.status, CoreStatus::Failed(_)) {
+        let last = &mut observer.last;
+        // The sweep is the phase that finishes the range.
+        if !observer.sent || summary.bytes_done >= summary.bytes_total {
+            last.phase = ScanPhase::Sweep;
+        }
+        last.bytes_done = summary.bytes_done;
+        last.bytes_total = summary.bytes_total;
+        last.speed_bps = 0;
+        last.eta_seconds = (summary.bytes_done >= summary.bytes_total).then_some(0);
+        last.elapsed_seconds = summary.elapsed_seconds;
+        last.records = summary.counters.records;
+        last.files = summary.counters.files;
+        last.dirs = summary.counters.dirs;
+        last.index_blocks = summary.counters.index_blocks;
+        last.carve_hits = summary.counters.carve_hits;
+        last.bad_bytes = summary.counters.bad_bytes;
+        last.warnings.clone_from(&summary.warnings);
+        ctx.progress(last);
     }
     let (status, error) = match &summary.status {
         CoreStatus::Completed => (ScanStatus::Completed, None),
@@ -263,18 +294,30 @@ fn run(
             progress.elapsed_seconds = started.elapsed().as_secs();
             ctx.progress(&progress);
         };
-        let never = AtomicBool::new(false);
-        if let Err(e) = work.build(Some(source), &never, &mut step) {
-            // S7: a source lost while the catalog is built fails the scan;
-            // the session stays resumable.
-            done.status = ScanStatus::Failed;
-            done.error = Some(e);
-            work.checkpoint();
+        // job_cancel is ignored here, a shutdown is not: the catalog it
+        // would build is thrown away anyway, and the app waits for the
+        // engine to exit.
+        match work.build(Some(source), ctx.shutdown_flag(), &mut step) {
+            Ok(()) => {}
+            Err(_) if ctx.is_shutting_down() => work.checkpoint(),
+            Err(e) => {
+                // S7: a source lost while the catalog is built fails the
+                // scan; the session stays resumable.
+                done.status = ScanStatus::Failed;
+                done.error = Some(e);
+                work.checkpoint();
+            }
         }
     } else {
         work.checkpoint();
     }
-    done.session_path = work.session.file_path().map(display_path);
+    // A file whose last checkpoint failed does not hold this session: no
+    // path is reported (the warning `session_file_not_saved` says why).
+    done.session_path = if work.file_behind() {
+        None
+    } else {
+        work.session.file_path().map(display_path)
+    };
     // The session goes back before scan_done is written, so that the
     // catalog can be queried as soon as the event arrives.
     slot.give_back();

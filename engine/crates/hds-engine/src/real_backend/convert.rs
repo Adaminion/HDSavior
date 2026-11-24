@@ -22,10 +22,10 @@ use hds_io::{ProtectedReason, SourceInfo, Warning};
 use hds_recover::{Flag as CoreFlag, FlagSet, Rating as CoreRating};
 
 use crate::protocol::{
-    Ancestor, ByteRange, CatalogInfo, ClusterSource, DataInfo, ErrorCode, Filter, Flag,
-    FlagDetail, Geometry, Instance, InstanceKind, LiveVolume, NodeInfo, NodeKind, OffsetSource,
-    ProtectedRange, ProtocolError, Rating, RecordInfo, Row, RowsPage, ScanPhase, ScanProgress,
-    SearchPage, SearchRow, SelectionSummary, SortKey, VirtualFolders,
+    Ancestor, ByteRange, CatalogInfo, ClusterSource, DataInfo, ErrorCode, Filter, Flag, FlagDetail,
+    Geometry, Instance, InstanceKind, LiveVolume, NodeInfo, NodeKind, OffsetSource, ProtectedRange,
+    ProtocolError, Rating, RecordInfo, Row, RowsPage, ScanPhase, ScanProgress, SearchPage,
+    SearchRow, SelectionSummary, SortKey, VirtualFolders,
 };
 
 /// The protocol error code named `code` (an `hds-core` `code()` string);

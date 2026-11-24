@@ -267,14 +267,21 @@ class CatalogController extends ChangeNotifier {
     required int volumeOffset,
   }) async {
     try {
-      final main = _info?.mainInstance?.id;
-      final info = await _api.geometrySet(
-        instance: instance,
-        clusterSize: clusterSize,
-        volumeOffset: volumeOffset,
+      final carvedBefore = _info?.mainInstance?.virtual.carved;
+      final info = await guarded(
+        (epoch) => _api.geometrySet(
+          epoch: epoch,
+          instance: instance,
+          clusterSize: clusterSize,
+          volumeOffset: volumeOffset,
+        ),
       );
-      // "Carved nodes are discarded when the main instance changes."
-      if (instance == main) carvedNodesReplaced();
+      // "Carved nodes are discarded when the main instance or its geometry
+      // changes": the `[Carved files]` folder is gone then.
+      if (carvedBefore != null &&
+          info.mainInstance?.virtual.carved != carvedBefore) {
+        carvedNodesReplaced();
+      }
       _adopt(info, guardChanged: true);
       return info;
     } finally {
@@ -287,7 +294,8 @@ class CatalogController extends ChangeNotifier {
   ///
   /// * [InstanceOverride.main]: "this is the one I want" - it becomes the
   ///   main instance (`instances[0]`), the previous main one becomes
-  ///   `other`.
+  ///   `other` (or, if it was main only by an earlier choice, returns to
+  ///   the kind the engine gives it).
   /// * [InstanceOverride.other]: "treat as a separate volume" - an
   ///   `embedded` or `older` instance becomes a volume of its own whose
   ///   files are read with its own geometry and can be recovered.
@@ -300,7 +308,9 @@ class CatalogController extends ChangeNotifier {
     required int instance,
     required InstanceOverride kind,
   }) async {
-    final info = await _api.instanceSet(instance: instance, kind: kind);
+    final info = await guarded(
+      (epoch) => _api.instanceSet(epoch: epoch, instance: instance, kind: kind),
+    );
     _adopt(info, guardChanged: true);
     return info;
   }

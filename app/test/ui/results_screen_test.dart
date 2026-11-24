@@ -323,6 +323,7 @@ void main() {
     await tester.tap(find.text(S.geometryConfirm));
     await settleDialog(tester);
     expect(fake.lastArgs('geometry_set'), {
+      'epoch': fake.app.catalog.epoch,
       'instance': main.id,
       'cluster_size': other.clusterSize,
       'volume_offset': other.volumeOffset,
@@ -348,6 +349,7 @@ void main() {
   testWidgets('overruling the engine: "this is the one I want" rebuilds the results', (tester) async {
     final fake = await results(tester);
     final older = fake.app.catalog.info!.instances[1];
+    final epoch = fake.app.catalog.epoch;
     await tester.tap(inTree(find.text(S.instanceName(older))));
     await settle(tester);
     expect(inDetails(find.text(S.instanceDescription(older))), findsOneWidget);
@@ -356,8 +358,8 @@ void main() {
     expect(find.text(S.instanceConfirmTitle(InstanceOverride.main)), findsOneWidget);
     await tester.tap(find.text(S.instanceConfirm));
     await settleDialog(tester);
-    expect(fake.lastArgs('instance_set'), {'instance': older.id, 'kind': 'main'});
     final now = fake.app.catalog.info!;
+    expect(fake.lastArgs('instance_set'), {'epoch': epoch, 'instance': older.id, 'kind': 'main'});
     expect(now.mainInstance!.manual, isTrue);
     // A new epoch: the screen is back at the root of the new main file system.
     expect(fake.app.browse.folder, FolderLocation(now.mainInstance!.root));

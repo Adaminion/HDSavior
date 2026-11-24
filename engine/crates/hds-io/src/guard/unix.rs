@@ -152,5 +152,128 @@ pub(super) fn resolve(path: &Path, purpose: Purpose) -> Result<Resolved, Refusal
             volume: meta.dev(),
             index: meta.ino(),
         }),
+        backing_files: backing_files(meta.dev()),
     })
+}
+
+/// The regular files the file system with device number `dev` is stored
+/// in: the backing file of a loop device it is mounted from (also through
+/// a partition of it or a device-mapper device stacked on it), or the file
+/// a FUSE file system (ntfs-3g) was mounted from directly. A destination
+/// there writes into that file: if it is the source image, the engine
+/// would write into its own source.
+#[cfg(target_os = "linux")]
+fn backing_files(dev: u64) -> Vec<FileId> {
+    let mut out = Vec::new();
+    collect_block_device(dev, &mut out, 0);
+    // The mount table names the device or file a file system was mounted
+    // from; FUSE file systems have an anonymous device number of their own.
+    let wanted = format!("{}:{}", libc::major(dev), libc::minor(dev));
+    if let Ok(table) = std::fs::read_to_string("/proc/self/mountinfo") {
+        for line in table.lines() {
+            let mut fields = line.split(' ');
+            if fields.nth(2) != Some(wanted.as_str()) {
+                continue;
+            }
+            // After the separator: file-system type, then the mount source.
+            let Some(source) = line
+                .split(" - ")
+                .nth(1)
+                .and_then(|rest| rest.split(' ').nth(1))
+            else {
+                continue;
+            };
+            let source = unescape_mountinfo(source);
+            let Ok(meta) = std::fs::metadata(&source) else {
+                continue;
+            };
+            use std::os::unix::fs::FileTypeExt;
+            if meta.file_type().is_block_device() {
+                collect_block_device(meta.rdev(), &mut out, 0);
+            } else if meta.is_file() {
+                push_id(&mut out, meta.dev(), meta.ino());
+            }
+        }
+    }
+    out
+}
+
+#[cfg(not(target_os = "linux"))]
+fn backing_files(_dev: u64) -> Vec<FileId> {
+    Vec::new()
+}
+
+#[cfg(target_os = "linux")]
+fn push_id(out: &mut Vec<FileId>, volume: u64, index: u64) {
+    let id = FileId { volume, index };
+    if !out.contains(&id) {
+        out.push(id);
+    }
+}
+
+/// `\040` and the other octal escapes of `/proc/self/mountinfo`.
+#[cfg(target_os = "linux")]
+fn unescape_mountinfo(text: &str) -> std::path::PathBuf {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let octal = bytes
+            .get(i + 1..i + 4)
+            .filter(|d| bytes[i] == b'\\' && d.iter().all(|c| (b'0'..=b'7').contains(c)));
+        match octal {
+            Some(d) => {
+                out.push(
+                    d.iter()
+                        .fold(0u8, |n, c| n.wrapping_mul(8).wrapping_add(c - b'0')),
+                );
+                i += 4;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    std::path::PathBuf::from(std::ffi::OsString::from(
+        <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&out),
+    ))
+}
+
+/// Follows block device `dev` in sysfs to the files it is stored in: a
+/// loop device's backing file, the device a partition belongs to, the
+/// devices a device-mapper device is built from.
+#[cfg(target_os = "linux")]
+fn collect_block_device(dev: u64, out: &mut Vec<FileId>, depth: u32) {
+    let dir = format!("/sys/dev/block/{}:{}", libc::major(dev), libc::minor(dev));
+    if let Ok(dir) = std::fs::canonicalize(dir) {
+        collect_sysfs(&dir, out, depth);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn collect_sysfs(dir: &Path, out: &mut Vec<FileId>, depth: u32) {
+    if depth > 8 {
+        return;
+    }
+    if let Ok(name) = std::fs::read_to_string(dir.join("loop").join("backing_file")) {
+        // A deleted backing file is shown with " (deleted)"; it can no
+        // longer be the source image's name, but may still be its inode.
+        let name = name.trim_end_matches('\n');
+        if let Ok(meta) = std::fs::metadata(name) {
+            push_id(out, meta.dev(), meta.ino());
+        }
+    }
+    if dir.join("partition").exists() {
+        if let Some(parent) = dir.parent() {
+            collect_sysfs(parent, out, depth + 1);
+        }
+    }
+    if let Ok(slaves) = std::fs::read_dir(dir.join("slaves")) {
+        for slave in slaves.flatten() {
+            if let Ok(target) = std::fs::canonicalize(slave.path()) {
+                collect_sysfs(&target, out, depth + 1);
+            }
+        }
+    }
 }

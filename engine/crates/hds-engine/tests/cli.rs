@@ -99,7 +99,7 @@ fn help_and_disks() {
 }
 
 #[test]
-fn the_build_backend_scans_and_refuses_what_it_cannot_do() {
+fn the_build_backend_scans_and_images() {
     let dir = TempDir::new("cli");
     let image = zero_image(&dir, "src.img", 1 << 20);
     let session = dir.join("s.hds");
@@ -132,13 +132,24 @@ fn the_build_backend_scans_and_refuses_what_it_cannot_do() {
     assert_eq!(loaded["source_attached"], false);
     assert_eq!(loaded["source_error"]["code"], "source_mismatch");
     assert_eq!(loaded["catalog"]["scan_complete"], true);
-    // Imaging is not connected in this build.
+    // Imaging copies the source; a second run is refused (`exists`).
+    let out = run(&["image", &image, "--dest", &dir.join("x.img")], None);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let done = json_lines(&out).last().unwrap().clone();
+    assert_eq!(done["event"], "image_done");
+    assert_eq!(done["data"]["bytes_written"], 1 << 20);
+    assert_eq!(
+        std::fs::read(dir.join("x.img")).unwrap(),
+        std::fs::read(&image).unwrap()
+    );
     let out = run(&["image", &image, "--dest", &dir.join("x.img")], None);
     assert_eq!(out.status.code(), Some(1));
-    assert_eq!(
-        json_lines(&out).last().unwrap()["error"]["code"],
-        "unsupported"
-    );
+    assert_eq!(json_lines(&out).last().unwrap()["error"]["code"], "exists");
     let out = run(
         &[
             "image",

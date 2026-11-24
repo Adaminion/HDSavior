@@ -92,7 +92,7 @@ void main() {
     await expectLater(api.nodeInfo(epoch: catalog.epoch + 7, node: root), throwsA(isA<EngineException>()));
     final file = page.rows.firstWhere((r) => r.isFile && r.rating != Rating.unsupported && r.size > 0);
     await api.readFile(epoch: catalog.epoch, node: file.id, length: 512);
-    final changed = await api.instanceSet(instance: 1, kind: InstanceOverride.main);
+    final changed = await api.instanceSet(epoch: catalog.epoch, instance: 1, kind: InstanceOverride.main);
     await api.selectionSummary(epoch: changed.epoch, include: [changed.mainInstance!.root], exclude: []);
     await client.shutdown();
     await client.dispose();

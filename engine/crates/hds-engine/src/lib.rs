@@ -9,6 +9,7 @@
 //! * [`backend`] - the [`Backend`](backend::Backend) trait: everything that
 //!   needs `hds-core` or `hds-recover`, at the protocol level.
 //! * [`real_backend`] - its implementation on `hds-core` and `hds-recover`.
+//! * [`recorded`] - where a session's source is while it is not attached.
 //! * [`server`] - `serve` over stdin / stdout, and [`InProcess`](server::InProcess)
 //!   for the command-line interface.
 //! * [`cli`] - the subcommands of ARCHITECTURE.md section 5.6.
@@ -34,6 +35,7 @@ pub mod output;
 pub mod platform;
 pub mod protocol;
 pub mod real_backend;
+pub mod recorded;
 pub mod server;
 pub mod testing;
 pub mod transcript;

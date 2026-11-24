@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::{Harness, TempDir};
+use common::{sha256_hex, Harness, TempDir};
 use hds_engine::protocol::ErrorCode;
 use serde_json::{json, Value};
 
@@ -206,7 +206,10 @@ fn fixtures_scan_browse_search_and_read_like_the_manifests() {
                 continue;
             }
             let info = h.ok("node_info", json!({"epoch": epoch, "node": row["id"]}));
-            assert_eq!(&info["path"], path, "{name}: node_info and the listing agree");
+            assert_eq!(
+                &info["path"], path,
+                "{name}: node_info and the listing agree"
+            );
             assert_eq!(&info["row"]["id"], &row["id"]);
             if let Some(offset) = info["record"]["disk_offset"].as_u64() {
                 by_record.insert(offset, (path.clone(), row));
@@ -242,13 +245,17 @@ fn fixtures_scan_browse_search_and_read_like_the_manifests() {
                     fail(format!("{path}: at {got:?}"));
                 }
             } else {
-                let suffix = after["ancestry"]["surviving_suffix"].as_str().unwrap_or(last);
+                let suffix = after["ancestry"]["surviving_suffix"]
+                    .as_str()
+                    .unwrap_or(last);
                 let lost =
                     got.starts_with("[Lost folders]/") || got.starts_with("[Orphaned files]/");
                 if got.ends_with(suffix) && (lost || got == suffix) {
                     paths += 1;
                 } else {
-                    fail(format!("{path}: at {got:?}, not below a lost folder with {suffix:?}"));
+                    fail(format!(
+                        "{path}: at {got:?}, not below a lost folder with {suffix:?}"
+                    ));
                 }
             }
             if e["type"] != "file" {
@@ -298,7 +305,8 @@ fn fixtures_scan_browse_search_and_read_like_the_manifests() {
                     fail(format!("{path}: read_file content differs"));
                 }
                 let info = h.ok("node_info", json!({"epoch": epoch, "node": node}));
-                if info["path"] != got || info["record"]["disk_offset"] != e["ondisk"]["record_offset"]
+                if info["path"] != got
+                    || info["record"]["disk_offset"] != e["ondisk"]["record_offset"]
                 {
                     fail(format!(
                         "{path}: node_info {} at {}",
@@ -311,7 +319,9 @@ fn fixtures_scan_browse_search_and_read_like_the_manifests() {
                     && hds_carve::matches_extension(&data, row["ext"].as_str().unwrap()).is_some()
                     && !flags.iter().any(|f| f == "signature_ok")
                 {
-                    fail(format!("{path}: no signature flag after read_file: {flags:?}"));
+                    fail(format!(
+                        "{path}: no signature flag after read_file: {flags:?}"
+                    ));
                 }
                 // Search finds it by its name, with its path.
                 let found = h.ok(
@@ -587,7 +597,10 @@ fn stopped_and_shut_down_scans_resume_to_the_same_catalog() {
     if loaded["source_attached"] != true {
         // Stopped before 8 records were stored: B4 cannot prove the
         // identity without `force`.
-        assert_eq!(loaded["source_error"]["code"], "source_mismatch", "{loaded}");
+        assert_eq!(
+            loaded["source_error"]["code"], "source_mismatch",
+            "{loaded}"
+        );
         assert_eq!(
             loaded["source_error"]["data"]["failed"],
             json!(["too_few_samples"])
@@ -631,7 +644,7 @@ fn instance_and_geometry_changes_follow_the_epoch_rules() {
     let g = &instances[0]["geometry"];
     let set = h.ok(
         "geometry_set",
-        json!({"instance": 0, "cluster_size": g["cluster_size"], "volume_offset": g["volume_offset"]}),
+        json!({"epoch": epoch, "instance": 0, "cluster_size": g["cluster_size"], "volume_offset": g["volume_offset"]}),
     );
     assert_eq!(u(&set["epoch"]), epoch);
     assert_eq!(set["instances"][0]["geometry"]["cluster_source"], "manual");
@@ -641,11 +654,14 @@ fn instance_and_geometry_changes_follow_the_epoch_rules() {
     // An instance that does not exist, and strays, are refused.
     let e = h.err(
         "geometry_set",
-        json!({"instance": 99, "cluster_size": 4096, "volume_offset": 0}),
+        json!({"epoch": epoch, "instance": 99, "cluster_size": 4096, "volume_offset": 0}),
     );
     assert_eq!(e.code, ErrorCode::NotFound);
     if let Some(strays) = kinds.iter().position(|k| *k == "strays") {
-        let e = h.err("instance_set", json!({"instance": strays, "kind": "main"}));
+        let e = h.err(
+            "instance_set",
+            json!({"epoch": epoch, "instance": strays, "kind": "main"}),
+        );
         assert_eq!(e.code, ErrorCode::BadRequest);
     }
 
@@ -654,7 +670,10 @@ fn instance_and_geometry_changes_follow_the_epoch_rules() {
         .iter()
         .position(|k| *k == "older" || *k == "other" || *k == "embedded")
     {
-        let changed = h.ok("instance_set", json!({"instance": other, "kind": "main"}));
+        let changed = h.ok(
+            "instance_set",
+            json!({"epoch": epoch, "instance": other, "kind": "main"}),
+        );
         let epoch2 = u(&changed["epoch"]);
         assert!(epoch2 > epoch);
         assert_eq!(changed["instances"][0]["kind"], "main");
@@ -679,7 +698,10 @@ fn instance_and_geometry_changes_follow_the_epoch_rules() {
             .iter()
             .position(|i| i["manual"] == true)
             .unwrap();
-        let back = h2.ok("instance_set", json!({"instance": new_main, "kind": "auto"}));
+        let back = h2.ok(
+            "instance_set",
+            json!({"epoch": loaded["catalog"]["epoch"], "instance": new_main, "kind": "auto"}),
+        );
         let mut a = without_epoch(back.clone());
         let mut b = without_epoch(catalog.clone());
         // geometry_set above stored a manual geometry for main.
@@ -723,21 +745,23 @@ fn files_on_the_source_count_as_lost_files_for_check_destination() {
     );
     assert_eq!(check["verdict"], "overlaps_source");
     assert!(check["lost_files"].is_u64() && check["lost_bytes"].is_u64());
-    // Jobs of part B are not connected yet.
+    // The jobs refuse the source image as their destination (tests/real_jobs.rs
+    // covers them in full).
     let epoch = u(&done["catalog"]["epoch"]);
     let root = &done["catalog"]["instances"][0]["root"];
     let e = h.err(
         "recover_start",
-        json!({"epoch": epoch, "include": [root], "dest": scratch.join("out"),
+        json!({"epoch": epoch, "include": [root], "dest": image_path(&dir, name),
                "allow_unknown_disk": true}),
     );
-    assert_eq!(e.code, ErrorCode::Unsupported);
-    let e = h.err("carve_start", json!({}));
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, ErrorCode::DestinationRefused);
     // read_file on a folder.
     let e = h.err("read_file", json!({"epoch": epoch, "node": root}));
     assert_eq!(e.code, ErrorCode::BadRequest);
-    let e = h.err("node_info", json!({"epoch": epoch, "node": 4_000_000_000u64}));
+    let e = h.err(
+        "node_info",
+        json!({"epoch": epoch, "node": 4_000_000_000u64}),
+    );
     assert_eq!(e.code, ErrorCode::NotFound);
     // basic holds one file system: "other" on it would leave no main.
     let kinds: Vec<Value> = done["catalog"]["instances"]
@@ -747,11 +771,17 @@ fn files_on_the_source_count_as_lost_files_for_check_destination() {
         .map(|i| i["kind"].clone())
         .collect();
     if kinds == [json!("main")] {
-        let e = h.err("instance_set", json!({"instance": 0, "kind": "other"}));
+        let e = h.err(
+            "instance_set",
+            json!({"epoch": epoch, "instance": 0, "kind": "other"}),
+        );
         assert_eq!(e.code, ErrorCode::BadRequest);
         assert_eq!(h.epoch(), epoch, "a refused change keeps the epoch");
         // "main" on the main instance only marks it as the user's choice.
-        let set = h.ok("instance_set", json!({"instance": 0, "kind": "main"}));
+        let set = h.ok(
+            "instance_set",
+            json!({"epoch": epoch, "instance": 0, "kind": "main"}),
+        );
         assert_eq!(set["instances"][0]["manual"], true);
         assert!(u(&set["epoch"]) > epoch);
     }
@@ -761,76 +791,6 @@ fn files_on_the_source_count_as_lost_files_for_check_destination() {
 // ----------------------------------------------------------------------------------------------
 // SHA-256 (FIPS 180-4), for comparing contents with the manifests.
 // ----------------------------------------------------------------------------------------------
-
-fn sha256_hex(data: &[u8]) -> String {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    let mut msg = data.to_vec();
-    let bits = (data.len() as u64).wrapping_mul(8);
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bits.to_be_bytes());
-    for block in msg.chunks(64) {
-        let mut w = [0u32; 64];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                block[4 * i],
-                block[4 * i + 1],
-                block[4 * i + 2],
-                block[4 * i + 3],
-            ]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ (!e & g);
-            let t1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(maj);
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
-        }
-        for (x, y) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
-            *x = x.wrapping_add(y);
-        }
-    }
-    h.iter().map(|x| format!("{x:08x}")).collect()
-}
 
 #[test]
 fn sha256_matches_the_standard_vectors() {
@@ -871,7 +831,10 @@ fn other_turns_an_embedded_file_system_into_a_volume_of_its_own() {
         let e = h.err("read_file", json!({"epoch": epoch, "node": row["id"]}));
         assert_eq!(e.code, ErrorCode::Unsupported);
     }
-    let changed = h.ok("instance_set", json!({"instance": k, "kind": "other"}));
+    let changed = h.ok(
+        "instance_set",
+        json!({"epoch": epoch, "instance": k, "kind": "other"}),
+    );
     assert!(u(&changed["epoch"]) > epoch);
     let now = changed["instances"]
         .as_array()

@@ -597,12 +597,17 @@ final class FakeEngine {
       case 'open_source':
         return _openSource(args);
       case 'close_source':
+        // Closes the source only: a session and its catalog stay (state B,
+        // browse only); the epoch does not change.
         _notBusy();
-        _source = null;
         _sourceDisk = null;
         _sourceAttached = false;
-        _session = null;
-        _catalog = null;
+        if (_session == null) {
+          _source = null;
+          _catalog = null;
+        } else {
+          _catalog?.sourceAttached = false;
+        }
         return {};
       case 'scan_start':
         return _scanStart(args);
@@ -853,14 +858,17 @@ final class FakeEngine {
     Map<String, Object?>? disk;
     if (override != null) {
       final overridePath = _arg<String>(override, 'path');
-      if (overridePath.toLowerCase().contains('mismatch')) {
-        throw FakeError('source_mismatch', 'This is not the disk the session was made from.', {
-          'failed': ['content'],
-        });
+      // A given source that does not match is reported in source_error,
+      // not as an error: the session is loaded without a source.
+      final mismatch = _identityMismatch(overridePath, force: false);
+      if (mismatch != null) {
+        attached = false;
+        sourceError = mismatch.toJson();
+      } else {
+        source = {...source, 'kind': _arg<String>(override, 'kind'), 'path': overridePath};
+        attached = true;
+        sourceError = null;
       }
-      source = {...source, 'kind': _arg<String>(override, 'kind'), 'path': overridePath};
-      attached = true;
-      sourceError = null;
     }
     final number = source['disk_number'];
     if (number is int) disk = world.diskByNumber(number);
@@ -890,17 +898,8 @@ final class FakeEngine {
     final kind = _arg<String>(args, 'kind');
     final path = _arg<String>(args, 'path');
     final force = _opt<bool>(args, 'force', false);
-    final lower = path.toLowerCase();
-    if (lower.contains('mismatch')) {
-      throw FakeError('source_mismatch', 'This is not the disk the session was made from.', {
-        'failed': ['content'],
-      });
-    }
-    if (lower.contains('fewsamples') && !force) {
-      throw FakeError('source_mismatch', 'Too few records could be compared to be sure this is the same disk.', {
-        'failed': ['samples'],
-      });
-    }
+    final mismatch = _identityMismatch(path, force: force);
+    if (mismatch != null) throw mismatch;
     if (kind == 'disk' && !options.elevated) {
       throw FakeError('access_denied', 'Windows refused access to $path. HDSavior must run as administrator.');
     }
@@ -914,6 +913,33 @@ final class FakeEngine {
     final mixed = _catalog?.warnings.contains(_mixedGenerations) ?? false;
     _catalog = _buildCatalog(warnings: [if (mixed) _mixedGenerations]);
     return {'source': source, 'catalog': _info()};
+  }
+
+  /// The identity check of ALGORITHMS B4 for a source at [path] (see
+  /// fake_world.dart): `mismatch` -> the records differ (refused even with
+  /// [force]); `fewsamples` -> too few records could be compared (refused
+  /// unless [force]). `data` as the real engine sends it.
+  FakeError? _identityMismatch(String path, {required bool force}) {
+    final lower = path.toLowerCase();
+    if (lower.contains('mismatch')) {
+      return FakeError('source_mismatch', 'This is not the source that was scanned: 7 of 8 compared records differ.', {
+        'failed': ['records'],
+        'samples': 8,
+        'matched': 1,
+        'mismatched': 7,
+        'unreadable': 0,
+      });
+    }
+    if (lower.contains('fewsamples') && !force) {
+      return FakeError('source_mismatch', 'Only 3 stored records could be compared (force accepts this).', {
+        'failed': ['too_few_samples'],
+        'samples': 3,
+        'matched': 3,
+        'mismatched': 0,
+        'unreadable': 0,
+      });
+    }
+    return null;
   }
 
   /// Runs a long request: `task_progress` events, then [finish] (which
@@ -932,7 +958,7 @@ final class FakeEngine {
 
   Map<String, Object?>? _geometrySet(int id, Map<String, Object?> args) {
     _notBusy();
-    final catalog = _needCatalog();
+    final catalog = _needCatalogAt(args);
     final instance = _arg<int>(args, 'instance');
     final clusterSize = _arg<int>(args, 'cluster_size');
     final volumeOffset = _arg<int>(args, 'volume_offset');
@@ -949,7 +975,7 @@ final class FakeEngine {
   /// The catalog is rebuilt (new epoch); carved nodes are discarded.
   Map<String, Object?> _instanceSet(Map<String, Object?> args) {
     _notBusy();
-    final catalog = _needCatalog();
+    final catalog = _needCatalogAt(args);
     catalog.setInstanceKind(_arg<int>(args, 'instance'), _arg<String>(args, 'kind'));
     catalog.epoch = ++_epochCounter;
     return _info();
@@ -1036,7 +1062,10 @@ final class FakeEngine {
     }
     final check = _guard(dest, purpose: 'recover', needBytes: bytes, args: args);
     if (check['enough_space'] == false) {
-      throw FakeError('no_space', 'There is not enough free space at the destination.', check);
+      throw FakeError('no_space', 'There is not enough free space at the destination.', {
+        'free_bytes': check['free_bytes'],
+        'need_bytes': bytes,
+      });
     }
     _job = _RecoverJob(
       this,
@@ -1087,11 +1116,18 @@ final class FakeEngine {
       throw FakeError('exists', 'The file $dest already exists.');
     }
     final maxFile = check['max_file_bytes'] as int?;
+    // `data` as the real engine sends it.
     if (maxFile != null && bytes > maxFile) {
-      throw FakeError('no_space', 'The destination file system cannot hold a file of this size.', check);
+      throw FakeError('no_space', 'The destination file system cannot hold a file of this size.', {
+        'need_bytes': bytes,
+        'max_file_bytes': maxFile,
+      });
     }
     if (check['enough_space'] == false) {
-      throw FakeError('no_space', 'There is not enough free space at the destination.', check);
+      throw FakeError('no_space', 'There is not enough free space at the destination.', {
+        'free_bytes': check['free_bytes'],
+        'need_bytes': bytes,
+      });
     }
     _job = _ImageJob(this, dest: dest, bytesTotal: bytes);
     return {'job': 'image', 'bytes': bytes};

@@ -395,7 +395,7 @@ fn refuse_source_image_at(path: &Path) -> io::Result<()> {
         return Ok(());
     }
     match crate::win::file_id(&handle) {
-        Ok(id) if crate::image::is_open_image(id) => {
+        Ok(id) if crate::image::is_open_image(id) || crate::image::is_in_use(id) => {
             Err(io::Error::from_raw_os_error(32)) // ERROR_SHARING_VIOLATION
         }
         _ => Ok(()),

@@ -1198,6 +1198,9 @@ final class FakeCatalog {
   /// instance changes. A pair equal to a candidate selects that candidate.
   void setGeometry({required int instance, required int clusterSize, required int volumeOffset}) {
     final id = _index(instance);
+    // Carved nodes go only when the main instance's geometry really changes
+    // (the geometry in effect, set again, keeps them).
+    final unchanged = _geometryOf(id).sameValues(clusterSize, volumeOffset);
     final candidates = _candidates[id].where((c) => c.sameValues(clusterSize, volumeOffset));
     _manual[id] = candidates.isNotEmpty
         ? candidates.first
@@ -1212,7 +1215,7 @@ final class FakeCatalog {
             validated: false,
             volumeEnd: rangeEnd > volumeOffset ? rangeEnd : _clip(volumeOffset + clusterSize),
           );
-    if (id == _mainId) _discardAllCarved();
+    if (id == _mainId && !unchanged) _discardAllCarved();
     _generation++;
   }
 }

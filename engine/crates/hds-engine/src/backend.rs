@@ -51,7 +51,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use hds_carve::FileKind;
-use hds_io::{BlockSource, DestinationCheck, PartitionInfo, Protected};
+use hds_io::{BlockSource, DestinationCheck, PartitionInfo, Protected, SourceInfo};
 
 use crate::output::Output;
 use crate::protocol::{
@@ -111,6 +111,13 @@ impl<P: EventData> JobContext<P> {
     /// a scan then saves its session but builds no catalog.
     pub fn is_shutting_down(&self) -> bool {
         self.shutdown.load(Ordering::Relaxed)
+    }
+
+    /// The flag [`is_shutting_down`](Self::is_shutting_down) reads, for
+    /// work that ignores `job_cancel` but must stop for a shutdown (the
+    /// analysis phase of a scan).
+    pub fn shutdown_flag(&self) -> &AtomicBool {
+        &self.shutdown
     }
 }
 
@@ -328,6 +335,15 @@ pub trait Backend: Send + Sync {
     /// with it (an image carries no sector size of its own, and a session
     /// of a 4096-byte-sector disk must not be read as 512).
     fn session_sector_size(&self) -> Option<u32> {
+        None
+    }
+
+    /// The identity of the session's source as the session recorded it
+    /// (kind, path, size, model, serial), if there is a session. While the
+    /// source is not attached (state B) the destination guard runs against
+    /// where that source is now ([`Recorded`](crate::recorded::Recorded)),
+    /// not against "no source".
+    fn session_source(&self) -> Option<SourceInfo> {
         None
     }
 }

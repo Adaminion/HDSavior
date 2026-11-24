@@ -346,7 +346,7 @@ stderr. Exit code 0 = ok, 1 = the job failed, 2 = usage error.
 hdsavior-engine serve
 hdsavior-engine disks
 hdsavior-engine scan    <source> --session <file> [--kind disk|image] [--partition K | --start N --end N]
-                        [--no-carve-hits] [--resume]
+                        [--no-carve-hits] [--resume | --force]
 hdsavior-engine info    --session <file> [--source <path>]
 hdsavior-engine ls      --session <file> [--node ID | --path P] [--deleted] [--limit N]
 hdsavior-engine find    --session <file> <query> [--ext a,b] [--deleted] [--limit N]
@@ -354,9 +354,22 @@ hdsavior-engine recover --session <file> --dest <dir> [--source <path>] (--all |
                         [--include-deleted] [--skip-damaged] [--allow-same-disk] [--allow-unknown-disk]
                         [--on-exists rename|skip|overwrite]
 hdsavior-engine carve   --session <file> [--source <path>] [--kinds a,b]
+                        [--allow-same-disk] [--allow-unknown-disk]
 hdsavior-engine image   <source> --dest <file> [--partition K | --start N --end N] [--resume]
                         [--allow-same-disk] [--allow-unknown-disk]
 ```
+
+- `scan` refuses to replace an existing session file unless `--force` is
+  given; `--resume` continues it. A resumed session too young to be
+  recognised by its records (fewer than 8, ALGORITHMS B4) is attached to
+  the source named on the command line with `force`; any other mismatch
+  fails.
+- `recover` and `carve` save the session back to `--session`
+  (`session_save`, with the consent options given) after the job: a loaded
+  file is not always continued in place, and what the job added (carved
+  files, what the reads found) must not be lost.
+- `info` fails (exit code 1) when `--source` is given and is not the
+  session's source.
 
 `docs/protocol-examples.jsonl` is a transcript recorded from the real engine
 on the `basic` fixture; the engine's tests regenerate and compare it, and the

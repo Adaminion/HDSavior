@@ -120,7 +120,9 @@ void main() {
     });
 
     test('refresh when the engine has no catalog clears it; other errors are passed on', () async {
-      await app().source.close();
+      // Opening a source drops the engine's session and catalog. (After
+      // close_source the engine keeps them, browse only.)
+      await fake.openDisk();
       expect(catalog().info, isNull);
       await catalog().refresh();
       expect(catalog().info, isNull);
@@ -180,7 +182,12 @@ void main() {
       expect(list.rowAt(0), isNull, reason: 'the rows are fetched again');
       await list.idle;
       expect(ratingOfSignatureOk(), Rating.uncertain, reason: 'not validated: at most uncertain');
-      expect(fake.lastArgs('geometry_set'), {'instance': 0, 'cluster_size': 512, 'volume_offset': 2097152});
+      expect(fake.lastArgs('geometry_set'), {
+        'epoch': catalog().epoch,
+        'instance': 0,
+        'cluster_size': 512,
+        'volume_offset': 2097152,
+      });
     });
 
     test('changing the main geometry forgets ticked carved files (they are discarded)', () async {
@@ -232,7 +239,7 @@ void main() {
       final guard = catalog().guardRevision;
 
       final info = await catalog().setInstanceKind(instance: older.id, kind: InstanceOverride.main);
-      expect(fake.lastArgs('instance_set'), {'instance': older.id, 'kind': 'main'});
+      expect(fake.lastArgs('instance_set'), {'epoch': epoch, 'instance': older.id, 'kind': 'main'});
       expect(info.epoch, isNot(epoch));
       expect(catalog().info, same(info));
       final main = catalog().info!.mainInstance!;
@@ -246,8 +253,9 @@ void main() {
       expect(catalog().guardRevision, greaterThan(guard));
 
       // The ids of the new catalog count now.
+      final epoch2 = catalog().epoch;
       await catalog().setInstanceKind(instance: main.id, kind: InstanceOverride.auto);
-      expect(fake.lastArgs('instance_set'), {'instance': main.id, 'kind': 'auto'});
+      expect(fake.lastArgs('instance_set'), {'epoch': epoch2, 'instance': main.id, 'kind': 'auto'});
       expect(catalog().info!.mainInstance!.root, 0);
       expect(catalog().info!.mainInstance!.manual, isFalse);
       expect(app().browse.folder, FolderLocation(catalog().info!.mainInstance!.root));
@@ -321,7 +329,7 @@ void main() {
       expect(catalog().guardRevision, start + 2);
 
       // Other protected ranges in the same epoch, learnt from a refresh.
-      await app().api.geometrySet(instance: 0, clusterSize: 4096, volumeOffset: 1048576);
+      await app().api.geometrySet(epoch: catalog().epoch!, instance: 0, clusterSize: 4096, volumeOffset: 1048576);
       expect(catalog().guardRevision, start + 2, reason: 'the controller has not seen it yet');
       await catalog().refresh();
       expect(catalog().protectedRanges, hasLength(ranges));

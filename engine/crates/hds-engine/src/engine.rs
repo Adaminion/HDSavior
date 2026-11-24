@@ -34,7 +34,7 @@
 //! | `open_source`, `close_source`, `session_load` | S, J `busy` |
 //! | `session_save` | S, J `busy` · no session `no_session` · guard `destination_refused` |
 //! | `session_attach_source` | S, J `busy` · no session `no_session` · open errors · `source_mismatch` (backend) |
-//! | `geometry_set`, `instance_set` | S, J `busy` · no catalog `no_catalog` · unknown instance `not_found` · bad values / `strays` `bad_request` |
+//! | `geometry_set`, `instance_set` | S, J `busy` · no catalog `no_catalog` · wrong epoch `stale_catalog` · unknown instance `not_found` · bad values / `strays` `bad_request` |
 //! | `scan_start` | S, J `busy` · no source `no_source` · resume without session `no_session` · bad range `bad_request` · guard `destination_refused` |
 //! | `catalog_info` | no catalog (N, O, S) `no_catalog` |
 //! | `list_children`, `node_info`, `search`, `selection_summary` | no catalog `no_catalog` · wrong epoch `stale_catalog` · bad arguments `bad_request` · unknown id `not_found` (backend) |
@@ -87,6 +87,7 @@ use crate::protocol::{
     ReadFileResult, RecoverDone, RecoverStartArgs, ScanDone, ScanStartArgs, ScanStatus, SearchArgs,
     SelectionArgs, SessionAttachArgs, SessionLoadArgs, SessionSaveArgs, TaskName, PROTOCOL_VERSION,
 };
+use crate::recorded::Recorded;
 use crate::validate;
 
 /// Longest request line accepted (16 MiB); longer lines are answered
@@ -669,12 +670,23 @@ impl Engine {
         protected: &[Protected],
         need_bytes: Option<u64>,
     ) -> CheckDestinationResult {
+        // Without an attached source (state B) the session's recorded
+        // source is located again: a disk that is still connected must not
+        // become `unknown_disk`, which a consent unlocks (S2).
         let unattached = Unattached;
-        let source: &dyn BlockSource = match &self.source {
-            Some(opened) => &*opened.source,
-            None => &unattached,
+        let recorded = match &self.source {
+            Some(_) => None,
+            None => self.backend.session_source().map(|s| Recorded::locate(&s)),
         };
-        let check = destination_check(Path::new(path), purpose, source, protected, need_bytes);
+        let source: &dyn BlockSource = match (&self.source, &recorded) {
+            (Some(opened), _) => &*opened.source,
+            (None, Some(recorded)) => recorded,
+            (None, None) => &unattached,
+        };
+        let mut check = destination_check(Path::new(path), purpose, source, protected, need_bytes);
+        if let Some(recorded) = &recorded {
+            recorded.explain(&mut check);
+        }
         let (lost_files, lost_bytes) =
             if self.catalog().is_some() && !check.source_extents.is_empty() {
                 self.backend.files_in_extents(&check.source_extents)
@@ -972,7 +984,7 @@ impl Engine {
 
     fn geometry_set(&mut self, args: GeometrySetArgs) -> Handled {
         self.not_busy()?;
-        self.require_catalog()?;
+        self.require_epoch(args.epoch)?;
         self.instance(args.instance)?;
         let size = self.session()?.source_size;
         validate::geometry(args.cluster_size, args.volume_offset, size)?;
@@ -987,7 +999,7 @@ impl Engine {
 
     fn instance_set(&mut self, args: InstanceSetArgs) -> Handled {
         self.not_busy()?;
-        self.require_catalog()?;
+        self.require_epoch(args.epoch)?;
         if self.instance(args.instance)? == InstanceKind::Strays {
             return Err(ProtocolError::bad_request(
                 "the stray records cannot be made a file system",

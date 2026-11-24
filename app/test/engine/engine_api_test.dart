@@ -133,18 +133,18 @@ void main() {
     });
 
     test('geometry_set', () async {
-      final request = await requestOf(() => api.geometrySet(instance: 2, clusterSize: 8192, volumeOffset: 32256));
+      final request = await requestOf(() => api.geometrySet(epoch: 3, instance: 2, clusterSize: 8192, volumeOffset: 32256));
       expect(request['cmd'], 'geometry_set');
-      expect(argsOf(request), {'instance': 2, 'cluster_size': 8192, 'volume_offset': 32256});
+      expect(argsOf(request), {'epoch': 3, 'instance': 2, 'cluster_size': 8192, 'volume_offset': 32256});
       expect(argsOf(request).keys.toSet(), examples.object('geometry_set.args').keys.toSet());
     });
 
     test('instance_set', () async {
-      final request = await requestOf(() => api.instanceSet(instance: 2, kind: InstanceOverride.main));
+      final request = await requestOf(() => api.instanceSet(epoch: 3, instance: 2, kind: InstanceOverride.main));
       expect(request['cmd'], 'instance_set');
       expect(argsOf(request), examples.object('instance_set.args'));
       for (final kind in InstanceOverride.values) {
-        expect(argsOf(await requestOf(() => api.instanceSet(instance: 3, kind: kind))), {'instance': 3, 'kind': kind.wire});
+        expect(argsOf(await requestOf(() => api.instanceSet(epoch: 4, instance: 3, kind: kind))), {'epoch': 4, 'instance': 3, 'kind': kind.wire});
       }
       expect(InstanceOverride.values.map((k) => k.wire), ['main', 'other', 'auto']);
     });
@@ -435,14 +435,14 @@ void main() {
       expect((await answered(api.catalogInfo, examples.json('CatalogInfo'))).carveHits, 48213);
       expect(
         (await answered(
-          () => api.geometrySet(instance: 0, clusterSize: 4096, volumeOffset: 0),
+          () => api.geometrySet(epoch: 3, instance: 0, clusterSize: 4096, volumeOffset: 0),
           examples.json('CatalogInfo'),
         )).epoch,
         3,
       );
       expect(
         (await answered(
-          () => api.instanceSet(instance: 0, kind: InstanceOverride.auto),
+          () => api.instanceSet(epoch: 3, instance: 0, kind: InstanceOverride.auto),
           examples.json('CatalogInfo'),
         )).protected.single.reason,
         ProtectionReason.sessionRange,

@@ -190,10 +190,10 @@ differ: copy the new text here and adjust the models and expectations.
 {"source": SourceInfo, "catalog": CatalogInfo}
 
 ### geometry_set.args
-{"instance": 0, "cluster_size": 4096, "volume_offset": 1048576}
+{"epoch": 3, "instance": 0, "cluster_size": 4096, "volume_offset": 1048576}
 
 ### instance_set.args
-{"instance": 2, "kind": "main"}
+{"epoch": 3, "instance": 2, "kind": "main"}
 
 ### list_children.result
 {"total": 5321, "rows": [Row, ...]}

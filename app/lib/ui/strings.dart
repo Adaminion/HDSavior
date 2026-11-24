@@ -145,6 +145,8 @@ abstract final class S {
     WarningCode.mixedGenerations => 'Some records of an older file system could not be separated',
     WarningCode.sessionFileAtRisk => 'The scan progress file is inside the lost file system',
     WarningCode.oldSessionFormat => 'This scan was saved by an older version of HDSavior',
+    WarningCode.sessionFileNotSaved => 'The scan could not be saved to its file',
+    WarningCode.sessionIncomplete => 'The saved scan is incomplete',
     WarningCode.unknown => 'Note from the disk engine',
   };
 
@@ -181,6 +183,11 @@ abstract final class S {
     WarningCode.sessionFileAtRisk => 'Save the scan to another disk, or the next save could overwrite lost files.',
     WarningCode.oldSessionFormat =>
       'Its file times are approximate, so old and new files may be told apart less well. Scan again for exact results.',
+    WarningCode.sessionFileNotSaved =>
+      'The disk it is on may be full or gone. Save the scan to another place, or it is lost when HDSavior closes.',
+    WarningCode.sessionIncomplete =>
+      'The file ends before the scan did (HDSavior was closed or the disk was full). '
+          'Continue the scan to read the rest.',
     WarningCode.unknown => null,
   };
 

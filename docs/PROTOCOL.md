@@ -46,20 +46,37 @@ event     {"event": "scan_progress", "data": { ... }}
   remaining bytes / speed, rounded up; `null` in phase `analyzing` or at
   speed 0. `elapsed_seconds`: whole seconds of this run.
 - Names are UTF-8; an unpaired UTF-16 surrogate in an NTFS name is sent as
-  U+FFFD. Node ids are the only handles; names are never sent back.
+  U+FFFD. Node ids are the only handles; names are never sent back. A
+  request whose strings hold an unpaired surrogate escape (`\uD800`) is
+  read with U+FFFD in its place.
 - Paths inside the rescued tree use `/` and are for display only.
   File-system paths (`dest`, `path`) are native absolute paths.
 - Extensions (`ext`, `exts`) are lower-case without the dot; `""` if none.
-- In filters `null` means "any"; an empty list is `bad_request`.
+- In filters `null` means "any" (also for a whole `filter`); an empty list
+  is `bad_request`.
 
 ### Catalog epochs
 
 Node ids are valid for one catalog **epoch**. `CatalogInfo.epoch` changes
-whenever the node set is rebuilt (every `scan_done`, `session_load`). Any
-`scan_start` ends the current epoch at once. Inside an epoch an id is never
-reused: `geometry_set` and `carve_start` keep the epoch, ids of discarded
-carved nodes answer `not_found`. `instance_set` starts a new epoch. Every command that takes node ids requires
-`epoch` and answers `stale_catalog` when it differs.
+whenever the node set is rebuilt (every `scan_done` with a catalog,
+`session_load`, `session_attach_source`). Any `scan_start` ends the current
+epoch at once. Inside an epoch an id is never reused: `geometry_set` and
+`carve_start` keep the epoch, ids of discarded carved nodes answer
+`not_found`. `instance_set` starts a new epoch. Every command that takes node
+ids or instance ids requires `epoch` and answers `stale_catalog` when it
+differs.
+
+Instance ids (`Instance.id`, the `instance` of `geometry_set`,
+`instance_set` and `node_info`) belong to the epoch too: a new epoch may
+number the instances differently (`instance_set` makes another instance
+`instances[0]`), so after any epoch change the client reads them again from
+the new `CatalogInfo`; `geometry_set` and `carve_start` keep them. No id of
+an old epoch is ever mapped to the new one. A `geometry_set` or
+`instance_set` that fails changes nothing and keeps the epoch, with one
+exception: when the engine could not put its previous state back (the
+source vanished while it was needed), it rebuilds the catalog from the
+session alone; the error's `data` then holds `catalog_reloaded` (`true`) and
+the `epoch` that has started.
 
 ### Error codes
 
@@ -81,14 +98,17 @@ without source (browse only) · **J** carve, recover or image running.
 |---|---|
 | `hello`, `list_disks`, `job_cancel`, `shutdown` | always answered |
 | `open_source`, `close_source`, `session_load`, `session_attach_source`, `geometry_set`, `instance_set`, `session_save` | `busy` in S and J |
-| `scan_start` | N, B `no_source` · resume without session `no_session` · S, J `busy` · bad range `bad_request` · refused session path `destination_refused` |
+| `open_source` | open errors (`not_found`, `access_denied`, `io_error`, `bad_request` for a disk path that is not `\\.\PhysicalDrive<N>`) |
+| `scan_start` | N, B `no_source` · resume without session `no_session` · S, J `busy` · bad range `bad_request` · refused session path `destination_refused` · `exists` (the path holds a file that is not a session of this source and range) · `not_found` (its folder is missing) |
+| `session_load` | `not_found` · `io_error` (not a session file, damaged) · `bad_request` (a `source` disk path that is not `\\.\PhysicalDrive<N>`); a source that cannot be opened or does not match is reported in `source_error`, not as an error |
+| `geometry_set`, `instance_set` | N, O, S `no_catalog` · wrong epoch `stale_catalog` · unknown instance `not_found` · bad values, `strays` `bad_request` |
 | `catalog_info`, `list_children`, `node_info`, `search`, `selection_summary` | N, O, S `no_catalog` · wrong epoch `stale_catalog` · unknown id `not_found` · answered in J |
 | `check_destination` | N, B `no_source` · otherwise answered, also in S and J |
-| `recover_start`, `carve_start` | N, O, S `no_catalog` · B `no_source` · J `busy` · empty selection `bad_request` · `destination_refused` · `no_space` · carve without stored hits `unsupported` |
-| `image_start` | N, B `no_source` · S, J `busy` · `destination_refused` · `no_space` · `exists` |
-| `read_file` | N, O, S `no_catalog` · B `no_source` · folder `bad_request` · unsupported file `unsupported` |
-| `session_save` | N, O `no_session` · `destination_refused` |
-| `session_attach_source` | N, O `no_session` · `source_mismatch` |
+| `recover_start`, `carve_start` | N, O, S `no_catalog` · B `no_source` · J `busy` · wrong epoch `stale_catalog` · unknown id `not_found` · empty selection, a selection of folders only `bad_request` · `destination_refused` · `no_space` (`data`: `free_bytes`, `need_bytes`) · `source_lost` (recover: the check of what was overwritten since the scan, ALGORITHMS H1) · carve without stored hits, or without a main instance, `unsupported` |
+| `image_start` | N, B `no_source` · S, J `busy` · `destination_refused` · `no_space` · `exists` · `source_lost` · `source_mismatch` |
+| `read_file` | N, O, S `no_catalog` · B `no_source` · wrong epoch `stale_catalog` · unknown id `not_found` · folder `bad_request` · unsupported file `unsupported` · `source_lost` · `io_error` (unreadable, or reading stopped after about 5 s on a failing disk) |
+| `session_save` | N, O `no_session` · `destination_refused` · `exists` (the path holds a file that is not a session of this source and range) |
+| `session_attach_source` | N, O `no_session` · open errors as `open_source` · `source_mismatch` |
 
 ## 2. Shared objects
 
@@ -153,7 +173,12 @@ the disk itself, is the result of `open_source`.
 could not be separated cleanly), `session_file_at_risk` (the session file
 lies inside the lost volume; save the session elsewhere), `old_session_format`
 (the session was written by an older engine; its times are approximate, scan
-again for exact ones).
+again for exact ones), `session_file_not_saved` (the last write to the
+session file failed, for example on a full disk: the file does not hold the
+session as it is; save it elsewhere; cleared by the next successful write or
+`session_save`), `session_incomplete` (`session_load`: the file ends early —
+bytes after its last complete checkpoint were ignored — or holds no scanned
+data).
 
 ### Geometry
 
@@ -206,7 +231,10 @@ instance root is a child of another.
  "source_attached": true, "warnings": [Warning, ...]}
 ```
 
-`instances[0]` is the main instance. `nodes` counts all nodes of all roots.
+`instances[0]` is the main instance. `instances` is empty when nothing was
+found (a scan stopped at once, a session saved before its first records):
+there is no main root then, and queries on node 0 answer `not_found`.
+`nodes` counts all nodes of all roots.
 `live_records` belong to the current file system and are not shown;
 `post_format_records` are files that were created and deleted again on the
 current file system — not shown either, but what they occupied counts as
@@ -277,6 +305,19 @@ Closes any previously open source and drops its session and catalog.
 
 → `{}`
 
+Closes the source only. A session and its catalog stay (state **B**:
+browse, `session_save`, `geometry_set`, `instance_set`; `read_file`,
+`recover_start`, `carve_start`, `scan_start` and `check_destination` answer
+`no_source` until `session_attach_source`); the epoch does not change. In
+**B** the destination guard of `session_save`, and the re-check of the
+session file after `geometry_set` and `instance_set`, run against where the
+session's recorded source is now: the image file at its recorded path, or
+the connected disk that reports the recorded serial number (S2: a disk that
+is still connected must not be written to). Only when it cannot be found is
+a location `unknown_disk`, and the message says why.
+Without a session the engine is back in state **N**. Only `open_source` of
+a source (or `session_load`) drops a session.
+
 ### scan_start
 
 args
@@ -325,7 +366,15 @@ the logical sector size.
 `status`: `"completed"`; `"stopped"` (cancelled by the user: the catalog holds
 what was read, `scan_complete` is false, carving works on the scanned part);
 `"failed"` (`error` set; `source_lost` keeps the session resumable; `catalog`
-is `null`).
+is `null`). `session_path` is `null` without a session file, and also when
+the last write to it failed (warning `session_file_not_saved` in the
+catalog): the file then does not hold the session. After `shutdown` the
+catalog is not built (`catalog` is `null`), also when the shutdown comes in
+phase `analyzing`.
+
+The last `scan_progress` of the read phases (`mft_probe`, `sweep`) is sent
+when reading ends and carries the final counters; the `analyzing` events
+carry them on.
 
 ### job_cancel
 
@@ -357,14 +406,29 @@ Without a matching source `source_attached` is false, `source` is the
 recorded one, the tree can be browsed, and `recover_start`, `read_file`,
 `carve_start`, `scan_start` answer `no_source` until `session_attach_source`
 succeeds. Model or serial differences are reported as warning
-`identity_differs`.
+`identity_differs`. `source_error` is the reason the first candidate failed
+(the given `source`, else the recorded path): the open error, or
+`source_mismatch`, whose `data` names the failed checks (`failed`: a list of
+`size`, `records`, `too_few_samples`) and the sample counts (`samples`,
+`matched`, `mismatched`, `unreadable`). A
+session with fewer than 8 comparable records is never attached
+automatically (`"failed": ["too_few_samples"]`); `session_attach_source`
+with `force` attaches it. With its source attached, the loaded session
+continues in the file it was loaded from when the guard allows that location
+without consents; otherwise changes (`instance_set`, `geometry_set`, a new
+current-volume snapshot) are kept in memory until `session_save`. A file
+that ends early or holds no scanned data loads with the warning
+`session_incomplete`.
 
 ### session_attach_source
 
 args `{"kind": "disk"|"image", "path": "...", "force": false}` →
-`{"source": SourceInfo, "catalog": CatalogInfo}` or `source_mismatch`.
+`{"source": SourceInfo, "catalog": CatalogInfo}` or `source_mismatch`
+(`data` as in `session_load`'s `source_error`).
 
-The catalog is rebuilt with a fresh current-volume snapshot (new epoch).
+The catalog is rebuilt with a fresh current-volume snapshot (new epoch). An
+image is opened with the session's sector size. Also allowed for a session
+without catalog (a scan that ended with `source_lost`): it then gets one.
 
 ### catalog_info
 
@@ -372,26 +436,43 @@ The catalog is rebuilt with a fresh current-volume snapshot (new epoch).
 
 ### geometry_set
 
-args `{"instance": 0, "cluster_size": 4096, "volume_offset": 1048576}` →
+args `{"epoch": 3, "instance": 0, "cluster_size": 4096, "volume_offset": 1048576}` →
 `CatalogInfo`
 
 `cluster_size`: a power of two from 512 to 2 MiB. `volume_offset`: a multiple
 of 512 inside the source. A pair equal to one of the candidates selects that
 candidate. Health and the protected ranges are recomputed; the tree and the
-epoch stay; carved nodes are discarded when the main instance changes.
-`strays` cannot be changed (`bad_request`). On any error nothing changes.
+epoch stay; carved nodes are discarded when the main instance changes (another
+instance becomes main, or main's cluster size or volume offset changes; the
+pair in effect again keeps them). `epoch` is the catalog epoch the instance
+id belongs to (`stale_catalog` otherwise). `strays` cannot be changed
+(`bad_request`). On any error nothing changes.
 
 ### instance_set
 
-args `{"instance": 2, "kind": "main"}` (`kind`: `"main"`, `"other"`, `"auto"`) →
+args `{"epoch": 3, "instance": 2, "kind": "main"}` (`kind`: `"main"`, `"other"`, `"auto"`) →
 `CatalogInfo` (new epoch)
 
-Overrules the engine's verdict about one file system. `kind` `"main"` makes
-that instance the main one (the previous main becomes `"other"`); `"other"`
+`epoch` is the catalog epoch the instance id belongs to: instance ids are
+renumbered with every epoch, so a repeated or late request answers
+`stale_catalog` instead of changing another instance. Overrules the engine's
+verdict about one file system. `kind` `"main"` makes that instance the main
+one (the previous main becomes `"other"`; if it was main only through an
+earlier `"main"` choice, that choice is withdrawn and it returns to the kind
+the engine gives it, for example `"older"`); `"other"`
 turns an `"embedded"` or `"older"` instance into a volume of its own, so that
 its files are read with its own geometry and can be recovered; `"auto"`
 withdraws the override. `strays` cannot be changed (`bad_request`). The
 choice is stored in the session. Carved nodes are discarded.
+
+`"other"` on an `"other"` instance only records the choice (`manual`
+becomes `true`, and it survives later scans of the session). `"other"` on
+the `main` instance withdraws it from the choice of main: `main` goes to the
+instance the engine would choose next (an `older` instance, or an `other`
+one the user did not set); when there is none the request is refused with
+`bad_request`, so `instances[0]` is always the main instance. `"main"` on the
+main instance only records the choice. Every successful `instance_set` starts
+a new epoch, even when the kinds come out unchanged.
 
 ### list_children
 
@@ -503,6 +584,16 @@ if it is a practical limit (FAT32: 4294967295), else `null`. Creates nothing.
 The answer depends on the catalog: ask again after `scan_done`,
 `session_load`, `session_attach_source`, `geometry_set` and `instance_set`.
 
+Protected ranges by state: before any session exists (state **O**) the whole
+source is protected — nobody knows yet how far the lost volume reaches — so
+every location on the source disk is `overlaps_source` (reason
+`session_range`) and `allow_same_disk` cannot unlock it; this holds for every
+purpose, `image_start` included. Once a session exists the session range is
+protected, then, with a catalog, the `lost_volume` ranges of
+`CatalogInfo.protected`; `image_start` adds the imaged range. `scan_start`
+checks its `session_path` against the new range plus the current catalog's
+lost volumes.
+
 ### recover_start
 
 args
@@ -514,10 +605,19 @@ args
 ```
 
 `on_exists` applies to files that existed before this run: `"rename"`,
-`"skip"`, `"overwrite"`.
+`"skip"`, `"overwrite"`. A file the engine is writing (the session file) is
+never overwritten: that file is reported `failed`. A selection that holds
+folders but no file is `bad_request`. `no_space` compares the free space
+with an estimate of what the files take on the destination (each file
+rounded up to 4096-byte units, plus per-file and per-folder overhead); a
+destination with larger clusters can still fill up during the run
+(`recover_done` `failed` / `no_space`).
 
 → `{"job": "recover", "files": 5320, "bytes": 18234567890}` (the numbers of
-`selection_summary`) or `destination_refused`.
+`selection_summary`, after ALGORITHMS H1: files overwritten since the scan
+can make them smaller) or `destination_refused`. H1 and what the reads find
+(ALGORITHMS G1) change rows within the epoch: list again after
+`recover_done`. `recover_progress.current` is `null` between files.
 
 Events
 
@@ -552,7 +652,10 @@ Events: `carve_progress` `{"candidates_done": 100, "candidates_total": 48213, "f
 `carve_done` `{"status": "completed", "error": null, "found": 913, "bytes_found": 4100000000, "catalog": CatalogInfo}`.
 
 Replaces the carved nodes of the given kinds (same epoch). Results found
-before a cancel are kept.
+before a cancel are kept. `carve_done.found` and `bytes_found` count this
+run. The folder of carved files and its subfolders get new ids with every
+run (`Instance.virtual.carved`); ids of the previous run answer
+`not_found`. Without a main instance carving answers `unsupported`.
 
 ### image_start
 
@@ -567,7 +670,9 @@ args
 
 Events: `image_progress` `{"bytes_done", "bytes_total", "speed_bps", "eta_seconds", "elapsed_seconds", "bad_bytes"}`;
 `image_done` `{"status", "error", "bytes_written", "bad_bytes", "path", "bad_map_path"}`
-(`bad_map_path` is `null` when there were no unreadable sectors).
+(`bad_map_path` is `null` when there were no unreadable sectors). A source
+that no longer answers is refused with `source_lost` before any file is
+created.
 
 ### read_file
 
@@ -577,7 +682,10 @@ args `{"epoch": 3, "node": 4711, "offset": 0, "length": 65536}`
 → `{"data_b64": "...", "size": 3456789, "eof": false, "kind": "jpeg"}`
 
 Reads through the same code path as recovery. `kind` is the sniffed file kind
-of the returned bytes when `offset == 0` (else `null`).
+of the returned bytes when `offset == 0` (else `null`). Nothing else is
+answered while it reads, so a read that has not finished after about 5 s
+(bad sectors on a failing disk) stops with `io_error`; recovery reads such
+files completely.
 
 ### shutdown
 

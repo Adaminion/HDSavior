@@ -110,6 +110,13 @@ enum WarningCode implements WireEnum {
 
   /// The session was written by an older engine; its times are approximate.
   oldSessionFormat('old_session_format'),
+
+  /// The last write to the session file failed (disk full, disk gone): the
+  /// file does not hold the session as it is; save it elsewhere.
+  sessionFileNotSaved('session_file_not_saved'),
+
+  /// `session_load`: the file ends early or holds no scanned data.
+  sessionIncomplete('session_incomplete'),
   unknown('');
 
   const WarningCode(this.wire);

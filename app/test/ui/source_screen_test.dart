@@ -276,7 +276,13 @@ void main() {
     await tester.pump();
     await tester.tap(find.text(S.attachAction));
     await settle(tester);
-    fake.engine.failNext('session_attach_source', 'source_mismatch', message: 'Too few records could be compared.');
+    // As the real engine says it (docs/protocol: session_load source_error).
+    fake.engine.failNext(
+      'session_attach_source',
+      'source_mismatch',
+      message: 'Too few records could be compared.',
+      data: {'failed': ['too_few_samples'], 'samples': 3, 'matched': 3, 'mismatched': 0, 'unreadable': 0},
+    );
     await tester.tap(find.text(S.attachConfirm));
     await settle(tester);
     expect(find.text(S.errorHeadline(EngineErrorCode.sourceMismatch)), findsOneWidget);
@@ -285,6 +291,28 @@ void main() {
     await settleDialog(tester);
     expect(fake.lastArgs('session_attach_source')['force'], isTrue);
     expect(find.text(S.attachTitle), findsNothing);
+    await closeApp(tester, fake);
+  });
+
+  testWidgets('a source whose records differ cannot be attached anyway', (tester) async {
+    final fake = await pumpApp(tester);
+    await fake.run(() => fake.app.source.loadSession(r'D:\scans\detached.hdsc'));
+    await tester.pump();
+    await tester.tap(find.text(S.attachAction));
+    await settle(tester);
+    // force only overrules too_few_samples; the engine refuses this one again.
+    fake.engine.failNext(
+      'session_attach_source',
+      'source_mismatch',
+      message: '7 of 8 compared records differ',
+      data: {'failed': ['records'], 'samples': 8, 'matched': 1, 'mismatched': 7, 'unreadable': 0},
+    );
+    await tester.tap(find.text(S.attachConfirm));
+    await settle(tester);
+    expect(find.text(S.errorHeadline(EngineErrorCode.sourceMismatch)), findsOneWidget);
+    expect(find.text(S.attachForce), findsNothing);
+    await tester.tap(find.text(S.cancel));
+    await settleDialog(tester);
     await closeApp(tester, fake);
   });
 

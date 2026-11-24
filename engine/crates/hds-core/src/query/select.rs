@@ -401,6 +401,39 @@ impl Catalog {
         (u64::try_from(nodes.len()).unwrap_or(u64::MAX), bytes)
     }
 
+    /// ALGORITHMS I2 (a), the `protected_files` of
+    /// [`CarveInput`](crate::carve::CarveInput): the absolute byte ranges of
+    /// the data of every in-use file of the `main` instance that is neither
+    /// `overwritten` nor `out_of_bounds` (flags found by reads included).
+    /// Empty without a `main` instance.
+    pub fn carve_protected(&self) -> RangeSet {
+        let mut out = RangeSet::new();
+        let Some(main) = self
+            .instances
+            .iter()
+            .find(|i| i.kind == InstanceKind::Main)
+            .map(|i| i.id)
+        else {
+            return out;
+        };
+        for &(start, end, node) in &self.health.extents {
+            let Some(n) = self.rec(node) else { continue };
+            if u32::from(n.inst) != main || n.kind != NodeKind::File || n.deleted() {
+                continue;
+            }
+            let flags = self.flags(NodeId(node));
+            if flags.contains(hds_recover::Flag::Overwritten)
+                || flags.contains(hds_recover::Flag::OutOfBounds)
+            {
+                continue;
+            }
+            if start < end {
+                out.insert(start..end);
+            }
+        }
+        out
+    }
+
     /// The instance kind of a node.
     pub fn instance_kind(&self, id: NodeId) -> Option<InstanceKind> {
         let n = self.rec(id.0)?;

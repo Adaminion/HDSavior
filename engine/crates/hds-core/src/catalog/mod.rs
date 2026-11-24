@@ -532,7 +532,10 @@ impl<'a> CatalogInput<'a> {
 }
 
 /// A catalog: the trees of all instances with their health. Immutable;
-/// see the module documentation.
+/// see the module documentation. A clone is cheap and shares everything,
+/// also what [`observe`](Catalog::observe) records (a reader can observe
+/// without holding the owner's lock).
+#[derive(Clone)]
 pub struct Catalog {
     pub(crate) tree: Arc<Tree>,
     pub(crate) instances: Arc<Vec<CatalogInstance>>,
@@ -906,7 +909,8 @@ pub fn instance_set(
 /// `geometry_set` (PROTOCOL, ALGORITHMS F7): stores a manual geometry for
 /// the catalog instance `instance`, re-applies the layout and recomputes
 /// health on the same tree (same epoch). Returns the new catalog and
-/// whether the main instance's geometry changed (then the caller discards
+/// whether the main instance or the (cluster size, volume offset) it is
+/// mapped with changed (then the caller discards
 /// carved nodes, I5: [`Catalog::with_carved`] with no entries and
 /// [`crate::carve::discard_carved`]).
 ///
@@ -933,12 +937,29 @@ pub fn geometry_set(
     if ci.kind == InstanceKind::Strays {
         return Err(InstanceSetError::Strays);
     }
-    let is_main = ci.kind == InstanceKind::Main;
+    let before = main_mapping(layout);
     let mut next = overrides.clone();
     next.set_geometry(session.store(), layout, ci.layout_id, Some(geometry));
     apply_or_restore(session.store(), layout, overrides, &next, heads, cancel)?;
     commit(session, layout, overrides, next, heads)?;
-    Ok((catalog.with_health(session.store(), layout, heads), is_main))
+    let main_changed = main_mapping(layout) != before;
+    Ok((
+        catalog.with_health(session.store(), layout, heads),
+        main_changed,
+    ))
+}
+
+/// The main instance of `layout` with the (cluster size, volume offset)
+/// its runs are mapped with: what carving depends on (I5). A geometry
+/// equal to the one in effect, or one set on another instance, leaves it
+/// alone.
+fn main_mapping(layout: &Layout) -> Option<(InstanceId, Option<(u32, u64)>)> {
+    let main = layout.main()?;
+    let geometry = layout
+        .instance(main)
+        .and_then(|i| i.geometry.as_ref())
+        .map(|g| (g.cluster_size, g.volume_offset));
+    Some((main, geometry))
 }
 
 /// Runs [`Layout::apply`] with `next`. When it fails (cancelled, or the
