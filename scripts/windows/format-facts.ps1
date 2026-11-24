@@ -39,7 +39,7 @@ using System;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 public static class HdsFileId {
-    [StructLayout(LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]  // FILETIMEs are 4-byte aligned in the C struct
     struct Info {
         public uint Attributes;
         public long Created, Accessed, Written;

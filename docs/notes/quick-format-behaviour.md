@@ -14,6 +14,9 @@ Evidence level of every statement:
 - **[R]** reported by vendors, forums or forensic write-ups. Read only as search-engine excerpts
   (the pages could not be opened from the review environment), so treat wording as approximate.
 - **[I]** inference. Not verified. Section 7 lists what the Windows CI job should pin down.
+- **[CI]** measured by the Windows CI job (`scripts/windows/format-facts.ps1`, section 7a) with
+  Windows' own `Format-Volume -Full:$false` on virtual disks, Windows Server 2025 build 26100 (the
+  Windows 11 24H2 kernel), raw bytes read back and compared slot by slot.
 
 ## 1. Summary
 
@@ -23,8 +26,8 @@ After `format /q` (or the Explorer dialog with "Quick Format") **and the automat
 |------|-----------|-------|-------|
 | Boot sector + backup copy | yes | first sector of the volume; last sector of the *partition* | [W][D] |
 | `$MFT` records 0–15 | yes, by `format` | MFT start (section 3) | [W] |
-| `$MFT` records 16–255 | yes, by the NTFS driver at first mount | directly behind, same extent when free | [W], "written" is [I] on Windows 10 |
-| `$MFT` records 256 and up | **no** | – | [R] + follows from the sizes above |
+| `$MFT` records 16–255 | yes, by the NTFS driver at first mount (zeros where unused) | directly behind, same extent when free | [W][CI] |
+| `$MFT` records 256 and up | **no** | – | [CI]: 1368 of 1368 intact on a used volume |
 | `$MFTMirr` (records 0–3) | yes | byte 8192 of the volume (Windows 7 and 10 samples) | [W] |
 | `$LogFile` | yes, **completely** (0xFF fill) | before the MFT | [W] |
 | `$Bitmap`, MFT bitmap | yes, completely | directly before the MFT | [W] |
@@ -76,19 +79,32 @@ Size and contents
 
   So about 220 user records (the first files and folders ever created on the old volume) are lost,
   plus whatever the new MFT grows over when new files are written.
-- **Open point:** the Windows 10 samples were made on blank virtual disks, so the zeros in unused
-  slots do not prove that Windows 10 writes them. It has to (the slots are below the valid data
+- **Settled [CI]:** on a *used* 1 GiB volume (1600 user records) a quick format of the same size put
+  the new `$MFT` at the same LCN (87 290) with 256 records, and every old slot below 256 was
+  destroyed: 0–37 rewritten as the new system records, 38–41 other new records, 42–255 **zero
+  bytes**. Every old record from 256 up (1368) was byte-identical afterwards. 232 of the 1600 user
+  records were lost to the format itself. Older text of this point, kept for context: the Windows 10
+  samples were made on blank virtual disks, so the zeros in unused slots did not prove that Windows
+  10 writes them. It has to (the slots are below the valid data
   length, and stale in-use records there would be MFT corruption after every re-format), but this is
   [I]. Do not build logic that depends on either answer; classify records in live MFT slots by
   content and time (in use → live; no attributes → discard; otherwise compare the `$SI` MFT-change
   time with the creation time of the live `$Volume` record).
 - With 4 KiB file records (`format /L`, 4Kn disks, tiered volumes [D: format `/L`]) the initial size
   is unknown (256 KiB or 256 records). [I]
+- With 64 KiB clusters the MFT after format + mount is only 64 KiB (64 records; `fsutil` "Mft Valid
+  Data Length 64.00 KB"), so old records 64–255 can survive such a format. [CI] The engine
+  classifies slots by content (C3), so nothing depends on the number.
 
 Placement
 
 - Volumes up to 1 GiB: MFT at one third of the volume (LCN 250 of 751, 53 888 of 161 663,
   87 381 of 262 143). [W]
+- Measured [CI], 4 KiB clusters unless noted (volume size → MFT start): 256 MB → size / 3
+  (LCN 0x54FA); 1 GB → size / 3 (LCN 0x154FA); 4 GB → **1 GiB** (LCN 0x40000); 16 GB → 3 GiB
+  (LCN 0xC0000); 64 GB → 3 GiB; 16 GB with 64 KiB clusters → 3 GiB (LCN 0xC000). So: one third,
+  rounded down to whole GiB once that is at least 1 GiB, at most 3 GiB. `$MFTMirr` at LCN 2
+  (LCN 1 with 64 KiB clusters). ALGORITHMS A2 probes both readings.
 - Large volumes: byte offset 3 GiB from the volume start, LCN 0xC0000 = 786 432 at 4 KiB clusters,
   independent of the cluster size, also on Windows XP. [R: `fsutil fsinfo ntfsinfo` output
   "Mft Start Lcn 0x00000000000c0000 / Mft2 Start Lcn 0x2" quoted on Microsoft Q&A; MSFN "default NT
@@ -211,7 +227,8 @@ middle of the volume: copies of old records 0–3, including old `$MFT` with the
 
 An mkntfs re-format of an 800 MiB test volume changed 52 KiB; all 303 old user records survived. [L]
 
-To be pinned by the Windows CI job (not verifiable here):
+To be pinned by the Windows CI job (items 1 and 2 are now measured, see section 7a; item 3 on
+virtual disks only):
 
 1. On a ≥ 16 GiB virtual disk: `fsutil fsinfo ntfsinfo` shows `Mft Start Lcn 0xC0000` (4 KiB clusters;
    `0xC000` at 64 KiB), `Mft2 Start Lcn 0x2`, `Mft Valid Data Length 0x40000`.
@@ -220,6 +237,18 @@ To be pinned by the Windows CI job (not verifiable here):
 3. `fsutil fsinfo sectorinfo` of the test disk: if it says "Trim Supported", the format discards the
    old data and a round-trip test is void – use a disk without TRIM or `format /NoTrim`, and assert
    a minimum number of recovered files.
+
+## 7a. Measured by the Windows CI job
+
+`scripts/windows/format-facts.ps1` (job "Windows quick-format facts", artifact `format-facts`):
+placement and the accident are in sections 1 and 3 above. TRIM: a marker file filled the volume, the
+volume was quick-formatted, the raw disk was searched for the marker afterwards. On a fixed VHD and
+on a dynamic VHDX, with `DisableDeleteNotify` 0 and 1, all 256 marker blocks survived in all four
+cases, although `fsutil` reports trim limits for these volumes. This shows only that Windows' quick
+format did not discard data on these virtual disks; it says nothing about a physical SSD, where the
+summary's TRIM row stands. Not yet measured: per-file survival and timestamps after robocopy /
+Move-Item / Copy-Item (the first run read file ids wrongly; fixed), the attribute list of a file
+with thousands of runs.
 
 ## 8. Samples and how to re-check
 
