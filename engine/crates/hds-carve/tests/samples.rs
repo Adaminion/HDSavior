@@ -327,8 +327,11 @@ fn max_len_is_respected() {
 #[test]
 fn extensions_match_their_content() {
     let all = samples();
-    for s in &all {
-        let h = head(&s.data);
+    // the head geometry validation and the catalog keep (`SNIFF_LEN`
+    // bytes), and the one recovery checks (the first kilobyte)
+    for (s, h) in all.iter().flat_map(|s| {
+        [SNIFF_LEN, 1024].map(|n| (s, &s.data[..s.data.len().min(n)]))
+    }) {
         assert_eq!(
             matches_extension(h, &s.ext),
             Some(true),
@@ -523,8 +526,12 @@ fn bare_mp3_frames_are_not_a_signature() {
     let data = special("special_mp3_bare_frames.mp3");
     // 11 sync bits are no signature: not offered as a carving candidate
     assert_eq!(sniff(head(&data)), None);
-    // but a file known to be an MP3 checks out, and can be measured
-    assert_eq!(matches_extension(head(&data), "mp3"), Some(true));
+    // nor is one frame header evidence for a file known to be an MP3: the
+    // first 64 bytes hold no second frame, and give no opinion
+    assert_eq!(matches_extension(head(&data), "mp3"), None);
+    // the first kilobyte does: two frames that agree, where the first one
+    // says the second starts; and it can be measured
+    assert_eq!(matches_extension(&data[..1024], "mp3"), Some(true));
     let m = measure(FileKind::Mp3, &data, data.len() as u64).unwrap();
     assert_eq!(
         (m.len, m.confidence, m.ext),

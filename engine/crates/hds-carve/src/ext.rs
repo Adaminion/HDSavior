@@ -132,7 +132,7 @@ pub fn matches_extension(head: &[u8], ext: &str) -> Option<bool> {
     let (family, kinds) = family(ext)?;
     let at4 = head.get(4..8);
     Some(match family {
-        Family::Jpeg => head.starts_with(&[0xFF, 0xD8, 0xFF]),
+        Family::Jpeg => is_jpeg(head),
         Family::Png => head.starts_with(b"\x89PNG\r\n\x1a\n"),
         Family::Gif => head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a"),
         Family::Bmp => head.starts_with(b"BM"),
@@ -176,12 +176,15 @@ pub fn matches_extension(head: &[u8], ext: &str) -> Option<bool> {
         Family::Rar => head.starts_with(b"Rar!\x1A\x07"),
         Family::Mp3 => {
             // An MP3 needs no header at all: players resynchronise on the
-            // first frame, wherever it is. Only a positive identification
-            // of something else is a mismatch.
-            let frame = crate::util::rd::<4>(head, 0).and_then(mp3::parse_frame);
+            // first frame, wherever it is. A match needs a sane ID3v2
+            // header, a frame with a VBR header, or two consecutive frames
+            // that agree (one frame header is 11 sync bits and a few valid
+            // fields: noise has them often enough). Only a positive
+            // identification of something else is a mismatch.
+            let frames = mp3::two_frames(head) == Some(true) || mp3::sniff_frame(head);
             // (a RIFF/WAVE wrapper around MPEG audio is legal, too)
             let riff_wave = head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WAVE");
-            if head.starts_with(b"ID3") || frame.is_some() || riff_wave {
+            if mp3::id3v2_plausible(head) || frames || riff_wave {
                 true
             } else if sniff(head).is_some_and(|k| !kinds.contains(&k)) {
                 false
@@ -190,6 +193,115 @@ pub fn matches_extension(head: &[u8], ext: &str) -> Option<bool> {
             }
         }
     })
+}
+
+/// `FF D8`, then a chain of marker segments as far as `head` shows it:
+/// each a marker that can come before the first scan, with a length that
+/// fits what the segment holds (tables, frame header) and the next marker
+/// right behind it. Three magic bytes alone match too much foreign data.
+fn is_jpeg(head: &[u8]) -> bool {
+    if !head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return false;
+    }
+    let mut p = 2usize;
+    let mut frame = false;
+    loop {
+        // the next marker, after any fill bytes
+        match head.get(p) {
+            None => return true,
+            Some(0xFF) => {}
+            Some(_) => return false,
+        }
+        while head.get(p + 1) == Some(&0xFF) {
+            p += 1;
+        }
+        let Some(&marker) = head.get(p + 1) else {
+            return true;
+        };
+        // the first scan: everything before it was consistent
+        if marker == 0xDA {
+            return frame;
+        }
+        let Some(len) = crate::util::be16(head, p + 2) else {
+            return true;
+        };
+        let len = len as usize;
+        let body = head.get(p + 4..).unwrap_or(&[]);
+        let body = body.get(..len.saturating_sub(2).min(body.len())).unwrap_or(body);
+        if len < 2 || !segment_ok(marker, len, body) {
+            return false;
+        }
+        frame |= matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
+        p += 2 + len;
+    }
+}
+
+/// A marker segment that can precede the first scan, judged on `body`, the
+/// visible part of its `len - 2` bytes of content.
+fn segment_ok(marker: u8, len: usize, body: &[u8]) -> bool {
+    let payload = len - 2;
+    match marker {
+        // APPn: an identifier in ASCII first (`JFIF`, `Exif`, `http://`,
+        // `ICC_PROFILE`, `MPF`, `Ducky`, `Photoshop 3.0`, `Adobe`, ...);
+        // COM: text (FFmpeg, gd and other libraries put their name there)
+        0xE0..=0xEF | 0xFE => identifier(body, payload),
+        // DQT: tables of 65 (8-bit) or 129 (16-bit) bytes
+        0xDB => {
+            let id_ok = body.first().is_none_or(|&b| b >> 4 <= 1 && b & 15 <= 3);
+            let sizes_ok = (0..=4usize).any(|wide| {
+                payload >= 129 * wide
+                    && (payload - 129 * wide).is_multiple_of(65)
+                    && (1..=4).contains(&(wide + (payload - 129 * wide) / 65))
+            });
+            id_ok && sizes_ok
+        }
+        // DHT: class and id, 16 code-length counts, that many symbols
+        0xC4 => {
+            let id_ok = body.first().is_none_or(|&b| b >> 4 <= 1 && b & 15 <= 3);
+            let symbols = body
+                .get(1..17)
+                .map_or(0, |c| c.iter().map(|&n| n as usize).sum::<usize>());
+            id_ok && symbols <= 256 && 17 + symbols <= payload && payload >= 17
+        }
+        // SOFn: precision, height, width, components of 3 bytes each
+        0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
+            let count = body.get(5).copied();
+            let count_ok = count.is_none_or(|n| (1..=4).contains(&n) && len == 8 + 3 * n as usize);
+            let precision_ok = body.first().is_none_or(|&p| (2..=16).contains(&p));
+            let width_ok = crate::util::be16(body, 3).is_none_or(|w| w != 0);
+            let components_ok = body.get(6..).is_none_or(|c| {
+                c.chunks_exact(3).all(|c| {
+                    (1..=4).contains(&(c[1] >> 4)) && (1..=4).contains(&(c[1] & 15)) && c[2] <= 3
+                })
+            });
+            payload >= 6 && count_ok && precision_ok && width_ok && components_ok
+        }
+        // DRI: a fixed length
+        0xDD => len == 4,
+        // DAC: two bytes for each of at most eight arithmetic coding
+        // conditioning tables
+        0xCC => (4..=18).contains(&len) && payload.is_multiple_of(2),
+        _ => false,
+    }
+}
+
+/// The start of an APPn or COM segment's `payload` bytes, of which `body`
+/// is the visible part: at least two printable characters, and four
+/// unless a NUL ends the identifier earlier (`MPF\0`, `JP\0` of JPEG XT).
+/// A segment too short for that only needs printable content.
+fn identifier(body: &[u8], payload: usize) -> bool {
+    let text = |c: u8| crate::util::is_printable(c) || matches!(c, b'\t' | b'\r' | b'\n');
+    let run = body.iter().take_while(|&&c| text(c)).count();
+    let want = payload.min(4);
+    if run >= want {
+        return true;
+    }
+    match body.get(run) {
+        // the head ends inside the identifier
+        None => true,
+        Some(0) => run >= 2.min(payload),
+        Some(_) => false,
+    }
 }
 
 /// Classic TIFF, BigTIFF, Olympus ORF and Panasonic RW2 byte-order marks.
@@ -205,12 +317,16 @@ fn is_tiff(head: &[u8]) -> bool {
     )
 }
 
-/// A local file header, an empty archive, or a spanned-archive marker.
+/// A plausible local file header; an empty archive (an end record whose
+/// counts, sizes and offsets are all zero); or the spanned-archive marker
+/// `PK\x07\x08` followed by a plausible local file header.
 fn is_zip(head: &[u8]) -> bool {
-    matches!(
-        head.get(..4),
-        Some(b"PK\x03\x04" | b"PK\x05\x06" | b"PK\x07\x08")
-    )
+    match head.get(..4) {
+        Some(b"PK\x03\x04") => crate::zip::local_header_plausible(head),
+        Some(b"PK\x05\x06") => head.get(4..20).unwrap_or(&head[4..]).iter().all(|&b| b == 0),
+        Some(b"PK\x07\x08") => crate::zip::local_header_plausible(head.get(4..).unwrap_or(&[])),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -267,7 +383,10 @@ mod tests {
         assert_eq!(m(b"IIRO\x08\0\0\0", "orf"), Some(true));
         assert_eq!(m(b"IIU\0\x18\0\0\0", "rw2"), Some(true));
         assert_eq!(m(b"II*\0", "cr2"), Some(true));
-        assert_eq!(m(b"PK\x03\x04\x14\0\0\0", "docx"), Some(true));
+        assert_eq!(
+            m(b"PK\x03\x04\x14\0\0\0\x08\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x13\0\0\0[Content_Types].xml", "docx"),
+            Some(true)
+        );
         assert_eq!(
             m(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1", "docx"),
             Some(true),
@@ -292,8 +411,14 @@ mod tests {
     fn mp3_is_weak() {
         let m = matches_extension;
         assert_eq!(m(b"ID3\x03\0\0\0\0\x0f\x76", "mp3"), Some(true));
-        assert_eq!(m(b"\xFF\xFB\x90\x64\0\0\0\0", "mp3"), Some(true));
-        assert_eq!(m(b"\xFF\xF3\x84\x64\0\0\0\0", "mp3"), Some(true));
+        // one frame header is no evidence; two that agree, at the distance
+        // the first states, are
+        assert_eq!(m(b"\xFF\xFB\x90\x64\0\0\0\0", "mp3"), None);
+        assert_eq!(m(b"\xFF\xF3\x84\x64\0\0\0\0", "mp3"), None);
+        let mut two = vec![0u8; 1024];
+        two[..4].copy_from_slice(b"\xFF\xFB\x90\x64");
+        two[417..421].copy_from_slice(b"\xFF\xFB\x90\x64");
+        assert_eq!(m(&two, "mp3"), Some(true));
         // leading padding or junk: cannot be judged
         assert_eq!(m(&[0u8; 64], "mp3"), None);
         assert_eq!(m(b"misc est un canard\r\xff", "mp3"), None);

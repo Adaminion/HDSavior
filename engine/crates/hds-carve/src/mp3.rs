@@ -164,6 +164,44 @@ pub(crate) fn sniff_frame(h: &[u8]) -> bool {
     f.layer == 3 && has_vbr_tag(h, &f)
 }
 
+/// For a head that starts with a frame header: `Some(true)` when the
+/// next frame header follows at the distance the first one states and
+/// agrees with it (version, layer, sampling rate); `Some(false)` when it
+/// is visible and does not; `None` when it lies beyond the head.
+pub(crate) fn two_frames(h: &[u8]) -> Option<bool> {
+    let first = crate::util::rd::<4>(h, 0).and_then(parse_frame)?;
+    let next = crate::util::rd::<4>(h, first.len as usize)?;
+    Some(parse_frame(next).is_some_and(|second| {
+        (second.version, second.layer, second.sample_rate)
+            == (first.version, first.layer, first.sample_rate)
+    }))
+}
+
+/// An ID3v2 header with sane fields and, unless an extended header comes
+/// first, a first frame ID (capitals and digits; three of them in v2.2) or
+/// zero padding behind it.
+pub(crate) fn id3v2_plausible(h: &[u8]) -> bool {
+    if id3v2_len(h).is_none() {
+        return false;
+    }
+    let (Some(&major), Some(&flags)) = (h.get(3), h.get(5)) else {
+        return false;
+    };
+    if flags & 0x40 != 0 {
+        return true;
+    }
+    let id_len = if major == 2 { 3 } else { 4 };
+    match h.get(10..10 + id_len) {
+        Some(id) => {
+            id.iter()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                || id.iter().all(|&c| c == 0)
+        }
+        // an empty tag, or the head ends inside the header
+        None => true,
+    }
+}
+
 pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
     src.scan_mode();
     let limit = src.limit();

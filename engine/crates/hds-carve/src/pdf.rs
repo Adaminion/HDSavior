@@ -345,7 +345,12 @@ fn stream_section(src: &mut Src, at: u64, end: u64) -> Option<Section> {
     let (buf, got) = src.side_peek::<1024>(at);
     let b = buf.get(..got.min(end.saturating_sub(at) as usize))?;
     let (_, _, rest) = object_header(skip_space(b))?;
-    let dict = rest.get(..find_sub(rest, b"stream").unwrap_or(rest.len()))?;
+    // the dictionary ends where the stream data starts; an object that
+    // ends without any is not a stream
+    let dict = rest.get(..find_sub(rest, b"stream")?)?;
+    if find_sub(dict, b"endobj").is_some() {
+        return None;
+    }
     if !skip_space(dict).starts_with(b"<<") || !has_xref_type(dict) {
         return None;
     }

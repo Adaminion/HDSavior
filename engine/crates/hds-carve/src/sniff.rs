@@ -299,31 +299,11 @@ fn sniff_pdf(h: &[u8]) -> Option<FileKind> {
 
 // ------------------------------------------------------------------ ZIP --
 
+/// A local file header: version needed up to 6.3, no reserved flag bits,
+/// a method from the specification, a name without control characters.
 #[cold]
 fn sniff_zip(h: &[u8]) -> Option<FileKind> {
-    if le32(h, 0)? != zip::SIG_LOCAL {
-        return None;
-    }
-    let version = le16(h, 4)?;
-    let flags = le16(h, 6)?;
-    let method = le16(h, 8)?;
-    let name_len = le16(h, 26)? as usize;
-    // version needed: 1.0 .. 6.3; flag bits 7-10, 12, 14, 15 are unused or
-    // reserved; a method from the specification; a name
-    if version & 0xFF > 63
-        || flags & 0xD780 != 0
-        || !zip::known_method(method)
-        || name_len == 0
-        || name_len > 4096
-    {
-        return None;
-    }
-    // the visible part of the name holds no control characters
-    let name = h.get(30..).unwrap_or(&[]);
-    let name = name.get(..name_len.min(name.len())).unwrap_or(name);
-    name.iter()
-        .all(|&c| c >= 0x20 && c != 0x7F)
-        .then_some(FileKind::Zip)
+    zip::local_header_plausible(h).then_some(FileKind::Zip)
 }
 
 // ------------------------------------------------------------ RIFF, RAR --

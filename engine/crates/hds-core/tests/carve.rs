@@ -762,16 +762,18 @@ fn a_file_cut_short_by_an_unreadable_sector_is_not_good() {
 struct StreamedNoise {
     size: u64,
     every: u64,
+    /// The compression method of the streamed entry (12: bzip2, 0: stored).
+    method: u8,
     read: std::sync::atomic::AtomicU64,
 }
 
 impl StreamedNoise {
-    fn header() -> Vec<u8> {
+    fn header(&self) -> Vec<u8> {
         let mut h = vec![
-            0x50, 0x4B, 0x03, 0x04, 46, 0, 0x08, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 5, 0, 0, 0,
+            0x50, 0x4B, 0x03, 0x04, 46, 0, 0x08, 0, self.method, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 5, 0, 0, 0,
         ];
-        h.extend_from_slice(b"a.bz2");
+        h.extend_from_slice(b"a.bin");
         h
     }
 
@@ -799,7 +801,7 @@ impl BlockSource for StreamedNoise {
             let w = Self::word(offset / 8 + k as u64).to_le_bytes();
             c.copy_from_slice(&w[..c.len()]);
         }
-        let h = Self::header();
+        let h = self.header();
         let end = offset + buf.len() as u64;
         let mut at = offset / self.every * self.every;
         while at < end {
@@ -830,20 +832,16 @@ impl BlockSource for StreamedNoise {
     }
 }
 
-#[test]
-fn zip_retries_share_one_pass_over_the_disk() {
-    // I3's retry of a ZIP that hit the read limit reads up to the bound,
-    // which after a format is usually the end of the range. Four streamed
-    // entries of a method that has to be searched for its descriptor, on
-    // 2 GiB of noise: every first attempt reads the default 1 GiB, and the
-    // retries together read at most the scanned size once more (without
-    // the shared budget they would read 2 + 1.75 + 1.5 + 1.25 GiB).
+/// Carves four streamed ZIP candidates of `method` on 2 GiB of noise;
+/// returns the bytes read.
+fn carve_streamed_noise(method: u8) -> u64 {
     const GIB: u64 = 1 << 30;
     let size = 2 * GIB;
     let every = 256 * MIB;
     let noise = Arc::new(StreamedNoise {
         size,
         every,
+        method,
         read: std::sync::atomic::AtomicU64::new(0),
     });
     let src: Arc<dyn BlockSource> = noise.clone();
@@ -867,15 +865,41 @@ fn zip_retries_share_one_pass_over_the_disk() {
         &AtomicBool::new(false),
     );
     let read = noise.read.load(Ordering::Relaxed);
-    println!("4 streamed candidates on 2 GiB: {read} bytes read");
+    println!("4 streamed candidates of method {method} on 2 GiB: {read} bytes read");
     assert!(run.files.is_empty());
     assert_eq!(summary.not_measurable, 4);
+    read
+}
+
+#[test]
+fn zip_retries_share_one_pass_over_the_disk() {
+    // I3's retry of a ZIP that hit the read limit reads up to the bound,
+    // which after a format is usually the end of the range. Four streamed
+    // stored entries (whose data can be anything, of any length, so they
+    // are searched for a descriptor with the right CRC as far as the data
+    // goes), on 2 GiB of noise: every first attempt reads the default
+    // 1 GiB, and the retries together read at most the scanned size once
+    // more (without the shared budget they would read 2 + 1.75 + 1.5 +
+    // 1.25 GiB).
+    const GIB: u64 = 1 << 30;
+    let read = carve_streamed_noise(0);
     // first attempts 4 GiB, the retries 2 GiB, some read-ahead
     assert!(read <= 6 * GIB + 64 * MIB, "{read} bytes read");
     assert!(
         read >= 6 * GIB - 64 * MIB,
         "{read} bytes read: the first retry ran"
     );
+}
+
+#[test]
+fn opaque_streamed_entries_cost_a_bounded_window() {
+    // The same with bzip2 entries: nothing in their data can be checked,
+    // so the search for the descriptor stops after a window of 32 MiB
+    // (hds_carve's zip module) instead of reading to the limit, and no
+    // retry follows.
+    let read = carve_streamed_noise(12);
+    assert!(read <= 4 * (34 * MIB), "{read} bytes read");
+    assert!(read >= 4 * (32 * MIB), "{read} bytes read");
 }
 
 #[test]

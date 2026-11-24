@@ -27,11 +27,18 @@ fn browse_lab() -> Run {
     let p = fref(100, 1);
     lab.rec(ORIGIN, &file(101, 1, p, "b.TXT", t(12), Some((3000, 3))));
     lab.rec(ORIGIN, &file(102, 1, p, "a.jpg", t(11), Some((3010, 1))));
+    // SOI, JFIF, a quantisation table, a frame header, the scan header
     lab.put(
         3010 * 4096,
         &[
-            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0,
-        ],
+            &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10][..],
+            b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0",
+            &[0xFF, 0xDB, 0x00, 0x43, 0x00],
+            &[1; 64],
+            &[0xFF, 0xC0, 0x00, 0x0B, 8, 0, 8, 0, 8, 1, 1, 0x11, 0],
+            &[0xFF, 0xDA],
+        ]
+        .concat(),
     );
     lab.rec(ORIGIN, &file(103, 1, p, "C.txt", t(13), None));
     lab.rec(
