@@ -48,24 +48,28 @@ public static class HdsRawHash {
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa,
                                              uint disposition, uint flags, IntPtr template);
-    // SHA-256 of the first `length` bytes of a device, read-only, in 1 MiB steps.
-    public static string Hash(string device, long length) {
+    // SHA-256 of each 1 MiB of the first `length` bytes of a device, read-only.
+    public static string[] Hash(string device, long length) {
         // GENERIC_READ, share read|write, OPEN_EXISTING.
         using (var h = CreateFileW(device, 0x80000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero)) {
             if (h.IsInvalid) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), device);
             using (var fs = new FileStream(h, FileAccess.Read, 1 << 20))
             using (var sha = SHA256.Create()) {
                 var buf = new byte[1 << 20];
+                var result = new System.Collections.Generic.List<string>();
                 long left = length;
                 while (left > 0) {
                     int want = (int)Math.Min(buf.Length, left);
-                    int got = fs.Read(buf, 0, want);
-                    if (got <= 0) throw new IOException("short read at " + (length - left));
-                    sha.TransformBlock(buf, 0, got, null, 0);
+                    int got = 0;
+                    while (got < want) {
+                        int n = fs.Read(buf, got, want - got);
+                        if (n <= 0) throw new IOException("short read at " + (length - left + got));
+                        got += n;
+                    }
+                    result.Add(BitConverter.ToString(sha.ComputeHash(buf, 0, got)).Replace("-", ""));
                     left -= got;
                 }
-                sha.TransformFinalBlock(buf, 0, 0);
-                return BitConverter.ToString(sha.Hash).Replace("-", "");
+                return result.ToArray();
             }
         }
     }
@@ -108,6 +112,13 @@ function Write-TestFile([string]$path, [int]$size, [int]$seed) {
     [IO.File]::WriteAllBytes($path, $bytes)
 }
 
+# The MiB indexes in which two lists of per-MiB hashes differ.
+function Changed-MiB([string[]]$a, [string[]]$b) {
+    $out = @()
+    for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count); $i++) { if ($a[$i] -ne $b[$i]) { $out += $i } }
+    return ,$out
+}
+
 function Sha([string]$path) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
 
 function Run-Engine([string]$label, [string[]]$a) {
@@ -133,6 +144,12 @@ try {
     Write-Host "source: disk $($src.Disk), $($src.Size) bytes; destination: disk $($dst.Disk)"
 
     # ------------------------------------------------------------ 1. populate
+    # A quick format rewrites MFT records 0-255 (docs/notes/quick-format-behaviour.md),
+    # so the files written first on a volume are gone with their records; only
+    # carving can find their content. Like any disk in use, the volume first gets
+    # files that the test does not count, so the counted ones live above record 255.
+    New-Item -ItemType Directory -Force -Path 'Q:\early' | Out-Null
+    for ($i = 0; $i -lt 300; $i++) { Write-TestFile "Q:\early\e$i.txt" 64 (900000 + $i) }
     $files = [ordered]@{}   # relative path -> sha256
     $seed = 1
     foreach ($top in @('Documents', 'Photos', 'Music')) {
@@ -149,17 +166,30 @@ try {
             }
         }
     }
-    # Fragmentation: fill with spacers, delete every other one, then write a
-    # large file into the holes.
+    # Fragmentation: spacers with holes, then four files that grow in turns, each
+    # write flushed, so NTFS hands out their clusters interleaved.
     New-Item -ItemType Directory -Force -Path 'Q:\spacers' | Out-Null
     for ($i = 0; $i -lt 200; $i++) { Write-TestFile "Q:\spacers\s$i.bin" (256 * 1024) (100000 + $i) }
     for ($i = 0; $i -lt 200; $i += 2) { Remove-Item "Q:\spacers\s$i.bin" -Force }
-    $frag = 'Video\big-fragmented.bin'
-    New-Item -ItemType Directory -Force -Path 'Q:\Video' | Out-Null
-    Write-TestFile "Q:\$frag" (20 * 1024 * 1024) 424242
-    $files[$frag] = Sha "Q:\$frag"
     for ($i = 1; $i -lt 200; $i += 2) {
         $rel = "spacers\s$i.bin"
+        $files[$rel] = Sha "Q:\$rel"
+    }
+    New-Item -ItemType Directory -Force -Path 'Q:\Video' | Out-Null
+    $frag = 'Video\big-fragmented.bin'
+    $grow = @($frag, 'Video\grow-1.bin', 'Video\grow-2.bin', 'Video\grow-3.bin')
+    $streams = @($grow | ForEach-Object { [IO.File]::Open("Q:\$_", 'CreateNew', 'Write') })
+    $rng = New-Object System.Random 424242
+    $chunk = New-Object byte[] (64 * 1024)
+    for ($round = 0; $round -lt 160; $round++) {
+        foreach ($fs in $streams) { $rng.NextBytes($chunk); $fs.Write($chunk, 0, $chunk.Length); $fs.Flush($true) }
+    }
+    $streams | ForEach-Object { $_.Close() }
+    foreach ($rel in $grow) { $files[$rel] = Sha "Q:\$rel" }
+    # Real file formats, so the geometry can be checked by signatures.
+    for ($i = 0; $i -lt 6; $i++) {
+        $rel = "Documents\bundle-$i.zip"
+        Compress-Archive -LiteralPath "Q:\Documents\file-$($i * 3 + 2).bin" -DestinationPath "Q:\$rel"
         $files[$rel] = Sha "Q:\$rel"
     }
     # A non-ASCII name (Spanish and Polish letters), built from code points.
@@ -167,20 +197,31 @@ try {
     Write-TestFile "Q:\$uni" 5000 777
     $files[$uni] = Sha "Q:\$uni"
     Write-VolumeCache Q
-    $fragments = (fsutil file queryextents "Q:\$frag" | Measure-Object -Line).Lines
+    $extentText = (fsutil file queryextents "Q:\$frag" | Out-String)
+    $fragments = ([regex]::Matches($extentText, 'VCN:')).Count
     Write-Host "populated $($files.Count) files; the fragmented file has $fragments extents"
     if ($fragments -lt 2) { Fail "the fragmented file was written in one piece ($fragments extents)" }
 
     # ------------------------------------------------------------ 2. the accident
     Format-Volume -DriveLetter Q -FileSystem NTFS -NewFileSystemLabel NEWVOL -Force -Confirm:$false | Out-Null
     Start-Sleep -Seconds 2
-    $part = Get-Partition -DiskNumber $src.Disk | Where-Object { $_.DriveLetter -eq 'Q' }
-    Remove-PartitionAccessPath -DiskNumber $src.Disk -PartitionNumber $part.PartitionNumber -AccessPath 'Q:\'
-    Write-Host 'quick-formatted the source volume and removed its drive letter'
+    # Take the volume offline the way the docs advise (mountvol /p: dismounted
+    # and not mounted again), so nothing but HDSavior reads the disk from here on.
+    mountvol Q: /p
+    if ($LASTEXITCODE -ne 0) { throw "mountvol Q: /p exited $LASTEXITCODE" }
+    Write-Host 'quick-formatted the source volume, then dismounted it with mountvol /p'
+    Start-Sleep -Seconds 3
 
     # ------------------------------------------------------------ 3-4. rescue
     $raw = "\\.\PhysicalDrive$($src.Disk)"
     $before = [HdsRawHash]::Hash($raw, $src.Size)
+    Start-Sleep -Seconds 5
+    $control = [HdsRawHash]::Hash($raw, $src.Size)
+    $drift = Changed-MiB $before $control
+    if ($drift.Count -gt 0) {
+        Fail "the source disk changed while nothing but this script read it (MiB $($drift -join ', ')); the safety check below is not conclusive"
+        $before = $control
+    } else { Pass 'the source disk is stable before the rescue (two hashes 5 s apart)' }
     $session = 'W:\rescue\source.hds'
     $dest = 'W:\rescue\recovered'
     New-Item -ItemType Directory -Force -Path 'W:\rescue' | Out-Null
@@ -192,8 +233,9 @@ try {
     if ($code -ne 0) { Fail "recover exited $code" }
 
     $after = [HdsRawHash]::Hash($raw, $src.Size)
-    if ($before -eq $after) { Pass 'the source disk is byte-identical after scan and recover' }
-    else { Fail "the source disk changed: $before -> $after" }
+    $changed = Changed-MiB $before $after
+    if ($changed.Count -eq 0) { Pass "the source disk is byte-identical after scan and recover ($($after.Count) MiB compared)" }
+    else { Fail "the source disk changed during the rescue, in MiB $($changed -join ', ')" }
 
     # ------------------------------------------------------------ 5. compare
     $recovered = @{}   # lower-case relative path (without the volume folder) -> full path
@@ -217,7 +259,7 @@ try {
     }
     $n = $files.Count
     $summary = [ordered]@{ files = $n; byte_identical = $exact; under_old_path = $samePath
-        missing = $missing; wrong_content = $wrong; source_hash_before = $before; source_hash_after = $after }
+        missing = $missing; wrong_content = $wrong; source_changed_mib = $changed }
     $summary | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $Out 'summary.json')
     Write-Host "files: $n, byte-identical: $exact, under the old path: $samePath, missing: $($missing.Count), wrong content: $($wrong.Count)"
     $missing | Select-Object -First 20 | ForEach-Object { Write-Host "  missing: $_" }
