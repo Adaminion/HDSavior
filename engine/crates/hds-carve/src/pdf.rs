@@ -114,22 +114,6 @@ fn linearized_length(head: &[u8]) -> Option<u64> {
     None
 }
 
-/// `true` when the bytes just before `end` are `%%EOF` plus optional
-/// trailing white space.
-fn ends_with_marker(src: &mut Src, end: u64) -> bool {
-    let Some(start) = end.checked_sub(32) else {
-        return false;
-    };
-    let Some(tail) = src.side::<32>(start) else {
-        return false;
-    };
-    let Some(p) = tail.windows(MARKER.len()).rposition(|w| w == MARKER) else {
-        return false;
-    };
-    tail.get(p + MARKER.len()..)
-        .is_some_and(|rest| rest.iter().all(|&c| is_space(c)))
-}
-
 /// The number between `startxref` and the `%%EOF` at `marker`.
 fn startxref_before(src: &mut Src, marker: u64) -> Option<u64> {
     let start = marker.saturating_sub(48);
@@ -157,14 +141,264 @@ fn startxref_before(src: &mut Src, marker: u64) -> Option<u64> {
     (before.len() != unstripped && before.ends_with(b"startxref")).then_some(value)
 }
 
-/// `true` when a cross-reference table or stream starts at `off`.
-fn xref_at(src: &mut Src, off: u64) -> bool {
-    let (buf, got) = src.side_peek::<40>(off);
-    let Some(b) = buf.get(..got) else {
+/// What the cross-reference section a `startxref` names says about the
+/// file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Xref {
+    /// Neither a table (`xref`) nor a cross-reference stream (an object
+    /// whose dictionary has `/Type /XRef`) starts there.
+    None,
+    /// A section starts there, but something in it, or in a section its
+    /// `/Prev` chain leads to, did not check out.
+    Unverified,
+    /// Every section of the chain is where the offsets say, and every
+    /// sampled table entry points at the object it names.
+    Verified,
+}
+
+/// Sections of a `/Prev` chain followed from one `startxref`.
+const MAX_SECTIONS: usize = 16;
+/// Subsections of one table that are walked.
+const MAX_SUBSECTIONS: usize = 256;
+/// Entries per subsection whose offsets are checked.
+const SAMPLES_PER_SUBSECTION: u64 = 4;
+/// Entries per section whose offsets are checked.
+const SAMPLES_PER_SECTION: usize = 16;
+
+/// The integer `<int> <int> obj` at the start of `b` declares, with
+/// the bytes after `obj`.
+fn object_header(b: &[u8]) -> Option<(u64, u64, &[u8])> {
+    let (num, rest) = digits(b)?;
+    let after = skip_space(rest);
+    if after.len() == rest.len() {
+        return None;
+    }
+    let (gen, rest) = digits(after)?;
+    let after = skip_space(rest);
+    if after.len() == rest.len() {
+        return None;
+    }
+    let rest = after.strip_prefix(b"obj")?;
+    Some((num, gen, rest))
+}
+
+/// The value of `/Prev` in the dictionary bytes `dict`, if any.
+fn prev_offset(dict: &[u8]) -> Option<u64> {
+    let mut from = 0usize;
+    while let Some(p) = find_sub(dict.get(from..)?, b"/Prev") {
+        let value = dict.get(from + p + 5..)?;
+        if value.first().is_some_and(|&c| is_space(c)) {
+            return digits(skip_space(value)).map(|(v, _)| v);
+        }
+        from += p + 5;
+    }
+    None
+}
+
+/// `true` when the name `/XRef` (and not a longer name such as
+/// `/XRefStm`) appears in `dict`.
+fn has_xref_type(dict: &[u8]) -> bool {
+    let mut from = 0usize;
+    while let Some(p) = dict.get(from..).and_then(|d| find_sub(d, b"/XRef")) {
+        let next = dict.get(from + p + 5).copied();
+        if !next.is_some_and(|c| c.is_ascii_alphanumeric()) {
+            return true;
+        }
+        from += p + 5;
+    }
+    false
+}
+
+/// One parsed section: whether it is one, whether its sampled entries
+/// matched, and where `/Prev` points.
+struct Section {
+    ok: bool,
+    checked: usize,
+    prev: Option<u64>,
+}
+
+/// Checks that the object table entry `num`/`gen` at `offset` names: the
+/// bytes there must be `num gen obj`, inside the first `end` bytes.
+fn object_at(src: &mut Src, offset: u64, num: u64, gen: u64, end: u64) -> bool {
+    if offset >= end {
+        return false;
+    }
+    let (buf, got) = src.side_peek::<48>(offset);
+    let Some(b) = buf.get(..got.min((end - offset) as usize)) else {
         return false;
     };
-    let b = skip_space(b);
-    b.starts_with(b"xref") || starts_with_object(b)
+    object_header(skip_space(b)).is_some_and(|(n, g, _)| n == num && g == gen)
+}
+
+/// A classic cross-reference table whose `xref` keyword is at `at`.
+fn classic_section(src: &mut Src, at: u64, end: u64) -> Section {
+    let bad = Section {
+        ok: false,
+        checked: 0,
+        prev: None,
+    };
+    let mut pos = at + 4;
+    let mut checked = 0usize;
+    for _ in 0..MAX_SUBSECTIONS {
+        // a subsection header `first count`, or the trailer
+        let (buf, got) = src.side_peek::<64>(pos);
+        let Some(b) = buf.get(..got) else {
+            return bad;
+        };
+        let head = skip_space(b);
+        let lead = (b.len() - head.len()) as u64;
+        if head.starts_with(b"trailer") {
+            let start = pos + lead + 7;
+            let (buf, got) = src.side_peek::<1024>(start);
+            let t = buf.get(..got.min(end.saturating_sub(start) as usize)).unwrap_or(&[]);
+            // the dictionary ends before `startxref` (if it is in view)
+            let t = t.get(..find_sub(t, b"startxref").unwrap_or(t.len())).unwrap_or(t);
+            return Section {
+                ok: skip_space(t).starts_with(b"<<"),
+                checked,
+                prev: prev_offset(t),
+            };
+        }
+        let Some((first, rest)) = digits(head) else {
+            return bad;
+        };
+        let after = rest
+            .iter()
+            .take_while(|&&c| c == b' ')
+            .count();
+        let Some((count, rest)) = rest.get(after..).filter(|_| after > 0).and_then(digits) else {
+            return bad;
+        };
+        // the line ends; entries follow
+        let body = skip_space(rest);
+        if body.len() == rest.len() {
+            return bad;
+        }
+        let entries = pos + (b.len() - body.len()) as u64;
+        // each entry is `oooooooooo ggggg n` and a two-byte end of line;
+        // a few writers end it with one byte
+        let (e, got) = src.side_peek::<20>(entries);
+        let entry_len: u64 = if count == 0 {
+            20
+        } else {
+            match e.get(..got) {
+                Some(e) if e.len() == 20 && e.get(18..20).is_some_and(|eol| {
+                    matches!(eol, b" \n" | b" \r" | b"\r\n")
+                }) => 20,
+                Some(e) if e.len() >= 19 && matches!(e.get(18), Some(b'\n' | b'\r')) => 19,
+                _ => return bad,
+            }
+        };
+        let Some(span) = count.checked_mul(entry_len) else {
+            return bad;
+        };
+        if entries.saturating_add(span) > end {
+            return bad;
+        }
+        // a few entries spread over the subsection
+        let picks = count.min(SAMPLES_PER_SUBSECTION);
+        let mut last = None;
+        for k in 0..picks {
+            let i = if picks <= 1 { 0 } else { k * (count - 1) / (picks - 1) };
+            if last == Some(i) || checked >= SAMPLES_PER_SECTION {
+                continue;
+            }
+            last = Some(i);
+            let (e, got) = src.side_peek::<18>(entries + i * entry_len);
+            let Some(e) = e.get(..got).filter(|e| e.len() == 18) else {
+                return bad;
+            };
+            let Some((offset, r1)) = digits(e) else {
+                return bad;
+            };
+            let well_formed = e.len() - r1.len() == 10
+                && r1.first() == Some(&b' ')
+                && r1.get(1..6).is_some_and(|g| g.iter().all(u8::is_ascii_digit))
+                && r1.get(6) == Some(&b' ');
+            if !well_formed {
+                return bad;
+            }
+            let gen = r1
+                .get(1..6)
+                .and_then(digits)
+                .map_or(u64::MAX, |(g, _)| g);
+            match r1.get(7) {
+                Some(b'n') => {
+                    checked += 1;
+                    let num = first.saturating_add(i);
+                    if !object_at(src, offset, num, gen, end) {
+                        return bad;
+                    }
+                }
+                Some(b'f') => {}
+                _ => return bad,
+            }
+        }
+        pos = entries + span;
+    }
+    bad
+}
+
+/// A cross-reference stream: an object at `at` whose dictionary says
+/// `/Type /XRef`. Its entries are compressed and not sampled.
+fn stream_section(src: &mut Src, at: u64, end: u64) -> Option<Section> {
+    let (buf, got) = src.side_peek::<1024>(at);
+    let b = buf.get(..got.min(end.saturating_sub(at) as usize))?;
+    let (_, _, rest) = object_header(skip_space(b))?;
+    let dict = rest.get(..find_sub(rest, b"stream").unwrap_or(rest.len()))?;
+    if !skip_space(dict).starts_with(b"<<") || !has_xref_type(dict) {
+        return None;
+    }
+    Some(Section {
+        ok: true,
+        checked: 1,
+        prev: prev_offset(dict),
+    })
+}
+
+/// Checks the cross-reference section at `off` and the chain of older
+/// sections its `/Prev` entries lead to, all inside the first `end` bytes.
+fn check_xref(src: &mut Src, off: u64, end: u64) -> Xref {
+    let mut at = off;
+    let mut seen: Vec<u64> = Vec::new();
+    let mut checked = 0usize;
+    for depth in 0..MAX_SECTIONS {
+        let (buf, got) = src.side_peek::<40>(at);
+        let Some(b) = buf.get(..got) else {
+            return Xref::None;
+        };
+        let body = skip_space(b);
+        let start = at + (b.len() - body.len()) as u64;
+        let section = if body.starts_with(b"xref") {
+            Some(classic_section(src, start, end))
+        } else if starts_with_object(body) {
+            stream_section(src, start, end)
+        } else {
+            None
+        };
+        let Some(section) = section else {
+            // the section `startxref` names must be one; one that a
+            // `/Prev` names may be damaged without making this one foreign
+            return if depth == 0 { Xref::None } else { Xref::Unverified };
+        };
+        if !section.ok {
+            return Xref::Unverified;
+        }
+        checked += section.checked;
+        seen.push(at);
+        match section.prev {
+            None => {
+                return if checked > 0 {
+                    Xref::Verified
+                } else {
+                    Xref::Unverified
+                };
+            }
+            Some(p) if p >= end || seen.contains(&p) => return Xref::Unverified,
+            Some(p) => at = p,
+        }
+    }
+    Xref::Unverified
 }
 
 /// What the bytes after an accepted end look like.
@@ -181,11 +415,11 @@ fn update_follows(src: &mut Src, end: u64) -> bool {
 }
 
 /// Examines the `%%EOF` at `marker`: the end offset it implies, if it is a
-/// trailer of this file.
-fn end_at_marker(src: &mut Src, marker: u64) -> Option<u64> {
+/// trailer of this file, and whether its cross-reference chain checked out.
+fn end_at_marker(src: &mut Src, marker: u64) -> Option<(u64, bool)> {
     let xref = startxref_before(src, marker)?;
     // 0 is the dummy value in the first-page trailer of a linearized file
-    if xref == 0 || xref >= marker || !xref_at(src, xref) {
+    if xref == 0 || xref >= marker {
         return None;
     }
     let after_marker = marker + MARKER.len() as u64;
@@ -201,7 +435,23 @@ fn end_at_marker(src: &mut Src, marker: u64) -> Option<u64> {
     if rest.starts_with(b"endstream") || rest.starts_with(b"endobj") {
         return None;
     }
-    Some(after_marker + eol as u64)
+    let end = after_marker + eol as u64;
+    match check_xref(src, xref, end) {
+        Xref::None => None,
+        Xref::Unverified => Some((end, false)),
+        Xref::Verified => Some((end, true)),
+    }
+}
+
+/// The `%%EOF` in the 32 bytes before `end`, when only white space
+/// follows it there.
+fn marker_before(src: &mut Src, end: u64) -> Option<u64> {
+    let start = end.checked_sub(32)?;
+    let tail = src.side::<32>(start)?;
+    let p = tail.windows(MARKER.len()).rposition(|w| w == MARKER)?;
+    tail.get(p + MARKER.len()..)
+        .is_some_and(|rest| rest.iter().all(|&c| is_space(c)))
+        .then_some(start + p as u64)
 }
 
 pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
@@ -222,14 +472,19 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
         })
     };
 
-    let mut best: Option<u64> = None;
+    let mut best: Option<(u64, bool)> = None;
     let mut pos = 0u64;
     if let Some(l) = linearized_length(&head) {
-        if l >= 64 && l <= src.limit() && ends_with_marker(src, l) {
+        // the `%%EOF` that ends the stated length, with a cross-reference
+        // chain of this file in front of it
+        let at = (l >= 64 && l <= src.limit())
+            .then(|| marker_before(src, l))
+            .flatten();
+        if let Some((_, verified)) = at.and_then(|m| end_at_marker(src, m)) {
             if !update_follows(src, l) {
-                return done(l, Confidence::Exact, true);
+                return done(l, Confidence::Exact, verified);
             }
-            best = Some(l);
+            best = Some((l, verified));
             pos = l;
         }
     }
@@ -253,18 +508,18 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
 
         for &marker in &hits {
             // sections are appended: an end before the best one is stale
-            if best.is_some_and(|b| marker < b) {
+            if best.is_some_and(|(b, _)| marker < b) {
                 continue;
             }
             examined += 1;
             if examined > MAX_MARKERS {
                 return None;
             }
-            if let Some(end) = end_at_marker(src, marker) {
+            if let Some((end, verified)) = end_at_marker(src, marker) {
                 if !update_follows(src, end) {
-                    return done(end, Confidence::Probable, true);
+                    return done(end, Confidence::Probable, verified);
                 }
-                best = Some(end);
+                best = Some((end, verified));
             }
         }
 
@@ -287,7 +542,7 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
     // update which never completed: the last complete revision stands, but
     // the file evidently went on - into a bad sector, another file, or
     // the next fragment - so this is not where it ends.
-    done(best?, Confidence::Probable, false)
+    done(best?.0, Confidence::Probable, false)
 }
 
 #[cfg(test)]

@@ -1233,12 +1233,179 @@ fn a_version_1_file_loads_and_is_rewritten_before_it_is_appended_to() {
     loaded.checkpoint().unwrap();
     let bytes = std::fs::read(&v1).unwrap();
     assert_eq!(&bytes[4..8], &file::FORMAT_VERSION.to_le_bytes());
+    // The file in the earlier format is kept next to it.
+    let kept = std::fs::read(dir.join("v1.hds.v1.bak")).unwrap();
+    assert_eq!(&kept[4..8], &1_u32.to_le_bytes());
     let (again, _) = Session::load(&v1).unwrap();
     assert_eq!(again.opaque(OpaqueKind::Overrides), &[b"geometry".to_vec()]);
     assert_eq!(again.store(), loaded.store());
     // The rewritten file still says its times came from format 1.
     assert!(has_warning(&again));
     assert_eq!(records_with_name_times(&again), 0);
+}
+
+#[test]
+fn the_rewrite_of_a_version_1_file_never_leaves_no_valid_session_file() {
+    use super::{FaultMode, RewriteStep, SimulatedCrash, REWRITE_FAULTS};
+    use FaultMode::{Crash, Error};
+    use RewriteStep::{CreateTemp, KeepOld, NameNew, Reopen, RestoreOld, WriteCopy};
+
+    let work = TempDir::new("v1-fault-src");
+    let (mut session, src) = scanned();
+    let protected = [Protected::session(0..src.size())];
+    let guard = guard_for(src.as_ref(), &protected);
+    let v2 = work.join("v2.hds");
+    session.save_as(&v2, &guard).unwrap();
+    session.detach_file();
+    let v1_bytes = downgrade_to_v1(&std::fs::read(&v2).unwrap());
+    let expected = (
+        session.store().record_count(),
+        session.store().index_entry_count(),
+    );
+    let version_of = |bytes: &[u8]| u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+
+    let mut cases: Vec<Vec<(RewriteStep, FaultMode)>> = Vec::new();
+    for step in [CreateTemp, WriteCopy, KeepOld, NameNew, Reopen] {
+        for mode in [Error, Crash] {
+            cases.push(vec![(step, mode)]);
+        }
+    }
+    cases.push(vec![(NameNew, Error), (RestoreOld, Error)]);
+    cases.push(vec![(NameNew, Error), (RestoreOld, Crash)]);
+
+    for faults in cases {
+        let dir = TempDir::new("v1-fault");
+        let path = dir.join("s.hds");
+        std::fs::write(&path, &v1_bytes).unwrap();
+        let (mut loaded, _) = Session::load(&path).unwrap();
+        REWRITE_FAULTS.with(|f| *f.borrow_mut() = faults.clone());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            loaded.attach_file(&path, &guard)
+        }));
+        let unused = REWRITE_FAULTS.with(|f| std::mem::take(&mut *f.borrow_mut()));
+        assert!(
+            unused.is_empty(),
+            "{faults:?}: step not reached: {unused:?}"
+        );
+        let crashed = match result {
+            Err(payload) => {
+                assert!(payload.is::<SimulatedCrash>(), "{faults:?}: a real panic");
+                true
+            }
+            Ok(result) => {
+                assert!(result.is_err(), "{faults:?}: the failure was not reported");
+                false
+            }
+        };
+
+        // Every complete session file in the folder, with its version.
+        let mut names = Vec::new();
+        let mut valid = Vec::new();
+        for entry in std::fs::read_dir(&dir.0).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            names.push(name.clone());
+            if let Ok((s, report)) = Session::load(&entry.path()) {
+                let counts = (s.store().record_count(), s.store().index_entry_count());
+                if counts == expected && report.ignored_bytes == 0 {
+                    let bytes = std::fs::read(entry.path()).unwrap();
+                    valid.push((name, version_of(&bytes)));
+                }
+            }
+        }
+        names.sort();
+        assert!(
+            !valid.is_empty(),
+            "{faults:?}: no valid session file left in {names:?}"
+        );
+        // The file in the earlier format survives unchanged under one name
+        // or the other.
+        let original = ["s.hds", "s.hds.v1.bak"]
+            .iter()
+            .any(|n| std::fs::read(dir.join(n)).is_ok_and(|b| b == v1_bytes));
+        assert!(
+            original,
+            "{faults:?}: the version-1 file is gone: {names:?}"
+        );
+
+        let first = faults[0];
+        if crashed {
+            // A later run finds either the old file under its own name, or
+            // (crash between the renames) the old file kept and the copy.
+            if first.0 == NameNew || first.0 == RestoreOld || faults.len() == 2 {
+                assert!(valid.iter().any(|(n, v)| n == "s.hds.v1.bak" && *v == 1));
+                assert!(valid
+                    .iter()
+                    .any(|(n, v)| n.starts_with("~hds-session-") && *v == file::FORMAT_VERSION));
+            } else if first.0 == Reopen {
+                assert!(valid.contains(&("s.hds".to_string(), file::FORMAT_VERSION)));
+            } else {
+                assert!(valid.contains(&("s.hds".to_string(), 1)));
+            }
+            continue;
+        }
+        match (first.0, faults.len()) {
+            (Reopen, _) => {
+                // Rewritten and renamed; only reopening failed: attaching
+                // again continues the new file.
+                assert_eq!(names, ["s.hds", "s.hds.v1.bak"]);
+                assert!(valid.contains(&("s.hds".to_string(), file::FORMAT_VERSION)));
+                assert!(!loaded.has_file());
+                loaded.attach_file(&path, &guard).unwrap();
+                loaded.checkpoint().unwrap();
+                assert_eq!(Session::load(&path).unwrap().0.store(), loaded.store());
+            }
+            (NameNew, 2) => {
+                // Neither rename worked: the session goes on in the copy
+                // under its temporary name.
+                assert_eq!(names.len(), 2, "{names:?}");
+                let temp = loaded.file_path().unwrap().to_path_buf();
+                assert!(temp
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("~hds-session-"));
+                loaded.checkpoint().unwrap();
+                assert_eq!(Session::load(&temp).unwrap().0.store(), loaded.store());
+            }
+            _ => {
+                // Everything was put back as it was.
+                assert_eq!(names, ["s.hds"], "{faults:?}");
+                assert_eq!(std::fs::read(&path).unwrap(), v1_bytes);
+                assert!(!loaded.has_file());
+                loaded.attach_file(&path, &guard).unwrap();
+                assert!(loaded.has_file());
+            }
+        }
+    }
+
+    // Without faults, a taken backup name is not replaced.
+    let dir = TempDir::new("v1-fault");
+    let path = dir.join("s.hds");
+    std::fs::write(&path, &v1_bytes).unwrap();
+    std::fs::write(dir.join("s.hds.v1.bak"), b"someone else's").unwrap();
+    let (mut loaded, _) = Session::load(&path).unwrap();
+    loaded.attach_file(&path, &guard).unwrap();
+    assert_eq!(
+        std::fs::read(dir.join("s.hds.v1.bak")).unwrap(),
+        b"someone else's"
+    );
+    assert_eq!(std::fs::read(dir.join("s.hds.v1-2.bak")).unwrap(), v1_bytes);
+    assert_eq!(
+        version_of(&std::fs::read(&path).unwrap()),
+        file::FORMAT_VERSION
+    );
+    let warning = loaded
+        .store()
+        .warnings()
+        .iter()
+        .find(|w| w.code == WARN_OLD_SESSION_FORMAT)
+        .unwrap();
+    assert!(
+        warning.message.contains("s.hds.v1-2.bak"),
+        "{}",
+        warning.message
+    );
 }
 
 /// Records of `s` that carry a `$FILE_NAME` time (none after a version-1

@@ -346,7 +346,10 @@ filters) so further pages cost O(limit).
 
 ### 5.6 `hds-engine`
 
-Binary `hdsavior-engine`. `serve` runs the protocol server. Every other
+Binary `hdsavior-engine`. `serve` runs the protocol server. A panic in a
+request handler or a job is caught and answered with `internal`; this needs
+`panic = "unwind"`, the Cargo default, which no profile may change (the
+crate refuses to compile with `panic = "abort"`). Every other
 subcommand is a thin wrapper around the same protocol commands and prints
 their results and events as JSON, one object per line, on stdout; logs go to
 stderr. Exit code 0 = ok, 1 = the job failed, 2 = usage error.

@@ -173,7 +173,9 @@ the disk itself, is the result of `open_source`.
 could not be separated cleanly), `session_file_at_risk` (the session file
 lies inside the lost volume; save the session elsewhere), `old_session_format`
 (the session was written by an older engine; its times are approximate, scan
-again for exact ones), `session_file_not_saved` (the last write to the
+again for exact ones; once the engine has rewritten the file in the current
+format, the message names the old file it kept next to it,
+`<name>.v1.bak`, ALGORITHMS B2), `session_file_not_saved` (the last write to the
 session file failed, for example on a full disk: the file does not hold the
 session as it is; save it elsewhere; cleared by the next successful write or
 `session_save`), `session_incomplete` (`session_load`: the file ends early —
@@ -510,7 +512,9 @@ args `{"epoch": 3, "node": 4711}` →
 ```
 
 `record` is `null` for virtual, lost and carved nodes; `data` is `null` for
-folders. `flag_details` explains every flag of the row in plain language.
+folders. `record.number` is the effective record number (ALGORITHMS D1: the
+header's, else the positional one) and `null` for an unnumbered stray record,
+whose number neither is known. `flag_details` explains every flag of the row in plain language.
 
 ### search
 

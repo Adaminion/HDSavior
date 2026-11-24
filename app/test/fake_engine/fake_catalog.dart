@@ -974,7 +974,8 @@ final class FakeCatalog {
       ],
       'record': hasRecord
           ? {
-              'number': 256 + node,
+              // Some records are unnumbered strays: no number is known.
+              'number': h % 97 == 0 ? null : 256 + node,
               'seq': 1 + h % 5,
               'disk_offset': geometry.volumeOffset + 3221225472 + (256 + node) * 1024,
               'extension_records': h % 60 == 0 ? 1 : 0,

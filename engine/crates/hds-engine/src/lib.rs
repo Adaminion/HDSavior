@@ -27,6 +27,14 @@
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+// The engine catches a panic per request handler and per job
+// (`catch_unwind` in `engine`) and answers `internal`; with `panic = "abort"`
+// one bug in a parser would end the process and every running job with it.
+// The Cargo profiles keep the default `panic = "unwind"`
+// (tests/panic_strategy.rs checks the manifests).
+#[cfg(panic = "abort")]
+compile_error!("hds-engine needs panic = \"unwind\": it catches panics per request and per job");
+
 pub mod backend;
 pub mod base64;
 pub mod cli;

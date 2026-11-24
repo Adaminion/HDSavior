@@ -180,7 +180,7 @@ fn node_info_describes_files_and_folders() {
     let rec = info.record.unwrap();
     assert_eq!(
         (rec.number, rec.seq, rec.disk_offset, rec.extension_records),
-        (107, 1, off(107), 0)
+        (Some(107), 1, off(107), 0)
     );
     let data = info.data.unwrap();
     assert_eq!(

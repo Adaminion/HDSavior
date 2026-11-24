@@ -1039,6 +1039,16 @@ void main() {
       expect((info['flag_details']! as List<Object?>).map((d) => (d! as Map)['flag']), file['flags']);
       expect((info['flag_details']! as List<Object?>).every((d) => ((d! as Map)['text']! as String).length > 10), isTrue);
 
+      // An unnumbered stray record has `number: null`, never a sentinel.
+      final numbers = [
+        for (final r in h.search({'under': h.root, 'limit': 1000}))
+          if (h.ok('node_info', {'epoch': h.epoch, 'node': r['id']})['record'] case final Map<String, Object?> record)
+            record['number'],
+      ];
+      expect(numbers, contains(isNull));
+      expect(numbers.whereType<int>(), isNotEmpty);
+      expect(numbers.every((n) => n == null || (n is int && n >= 0 && n < 0xFFFFFFFF)), isTrue);
+
       final folder = h.ok('node_info', {'epoch': h.epoch, 'node': h.landmarks.documents});
       expect(folder['data'], isNull);
       expect(folder['record'], isNotNull);

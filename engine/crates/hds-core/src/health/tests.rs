@@ -883,13 +883,18 @@ fn unnumbered_records_show_their_positional_number() {
         off(100),
         &file(100, 1, ROOT, "old.txt", t(10), Some((3000, 1))).unnumbered(),
     );
+    // One far from any MFT: no position gives it a number either.
+    lab.rec_at(
+        12 * MIB + 400 * 1024,
+        &file(400, 1, ROOT, "loose.bin", t(20), None).unnumbered(),
+    );
     let run = lab.run(None);
     let store = run.store();
     assert_eq!(run.layout.number(run.id(off(100))), Some(100));
     let cat = catalog(&run);
     let n = at(&cat, store, "old.txt");
     let info = cat.node_info(store, n.wire()).unwrap();
-    assert_eq!(info.record.unwrap().number, 100);
+    assert_eq!(info.record.unwrap().number, Some(100));
     let plan = cat
         .plan(
             store,
@@ -905,8 +910,15 @@ fn unnumbered_records_show_their_positional_number() {
     let p0 = at(&cat, store, "p0.png");
     let info = cat.node_info(store, p0.wire()).unwrap();
     let rec = cat.record_of(p0).unwrap();
+    let number = info.record.unwrap().number;
+    assert!(number.is_some());
     assert_eq!(
-        info.record.unwrap().number,
-        u64::from(store.record(rec).unwrap().record_number().unwrap())
+        number,
+        store.record(rec).unwrap().record_number().map(u64::from)
     );
+    // An unnumbered stray record has no number (protocol `null`).
+    let loose = at(&cat, store, "[Stray records]/Folder #5/loose.bin");
+    assert!(cat.flags(loose).contains(Flag::Stray));
+    let info = cat.node_info(store, loose.wire()).unwrap();
+    assert_eq!(info.record.unwrap().number, None);
 }

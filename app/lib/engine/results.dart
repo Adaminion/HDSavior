@@ -188,14 +188,16 @@ final class RecordInfo {
   });
 
   factory RecordInfo.fromJson(JsonObject json) => RecordInfo(
-    // Volumes formatted by Windows NT4/2000 store no record number.
+    // `null` for an unnumbered stray record: its header stores no number
+    // (volumes formatted by Windows NT4/2000) and no position gives one.
     number: json.integerOrNull('number'),
     seq: json.integer('seq'),
     diskOffset: json.integer('disk_offset'),
     extensionRecords: json.integer('extension_records'),
   );
 
-  /// MFT record number; `null` when the record does not store one.
+  /// MFT record number (the header's, else the positional one); `null` when
+  /// neither is known (an unnumbered stray record).
   final int? number;
   final int seq;
 

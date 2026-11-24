@@ -1019,7 +1019,8 @@ impl Session {
     /// session was loaded from or last written to, with the checkpoint it
     /// was left at (checked). Used to resume a loaded session. The guard
     /// runs first. A file of an older format version is first rewritten in
-    /// the current one, as [`save_as`](Self::save_as) does.
+    /// the current one; the old file is kept next to it (see
+    /// `rewrite_old_format`, ALGORITHMS B2).
     pub fn attach_file(
         &mut self,
         path: &Path,
@@ -1049,15 +1050,179 @@ impl Session {
         }
         if origin.version < file::FORMAT_VERSION {
             // A file of an older format: blocks of the current format cannot
-            // be appended to it. Rewrite it in the current format (a
-            // compacted copy that replaces it) and go on in that.
+            // be appended to it. Rewrite it in the current format and go on
+            // in that; the old file is kept under a sibling name.
             drop(file);
-            self.save_as(path, guard)?;
+            self.rewrite_old_format(dir, &name)?;
             return Ok(());
         }
         self.writer = Some(Writer::new(dir, target, file, origin.valid_end));
         Ok(())
     }
+
+    /// Rewrites the old-format session file `name` in `dir` (whose location
+    /// the caller has checked with the guard) in the current format, crash
+    /// safe (ALGORITHMS B2), and continues in the new file:
+    ///
+    /// 1. a compacted copy is written to a new temporary file next to it
+    ///    and synced;
+    /// 2. the old file is renamed, without replacing, to `<name>.v1.bak`
+    ///    (or `<name>.v1-<n>.bak` when that name is taken);
+    /// 3. the copy is renamed, without replacing, to `name`.
+    ///
+    /// No file is ever replaced or deleted except the temporary copy before
+    /// step 2, so at every moment a complete session file exists: the old
+    /// file under its name or the backup name, and from the end of step 1
+    /// also the synced copy. If step 3 fails the old file is renamed back
+    /// and the copy removed; if even that fails, the session continues in
+    /// the copy under its temporary name and the error names both files.
+    /// On success the warning `old_session_format` names the backup.
+    fn rewrite_old_format(&mut self, dir: OutDir, name: &str) -> Result<(), SessionError> {
+        let target = dir.path().join(name);
+        let sequence = 1;
+        rewrite_fault(RewriteStep::CreateTemp)?;
+        let (temp_name, temp) = create_temp(&dir)?;
+        let written = rewrite_fault(RewriteStep::WriteCopy)
+            .map_err(SessionError::Io)
+            .and_then(|()| self.write_copy(temp, sequence));
+        let (end, last) = match written {
+            Ok(done) => done,
+            Err(e) => {
+                let _ = dir.remove_file(&temp_name);
+                return Err(e);
+            }
+        };
+        let backup = match keep_old(&dir, name) {
+            Ok(backup) => backup,
+            Err(e) => {
+                let _ = dir.remove_file(&temp_name);
+                return Err(SessionError::Io(e));
+            }
+        };
+        let named = rewrite_fault(RewriteStep::NameNew)
+            .and_then(|()| dir.rename_noreplace(&temp_name, name));
+        if let Err(e) = named {
+            let restored = rewrite_fault(RewriteStep::RestoreOld)
+                .and_then(|()| dir.rename_noreplace(&backup, name));
+            if restored.is_ok() {
+                let _ = dir.remove_file(&temp_name);
+                return Err(SessionError::Io(e));
+            }
+            // The old file stays under the backup name; go on in the copy
+            // under its temporary name.
+            let temp_path = dir.path().join(&temp_name);
+            self.written(temp_path.clone(), end, last, sequence);
+            if let Ok(file) = dir.open_existing(&temp_name) {
+                self.writer = Some(Writer::new(dir.clone(), temp_path.clone(), file, end));
+            }
+            return Err(SessionError::Io(io::Error::new(
+                e.kind(),
+                format!(
+                    "the session was rewritten in the current format as {} but could not be \
+                     renamed to {}: {e}; the file in the earlier format is {}",
+                    temp_path.display(),
+                    target.display(),
+                    dir.path().join(&backup).display()
+                ),
+            )));
+        }
+        // From here on the new file is the one this session continues.
+        self.written(target.clone(), end, last, sequence);
+        let message = format!(
+            "{OLD_SESSION_FORMAT_MESSAGE} The session file was rewritten in the current format; \
+             the file in the earlier format was kept as {backup}."
+        );
+        if let Some(w) = self
+            .store
+            .warnings
+            .iter_mut()
+            .find(|w| w.code == WARN_OLD_SESSION_FORMAT)
+        {
+            w.message = message;
+        } else {
+            self.store.raise_warning(WARN_OLD_SESSION_FORMAT, &message);
+        }
+        rewrite_fault(RewriteStep::Reopen)?;
+        let file = dir.open_existing(name)?;
+        self.writer = Some(Writer::new(dir, target, file, end));
+        Ok(())
+    }
+}
+
+/// Renames the old-format file `name` to the first free backup name
+/// (`<name>.v1.bak`, then `<name>.v1-2.bak` and so on), without replacing.
+fn keep_old(dir: &OutDir, name: &str) -> io::Result<String> {
+    for n in 1..=100_u32 {
+        let backup = if n == 1 {
+            format!("{name}.v1.bak")
+        } else {
+            format!("{name}.v1-{n}.bak")
+        };
+        rewrite_fault(RewriteStep::KeepOld)?;
+        match dir.rename_noreplace(name, &backup) {
+            Ok(()) => return Ok(backup),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free name to keep the session file of the earlier format",
+    ))
+}
+
+/// The steps of [`Session::rewrite_old_format`] at which tests inject a
+/// failure (each before the operation it names).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum RewriteStep {
+    CreateTemp,
+    WriteCopy,
+    KeepOld,
+    NameNew,
+    RestoreOld,
+    Reopen,
+}
+
+/// How an injected failure behaves.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FaultMode {
+    /// The operation fails with an error; the error handling runs.
+    Error,
+    /// The process stops before the operation: nothing after it runs (a
+    /// panic with [`SimulatedCrash`] that the test catches).
+    Crash,
+}
+
+#[cfg(test)]
+struct SimulatedCrash;
+
+#[cfg(test)]
+thread_local! {
+    static REWRITE_FAULTS: std::cell::RefCell<Vec<(RewriteStep, FaultMode)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+fn rewrite_fault(step: RewriteStep) -> io::Result<()> {
+    let mode = REWRITE_FAULTS.with(|f| {
+        let mut faults = f.borrow_mut();
+        let i = faults.iter().position(|&(s, _)| s == step)?;
+        Some(faults.remove(i).1)
+    });
+    match mode {
+        None => Ok(()),
+        Some(FaultMode::Error) => Err(io::Error::other(format!("injected failure at {step:?}"))),
+        Some(FaultMode::Crash) => std::panic::panic_any(SimulatedCrash),
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn rewrite_fault(_: RewriteStep) -> io::Result<()> {
+    Ok(())
 }
 
 /// Payload size limit, re-exported for documentation.

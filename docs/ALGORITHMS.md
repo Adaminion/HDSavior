@@ -136,8 +136,24 @@ everything up to its last valid `CHECKPOINT`; later bytes are ignored and
 truncated on the next append. Payloads use one pure-Rust binary serde codec,
 fixed per format version. A file with a newer format version is refused
 (`unsupported`). Older versions are read; such a file is rewritten in the
-current format (a compacted copy, as `session_save` does) before anything is
-appended to it, and its session carries the warning `old_session_format`. In
+current format before anything is appended to it, and its session carries
+the warning `old_session_format`. The rewrite never replaces or deletes the
+old file (S6) and is crash safe: (1) a compacted copy is written to a new
+temporary file `~hds-session-<n>.tmp` next to it and synced; (2) the old
+file is renamed, without replacing, to `<name>.v1.bak` (`<name>.v1-<n>.bak`,
+n = 2 to 100, when that name is taken); (3) the copy is renamed, without
+replacing, to `<name>`. At every moment a complete session file exists: the
+old one under `<name>` or the backup name, and after (1) also the copy. A
+crash between (2) and (3) leaves `<name>` missing, the old file under the
+backup name and the complete copy under its temporary name; either can be
+loaded. If (1) or (2) fails, the copy is removed and the old file stays as
+it was. If (3) fails, the old file is renamed back and the copy removed; if
+that also fails, the session continues in the copy under its temporary name
+and the error names both files. The session file path stays `<name>`
+(`scan_done.session_path` does not change); the message of
+`old_session_format` names the backup file, which the engine never deletes.
+A failed rewrite is reported (`io_error` or `no_space`); the engine does not
+fall back to replacing the file with a fresh copy. In
 version-1 files the record time falls back to the `$SI` MFT-change time and the
 entry time to the entry's MFT-change time.
 

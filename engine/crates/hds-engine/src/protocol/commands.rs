@@ -483,8 +483,9 @@ pub struct Ancestor {
 /// `node_info.record`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RecordInfo {
-    /// MFT record number.
-    pub number: u64,
+    /// MFT record number; `null` for a record whose number is not known
+    /// (an unnumbered stray record, ALGORITHMS D1).
+    pub number: Option<u64>,
     /// Sequence number.
     pub seq: u32,
     /// Absolute byte offset of the record on the source.

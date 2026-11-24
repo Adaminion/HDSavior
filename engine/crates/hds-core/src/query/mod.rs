@@ -252,9 +252,9 @@ pub struct SearchRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordDetails {
     /// Record number: the effective one of D1 (the header's, else the
-    /// positional one); 4294967295 (`u32::MAX`) when neither is known
-    /// (an unnumbered stray record).
-    pub number: u64,
+    /// positional one); `None` when neither is known (an unnumbered stray
+    /// record).
+    pub number: Option<u64>,
     /// Sequence number.
     pub seq: u32,
     /// Absolute offset of the base record.
@@ -988,7 +988,7 @@ impl Catalog {
             let exts = self.tree.exts_of(id.0);
             let r = store.record(base);
             record = r.map(|r| RecordDetails {
-                number: u64::from(self.tree.record_number(store, base).unwrap_or(u32::MAX)),
+                number: self.tree.record_number(store, base).map(u64::from),
                 seq: u32::from(r.sequence()),
                 disk_offset: r.disk_offset(),
                 extension_records: u32::try_from(exts.len()).unwrap_or(u32::MAX),

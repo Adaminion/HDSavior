@@ -510,6 +510,12 @@ impl Work {
         match self.session.attach_file(path, &guard) {
             Ok(()) => {}
             Err(e @ SessionError::DestinationRefused(_)) => return Err(convert::session_error(&e)),
+            // The file is this session's own but writing failed (for
+            // example the rewrite of an old-format file, ALGORITHMS B2):
+            // report it rather than replace the file with a new copy.
+            Err(SessionError::Io(e)) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(convert::session_error(&SessionError::Io(e)))
+            }
             Err(_) => {
                 self.session
                     .save_as(path, &guard)
