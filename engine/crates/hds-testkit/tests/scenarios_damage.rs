@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{assert_reads_back, build, expected_path, intact_records, must, must_not, read_back, read_structure, shown, MIB, SEEDS};
+use common::{assert_reads_back, build, expected_path, intact_records, must, must_not, read_back, shown, MIB, SEEDS};
 use hds_testkit::disk::Built;
 use hds_testkit::facts::{ArtifactState, RecordFact, RecordRole};
 use hds_testkit::hash::sha256_hex;
@@ -517,7 +517,7 @@ fn what_names_a_lost_folder() {
             if i == 25 {
                 // two Win32 names survive: the stale copy's and the newer one
                 assert_eq!(win32.len(), 2);
-                let (stale, live): (Vec<_>, Vec<_>) = win32.iter().partition(|e| e.3);
+                let (stale, live): (Vec<&&(u64, u8, &str, bool, u64)>, Vec<_>) = win32.iter().partition(|e| e.3);
                 assert_eq!((stale[0].2, live[0].2), ("Archive 25", "Renamed 25"));
                 assert!(stale[0].4 < live[0].4, "the copy has the lower LSN");
                 assert_eq!(top, "Renamed 25");
