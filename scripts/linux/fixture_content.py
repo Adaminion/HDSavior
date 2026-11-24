@@ -709,16 +709,32 @@ def make_samples(out, log=print):
         ("track.ogg", "ogg", "audio", "Ogg Vorbis (not a type HDSavior carves)",
          audio_in + ["-c:a", "libvorbis", "-b:a", "64k", "-ac", "2"] + exact_a + ["-f", "ogg"], "libvorbis"),
     ]
+    # The fixtures cannot do without these; any other sample that this ffmpeg
+    # build cannot produce is skipped and reported in the manifests.
+    required = {"clip.mp4", "clip.mov", "clip.avi", "sound.wav", "song.mp3"}
     for name, ctype, group, note, args, needs in jobs:
         if needs and needs not in enc:
+            if name in required:
+                raise RuntimeError("ffmpeg has no %s encoder, which the sample %s needs" % (needs, name))
             skipped.append("%s: ffmpeg has no %s encoder" % (name, needs))
             continue
         path = os.path.join(out, name)
-        subprocess.run(base + args + [path], check=True)
-        probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=format_name",
-                                "-of", "csv=p=0", path], stdout=subprocess.PIPE, universal_newlines=True)
-        if probe.returncode != 0 or not probe.stdout.strip():
-            raise RuntimeError("ffprobe rejects the sample %s" % name)
+        run = subprocess.run(base + args + [path], stderr=subprocess.PIPE, universal_newlines=True)
+        ok = run.returncode == 0
+        if ok:
+            probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=format_name",
+                                    "-of", "csv=p=0", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   universal_newlines=True)
+            ok = probe.returncode == 0 and bool(probe.stdout.strip())
+            run = probe
+        if not ok:
+            reason = (run.stderr or "").strip().split("\n")[-1][:200]
+            if name in required:
+                raise RuntimeError("could not make the sample %s: %s" % (name, reason))
+            skipped.append("%s: ffmpeg failed: %s" % (name, reason))
+            if os.path.exists(path):
+                os.remove(path)
+            continue
         made.append((name, ctype, group, note))
 
     # ---- documents and archives -----------------------------------------

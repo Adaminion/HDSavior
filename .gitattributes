@@ -1,0 +1,7 @@
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.rs text eol=lf
+*.dart text eol=lf
+# Byte-exact test samples must never be newline-converted.
+engine/crates/*/tests/data/** -text

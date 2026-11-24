@@ -53,7 +53,11 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
                 if images == 0 {
                     return None;
                 }
-                return Some(Measured { len: pos + 1, confidence: Confidence::Exact, ext: "gif" });
+                return Some(Measured {
+                    len: pos + 1,
+                    confidence: Confidence::Exact,
+                    ext: "gif",
+                });
             }
             _ => return None,
         }

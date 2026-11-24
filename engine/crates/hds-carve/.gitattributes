@@ -1,0 +1,5 @@
+# The sample files are compared byte for byte (their length is the test).
+# Several of them are mostly text (PDF, small archives): keep Git from
+# converting line endings in any of them, on any platform.
+tests/data/** -text
+tests/data/generate.sh text eol=lf

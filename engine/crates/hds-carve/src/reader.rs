@@ -60,16 +60,51 @@ impl<T: ReadAt + ?Sized> ReadAt for Box<T> {
     }
 }
 
-/// Refill size while a walker hops from header to header.
-const HOP_BLOCK: usize = 16 * 1024;
-/// Refill size while a walker has to look at every byte.
-const SCAN_BLOCK: usize = 1024 * 1024;
-/// Refills start on a multiple of this, so that a reader backed by a raw
-/// device (whose candidates start on cluster boundaries) is asked for whole,
-/// aligned blocks.
-const ALIGN: u64 = 4096;
 /// Largest single contiguous range a walker may ask for in one piece.
 const MAX_REQUEST: usize = 4 * 1024 * 1024;
+
+/// How a [`Src`] sizes and places its reads.
+#[derive(Clone, Copy)]
+pub(crate) struct Tuning {
+    /// Refills start on a multiple of this, so that a reader backed by a raw
+    /// device (whose candidates start on cluster boundaries) is asked for
+    /// whole, aligned blocks.
+    align: u64,
+    /// Refill size while a walker hops from header to header.
+    hop_block: usize,
+    /// First refill size while a walker has to look at every byte. Most
+    /// candidates are small or turn out not to be files at all: reading a
+    /// megabyte for each would double the time a hard disk spends on them.
+    scan_first: usize,
+    /// Refill size a sequential scan grows to, doubling with every refill.
+    scan_max: usize,
+    /// Shifts the refill grid; only tests use anything but 0.
+    phase: u64,
+}
+
+impl Tuning {
+    pub(crate) const DEFAULT: Tuning = Tuning {
+        align: 4096,
+        hop_block: 16 * 1024,
+        scan_first: 64 * 1024,
+        scan_max: 1024 * 1024,
+        phase: 0,
+    };
+
+    /// Tiny blocks on a shifted grid: with `block` bytes per refill and
+    /// `phase` running over `0..block`, every byte position of a file is
+    /// the first byte of a refill once.
+    #[cfg(test)]
+    pub(crate) fn tiny(block: usize, phase: u64) -> Tuning {
+        Tuning {
+            align: block as u64,
+            hop_block: block,
+            scan_first: block,
+            scan_max: block,
+            phase,
+        }
+    }
+}
 
 /// A window onto a [`ReadAt`] that
 ///
@@ -88,24 +123,47 @@ pub(crate) struct Src<'a> {
     buf: Vec<u8>,
     /// Offset of `buf[0]`.
     start: u64,
+    tuning: Tuning,
+    /// Size of the next refill.
     block: usize,
+    /// Sequential scan (as opposed to hopping between headers).
+    scanning: bool,
     bytes_left: u64,
     reads_left: u64,
-    failed: bool,
+    failure: Option<Failure>,
+}
+
+/// Why a source went dead.
+pub(crate) enum Failure {
+    /// A [`Limits`] budget was exhausted.
+    Limit,
+    /// The underlying reader reported an error.
+    Io(io::Error),
 }
 
 impl<'a> Src<'a> {
     pub(crate) fn new(inner: &'a dyn ReadAt, limit: u64, limits: &Limits) -> Self {
+        Self::tuned(inner, limit, limits, Tuning::DEFAULT)
+    }
+
+    pub(crate) fn tuned(
+        inner: &'a dyn ReadAt,
+        limit: u64,
+        limits: &Limits,
+        tuning: Tuning,
+    ) -> Self {
         Src {
             inner,
             limit,
             end: limit,
             buf: Vec::new(),
             start: 0,
-            block: HOP_BLOCK,
+            tuning,
+            block: tuning.hop_block,
+            scanning: false,
             bytes_left: limits.max_read_bytes,
             reads_left: limits.max_reads,
-            failed: false,
+            failure: None,
         }
     }
 
@@ -117,47 +175,67 @@ impl<'a> Src<'a> {
     /// True once a read failed or the work budget ran out. Results computed
     /// after that point must not be trusted.
     pub(crate) fn failed(&self) -> bool {
-        self.failed
+        self.failure.is_some()
     }
 
-    /// Switches to large sequential refills (for walkers that scan payload).
+    /// Takes the reason the source went dead, if it did.
+    pub(crate) fn take_failure(&mut self) -> Option<Failure> {
+        self.failure.take()
+    }
+
+    fn fail(&mut self, cause: Failure) {
+        // the first cause is the one that matters
+        self.failure.get_or_insert(cause);
+    }
+
+    /// Switches to sequential refills that grow as the scan goes on (for
+    /// walkers that look at every byte).
     pub(crate) fn scan_mode(&mut self) {
-        self.block = SCAN_BLOCK;
+        self.scanning = true;
+        self.block = self.tuning.scan_first;
     }
 
     /// Switches back to small refills (for walkers that hop between headers).
     pub(crate) fn hop_mode(&mut self) {
-        self.block = HOP_BLOCK;
+        self.scanning = false;
+        self.block = self.tuning.hop_block;
     }
 
-    fn read_into(&mut self, offset: u64, out: &mut [u8]) -> usize {
-        if self.failed {
-            return 0;
-        }
-        if self.reads_left == 0 || (out.len() as u64) > self.bytes_left {
-            self.failed = true;
-            return 0;
+    /// One budgeted read. Fails when the source reports an I/O error or the
+    /// budget is exhausted; does not mark the source dead (callers decide).
+    fn try_read(&mut self, offset: u64, out: &mut [u8]) -> Result<usize, Failure> {
+        if self.failed() || self.reads_left == 0 || (out.len() as u64) > self.bytes_left {
+            return Err(Failure::Limit);
         }
         self.reads_left -= 1;
         let mut got = 0usize;
         while got < out.len() {
-            let Some(rest) = out.get_mut(got..) else { break };
+            let Some(rest) = out.get_mut(got..) else {
+                break;
+            };
             match self.inner.read_at(offset.saturating_add(got as u64), rest) {
                 Ok(0) => break,
                 // A reader that claims more than it was asked for is broken;
                 // never trust the count beyond the buffer.
                 Ok(n) => got = got.saturating_add(n).min(out.len()),
-                Err(_) => {
-                    self.failed = true;
-                    return 0;
-                }
+                Err(e) => return Err(Failure::Io(e)),
             }
         }
         self.bytes_left = self.bytes_left.saturating_sub(got as u64);
         if got < out.len() {
             self.end = self.end.min(offset.saturating_add(got as u64));
         }
-        got
+        Ok(got)
+    }
+
+    fn read_into(&mut self, offset: u64, out: &mut [u8]) -> usize {
+        match self.try_read(offset, out) {
+            Ok(n) => n,
+            Err(cause) => {
+                self.fail(cause);
+                0
+            }
+        }
     }
 
     /// Buffered bytes starting at `off`: at least `want` of them unless the
@@ -170,27 +248,58 @@ impl<'a> Src<'a> {
             let have = self.buf.len() - rel;
             // Enough is buffered, or the buffer already reaches the end of
             // the data: nothing more to fetch.
-            if have >= want || self.start + buffered >= self.end {
+            if have >= want || self.start.saturating_add(buffered) >= self.end {
                 return self.buf.get(rel..).unwrap_or(&[]);
             }
         }
-        if self.failed || off >= self.end {
+        if self.failed() || off >= self.end {
             return &[];
         }
-        let start = off - off % ALIGN;
-        let lead = (off - start) as usize;
+        // the refill starts on the grid, at or before `off`
+        let align = self.tuning.align.max(1);
+        let mut lead = (off.saturating_add(self.tuning.phase) % align).min(off) as usize;
+        let mut start = off - lead as u64;
         let need = lead.saturating_add(want);
-        let mut size = self.block.max(need);
-        size = size.saturating_add(ALIGN as usize - 1) / ALIGN as usize * ALIGN as usize;
-        let size = (size as u64).min(self.end - start) as usize;
+        let size = (self.block.max(need) as u64)
+            .div_ceil(align)
+            .saturating_mul(align);
+        let size = size.min(self.end - start) as usize;
 
         let mut buf = std::mem::take(&mut self.buf);
         buf.clear();
         buf.resize(size, 0);
-        let got = self.read_into(start, &mut buf);
+        let got = match self.try_read(start, &mut buf) {
+            Ok(n) => n,
+            // The read-ahead ran into an unreadable sector. A walker that
+            // hops between headers may not need it: ask again for exactly
+            // the bytes requested. (A sequential scan needs every byte, and
+            // retrying sector by sector through a bad area would take for
+            // ever: there the error is final.)
+            Err(Failure::Io(_)) if !self.scanning && (lead != 0 || size > want) => {
+                let exact = (want as u64).min(self.end - off) as usize;
+                buf.clear();
+                buf.resize(exact, 0);
+                start = off;
+                lead = 0;
+                match self.try_read(off, &mut buf) {
+                    Ok(n) => n,
+                    Err(cause) => {
+                        self.fail(cause);
+                        0
+                    }
+                }
+            }
+            Err(cause) => {
+                self.fail(cause);
+                0
+            }
+        };
         buf.truncate(got);
         self.buf = buf;
         self.start = start;
+        if self.scanning {
+            self.block = self.block.saturating_mul(2).min(self.tuning.scan_max);
+        }
         self.buf.get(lead..).unwrap_or(&[])
     }
 
@@ -300,10 +409,6 @@ impl<'a> Src<'a> {
         self.arr(off).map(u32::from_le_bytes)
     }
 
-    pub(crate) fn le64(&mut self, off: u64) -> Option<u64> {
-        self.arr(off).map(u64::from_le_bytes)
-    }
-
     /// True when the byte at `off` exists (is inside the data and `max_len`).
     pub(crate) fn has_byte(&mut self, off: u64) -> bool {
         self.side::<1>(off).is_some()
@@ -378,7 +483,11 @@ mod tests {
     #[test]
     fn sequential_windows_cover_everything_once() {
         let d = pattern(3 * 1024 * 1024 + 123);
-        let c = Counting { data: &d, reads: Cell::new(0), bytes: Cell::new(0) };
+        let c = Counting {
+            data: &d,
+            reads: Cell::new(0),
+            bytes: Cell::new(0),
+        };
         let mut s = Src::new(&c, u64::MAX, &Limits::default());
         s.scan_mode();
         let mut pos = 0u64;
@@ -398,9 +507,71 @@ mod tests {
     }
 
     #[test]
+    fn scan_blocks_start_small_and_grow() {
+        use std::cell::RefCell;
+        struct Recording<'a>(&'a [u8], RefCell<Vec<(u64, usize)>>);
+        impl ReadAt for Recording<'_> {
+            fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+                self.1.borrow_mut().push((offset, buf.len()));
+                self.0.read_at(offset, buf)
+            }
+        }
+        let d = pattern(5 << 20);
+        let r = Recording(&d, RefCell::new(Vec::new()));
+        // a header look in hop mode, then a scan from a position inside it
+        let mut s = Src::new(&r, u64::MAX, &Limits::default());
+        assert!(s.bytes(0, 30).is_some());
+        s.scan_mode();
+        let mut pos = 100u64;
+        loop {
+            let n = s.window(pos).len() as u64;
+            if n == 0 {
+                break;
+            }
+            pos += n;
+        }
+        let k = 1024;
+        assert_eq!(
+            r.1.borrow()[..7],
+            [
+                (0, 16 * k),
+                (16 * k as u64, 64 * k),
+                (80 * k as u64, 128 * k),
+                (208 * k as u64, 256 * k),
+                (464 * k as u64, 512 * k),
+                (976 * k as u64, 1024 * k),
+                (2000 * k as u64, 1024 * k),
+            ]
+        );
+        // every read is a whole number of 4 KiB blocks at a 4 KiB offset
+        assert!(r
+            .1
+            .borrow()
+            .iter()
+            .all(|&(o, n)| o % 4096 == 0 && n % 4096 == 0));
+
+        // a scan from the very start
+        let r = Recording(&d, RefCell::new(Vec::new()));
+        let mut s = Src::new(&r, u64::MAX, &Limits::default());
+        s.scan_mode();
+        let mut pos = 0u64;
+        while pos < 3 << 20 {
+            pos += s.window(pos).len() as u64;
+        }
+        let starts: Vec<u64> = r.1.borrow().iter().map(|&(o, _)| o).collect();
+        assert_eq!(
+            starts[..6],
+            [0, 65_536, 196_608, 458_752, 983_040, 2_031_616]
+        );
+    }
+
+    #[test]
     fn budget_exhaustion_is_sticky() {
         let d = pattern(1 << 20);
-        let lim = Limits { max_read_bytes: 40_000, max_reads: 100 };
+        let lim = Limits {
+            max_read_bytes: 40_000,
+            max_reads: 100,
+        };
         let mut s = Src::new(&d, u64::MAX, &lim);
         assert!(s.bytes(0, 8).is_some());
         assert!(s.bytes(200_000, 8).is_some());
@@ -409,7 +580,10 @@ mod tests {
         assert!(s.bytes(0, 8).is_none(), "a dead source stays dead");
         assert!(s.side::<4>(900_000).is_none());
 
-        let lim = Limits { max_read_bytes: u64::MAX, max_reads: 2 };
+        let lim = Limits {
+            max_read_bytes: u64::MAX,
+            max_reads: 2,
+        };
         let mut s = Src::new(&d, u64::MAX, &lim);
         assert!(s.bytes(0, 8).is_some());
         assert!(s.side::<4>(500_000).is_some());
@@ -427,6 +601,32 @@ mod tests {
         }
         let mut s = Src::new(&Bad, u64::MAX, &Limits::default());
         assert!(s.bytes(0, 4).is_none());
+        assert!(s.failed());
+    }
+
+    #[test]
+    fn hop_reads_survive_a_bad_sector_in_the_read_ahead() {
+        /// Bytes 4096.. are unreadable.
+        struct Partly(Vec<u8>);
+        impl ReadAt for Partly {
+            fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+                if offset + buf.len() as u64 > 4096 {
+                    return Err(io::Error::other("bad sector"));
+                }
+                self.0.read_at(offset, buf)
+            }
+        }
+        let d = Partly(pattern(100_000));
+        let mut s = Src::new(&d, u64::MAX, &Limits::default());
+        // the 16 KiB read-ahead fails, the 8 bytes asked for do not
+        assert_eq!(s.bytes(100, 8).unwrap(), &d.0[100..108]);
+        assert!(!s.failed());
+        assert!(s.bytes(4090, 8).is_none());
+        assert!(s.failed());
+        // a sequential scan does not retry
+        let mut s = Src::new(&d, u64::MAX, &Limits::default());
+        s.scan_mode();
+        assert!(s.window(0).is_empty());
         assert!(s.failed());
     }
 

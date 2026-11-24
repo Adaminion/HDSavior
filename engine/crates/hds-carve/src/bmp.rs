@@ -27,6 +27,13 @@ pub(crate) struct Header {
     image_size: u64,
 }
 
+impl Header {
+    /// The file-size field is either unset or covers at least the headers.
+    pub(crate) fn plausible_size(&self) -> bool {
+        self.file_size == 0 || self.file_size > self.data_offset
+    }
+}
+
 /// Parses and sanity-checks a BMP header from the first bytes of a file.
 /// Needs 30 bytes for a core header and 38 for the others.
 pub(crate) fn parse_header(h: &[u8]) -> Option<Header> {
@@ -41,7 +48,14 @@ pub(crate) fn parse_header(h: &[u8]) -> Option<Header> {
     let data_offset = le32(h, 10)? as u64;
     let dib_size = le32(h, 14)?;
     let (width, height, planes, bpp, compression, image_size) = match dib_size {
-        12 => (le16(h, 18)? as u64, le16(h, 20)? as u64, le16(h, 22)?, le16(h, 24)?, 0, 0),
+        12 => (
+            le16(h, 18)? as u64,
+            le16(h, 20)? as u64,
+            le16(h, 22)?,
+            le16(h, 24)?,
+            0,
+            0,
+        ),
         40 | 52 | 56 | 64 | 108 | 124 => {
             let w = le32(h, 18)? as i32;
             let hgt = le32(h, 22)? as i32;
@@ -49,7 +63,14 @@ pub(crate) fn parse_header(h: &[u8]) -> Option<Header> {
             if w <= 0 || hgt == 0 || hgt == i32::MIN {
                 return None;
             }
-            (w as u64, hgt.unsigned_abs() as u64, le16(h, 26)?, le16(h, 28)?, le32(h, 30)?, le32(h, 34)? as u64)
+            (
+                w as u64,
+                hgt.unsigned_abs() as u64,
+                le16(h, 26)?,
+                le16(h, 28)?,
+                le32(h, 30)?,
+                le32(h, 34)? as u64,
+            )
         }
         _ => return None,
     };
@@ -66,15 +87,32 @@ pub(crate) fn parse_header(h: &[u8]) -> Option<Header> {
     if !bpp_ok || data_offset < 14 + dib_size as u64 {
         return None;
     }
-    Some(Header { file_size, data_offset, dib_size, width, height, bpp, compression, image_size })
+    Some(Header {
+        file_size,
+        data_offset,
+        dib_size,
+        width,
+        height,
+        bpp,
+        compression,
+        image_size,
+    })
 }
 
 pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
     let (head, n) = src.side_peek::<142>(0);
     let head = head.get(..n)?;
     let h = parse_header(head)?;
-    let exact = |len| Measured { len, confidence: Confidence::Exact, ext: "bmp" };
-    let probable = |len| Measured { len, confidence: Confidence::Probable, ext: "bmp" };
+    let exact = |len| Measured {
+        len,
+        confidence: Confidence::Exact,
+        ext: "bmp",
+    };
+    let probable = |len| Measured {
+        len,
+        confidence: Confidence::Probable,
+        ext: "bmp",
+    };
 
     if matches!(h.compression, 1 | 2) {
         // RLE: only the header can say how long the data is

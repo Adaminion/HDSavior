@@ -90,9 +90,10 @@ STREAM {"name" ("" for the unnamed stream), "non_resident", "flags",
         The three sizes are only meaningful in the piece with lowest_vcn 0.
 
 ATTR  {"type", "type_name", "offset", "length", "non_resident", "name",
-       "flags", "attr_id", then either the resident fields ("value_offset",
-       "value_length", "resident_flags") or the non-resident fields listed
-       under STREAM, plus one decoded member depending on the type:
+       "flags", "attr_id", then either the resident fields ("value_offset"
+       relative to the record, "value_length", "resident_flags") or the
+       non-resident fields listed under STREAM and "mapping_pairs_offset",
+       plus one decoded member depending on the type:
          0x10 "standard_information": {"created", "modified", "mft_changed",
               "accessed", "file_attributes", and when the value has the 72-byte
               NTFS 3.x form: "owner_id", "security_id", "quota_charged", "usn"}
@@ -125,13 +126,21 @@ ENTRY {"offset" (within the block or record), "length", "key_length",
 Structure reference and verification
 ------------------------------------
 Field offsets follow /usr/include/ntfs-3g/layout.h (package ntfs-3g-dev,
-libntfs-3g 2022.10.3).  Every field marked [v] in the comments below was
-compared with "ntfsinfo -v" on volumes written by mkntfs and ntfs-3g
-(scripts/linux/make-fixtures.sh repeats that comparison on every run for a
-sample of records, and compares every file's content, read through the
-runlists decoded here, with the SHA-256 obtained through the mounted driver).
-Fields marked [l] are decoded as layout.h describes them but have no
-counterpart in ntfsinfo's output.
+libntfs-3g 2022.10.3).  The comments below say how each field was checked
+against real bytes written by mkntfs and ntfs-3g:
+
+  [v]  compared with the output of "ntfsinfo -v" / "ntfsinfo -m".
+       make-fixtures.sh repeats that comparison on every run for about a
+       hundred records per fixture (every header and attribute field, all
+       runlists, all names, index roots and INDX blocks).
+  [x]  has no counterpart in ntfsinfo's output but is cross-checked by
+       make-fixtures.sh against other data on every fixture: sequence numbers
+       in references against the referenced record's own header, index
+       entries against the driver's directory listing, timestamps to the
+       100 ns tick against the values set through the driver, file content
+       read through the decoded runlists against the SHA-256 obtained through
+       the mounted driver (every live file of every fixture).
+  [l]  decoded as layout.h describes; nothing to compare it with.
 """
 
 import argparse
@@ -241,7 +250,7 @@ def parse_boot_sector(b, offset=None):
     if not (is_pow2(spc) and (spc_raw <= 0x80 or 0xF0 <= spc_raw <= 0xFD)):
         errors.append("sectors_per_cluster raw value 0x%02x is not valid" % spc_raw)
     cluster = bps * spc
-    total = s64(b, 0x28)                  # [v] total sectors of the volume
+    total = s64(b, 0x28)                  # [v] "Volume Size in Clusters"; [x] partition sectors - 1
     mft_lcn = s64(b, 0x30)                # [v] "LCN of Data Attribute for FILE_MFT"
     mirr_lcn = s64(b, 0x38)               # [v] "LCN of Data Attribute for File_MFTMirr"
     cpm = s8(b, 0x40)                     # [v] via "MFT Record Size"
@@ -270,9 +279,9 @@ def parse_boot_sector(b, offset=None):
         "sectors_per_cluster_raw": spc_raw,
         "sectors_per_cluster": spc,
         "cluster_size": cluster,
-        "sectors_per_track": u16(b, 0x18),     # [l]
-        "heads": u16(b, 0x1A),                 # [l]
-        "hidden_sectors": u32(b, 0x1C),        # [l] set by mkntfs -p
+        "sectors_per_track": u16(b, 0x18),     # [x] equals mkntfs -S
+        "heads": u16(b, 0x1A),                 # [x] equals mkntfs -H
+        "hidden_sectors": u32(b, 0x1C),        # [x] equals mkntfs -p (the partition's start sector)
         "media_type": b[0x15],                 # [l] 0xf8
         "total_sectors": total,
         "volume_size": total * bps if total > 0 else 0,
@@ -282,7 +291,7 @@ def parse_boot_sector(b, offset=None):
         "mft_record_size": rec_size,
         "clusters_per_index_block_raw": cpi,
         "index_block_size": idx_size,
-        "serial": "%016X" % u64(b, 0x48),      # [l]
+        "serial": "%016X" % u64(b, 0x48),      # [v] the UUID blkid reports
     }
 
 
@@ -382,8 +391,8 @@ def parse_file_name_value(v):
         "namespace": namespace,                              # [v] "Namespace"
         "namespace_name": NAMESPACE_NAMES[namespace],
         "parent_record": parent,                             # [v] "Parent directory"
-        "parent_sequence": parent_seq,                       # [l]
-        "created": s64(v, 0x08),                             # [v] times, to the second
+        "parent_sequence": parent_seq,                       # [x] equals the parent record's sequence
+        "created": s64(v, 0x08),                             # [v] the four times, to the second
         "modified": s64(v, 0x10),
         "mft_changed": s64(v, 0x18),
         "accessed": s64(v, 0x20),
@@ -428,7 +437,7 @@ def parse_index_entries(b, start, end):
         if not flags & INDEX_ENTRY_END:
             if 16 + key_len > length:
                 return entries, "index entry at +%d: key does not fit" % pos
-            rec, seq = split_mref(u64(b, pos))               # [v] "MFT Ref" via names
+            rec, seq = split_mref(u64(b, pos))               # [v] "FILE record number"; [x] sequence
             key = bytes(b[pos + 16:pos + 16 + key_len])
             fn = parse_file_name_value(key)
             # A real $FILE_NAME key is exactly as long as its name needs.
@@ -458,10 +467,10 @@ def parse_attribute_list_value(v):
             "type": atype,
             "type_name": ATTR_NAMES.get(atype, "0x%x" % atype),
             "name": utf16(bytes(v[pos + name_ofs:pos + name_ofs + 2 * name_len])),
-            "lowest_vcn": s64(v, pos + 8),       # [v] against the extents' own headers
-            "record": rec,                       # [v] holder = extension record number
-            "sequence": seq,
-            "attr_id": u16(v, pos + 24),
+            "lowest_vcn": s64(v, pos + 8),       # [v] "Starting VCN"
+            "record": rec,                       # [v] "MFT reference"
+            "sequence": seq,                     # [x] equals the holder record's sequence
+            "attr_id": u16(v, pos + 24),         # [v] "Instance"
         })
         pos += length
     return out
@@ -568,10 +577,10 @@ def decode_resident_value(a, atype, value, value_pos, rec, errors):
     if atype == 0x10:                                     # $STANDARD_INFORMATION
         if len(value) >= 36:
             si = {
-                "created": s64(value, 0),                 # [v] "File Creation Time"
-                "modified": s64(value, 8),                # [v] "File Altered Time"
+                "created": s64(value, 0),                 # [v] "File Creation Time"   [x] to the tick
+                "modified": s64(value, 8),                # [v] "File Altered Time"    [x] to the tick
                 "mft_changed": s64(value, 16),            # [v] "MFT Changed Time"
-                "accessed": s64(value, 24),               # [v] "Last Accessed Time"
+                "accessed": s64(value, 24),               # [v] "Last Accessed Time"   [x] to the tick
                 "file_attributes": u32(value, 32),        # [v] "File attributes"
             }
             # ntfs-3g writes the 48-byte NTFS 1.2 form for user files; Windows
@@ -685,7 +694,7 @@ def parse_file_record(raw, offset=None):
         "data": [],
         "attributes": [],
     }
-    base, base_seq = split_mref(u64(raw, 0x20))   # [v] base record of extension records
+    base, base_seq = split_mref(u64(raw, 0x20))   # [x] base record / sequence of extension records
     rec["base_record"], rec["base_sequence"] = base, base_seq
     errors = rec["errors"]
     if not is_pow2(size) or not 1024 <= size <= 65536:
@@ -788,7 +797,7 @@ def parse_index_block(raw, offset=None):
         "fixup_ok": False,
         "fixup_mismatch_sectors": [],
         "lsn": u64(raw, 8),
-        "vcn": s64(raw, 0x10),            # [v] against the directory's runlist position
+        "vcn": s64(raw, 0x10),            # [v] "Node VCN"; [x] against the block's position
         "entries_offset": entries_ofs,
         "index_length": index_len,
         "allocated_size": alloc,

@@ -71,7 +71,11 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
                 if scans == 0 {
                     return None;
                 }
-                return Some(Measured { len: pos + 2, confidence: Confidence::Exact, ext: "jpg" });
+                return Some(Measured {
+                    len: pos + 2,
+                    confidence: Confidence::Exact,
+                    ext: "jpg",
+                });
             }
             // stuffed zero, TEM, a restart marker outside a scan, a second SOI
             0x00 | 0x01 | 0xD0..=0xD8 => return None,
@@ -131,7 +135,11 @@ fn parse_sof(b: &[u8], code: u8) -> Option<Frame> {
         return None;
     }
     let lossless = matches!(code, 0xC3 | 0xC7 | 0xCB | 0xCF);
-    let precision_ok = if lossless { (2..=16).contains(&precision) } else { precision == 8 || precision == 12 };
+    let precision_ok = if lossless {
+        (2..=16).contains(&precision)
+    } else {
+        precision == 8 || precision == 12
+    };
     if !precision_ok {
         return None;
     }

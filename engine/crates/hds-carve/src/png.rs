@@ -72,7 +72,11 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
                 if len != 0 || !seen_idat {
                     return None;
                 }
-                return Some(Measured { len: end, confidence: Confidence::Exact, ext: "png" });
+                return Some(Measured {
+                    len: end,
+                    confidence: Confidence::Exact,
+                    ext: "png",
+                });
             }
             _ => {}
         }
@@ -86,7 +90,8 @@ pub(crate) fn ihdr_ok(d: &[u8]) -> bool {
     let (Some(w), Some(h)) = (be32(d, 0), be32(d, 4)) else {
         return false;
     };
-    let Some(&[depth, colour, compression, filter, interlace]) = d.get(8..13).and_then(|s| <&[u8; 5]>::try_from(s).ok())
+    let Some(&[depth, colour, compression, filter, interlace]) =
+        d.get(8..13).and_then(|s| <&[u8; 5]>::try_from(s).ok())
     else {
         return false;
     };

@@ -56,7 +56,10 @@ pub(crate) fn find_byte(hay: &[u8], needle: u8) -> Option<usize> {
         }
         skipped += 8;
     }
-    hay.get(skipped..)?.iter().position(|&b| b == needle).map(|p| p + skipped)
+    hay.get(skipped..)?
+        .iter()
+        .position(|&b| b == needle)
+        .map(|p| p + skipped)
 }
 
 /// Position of the first occurrence of `needle` (non-empty) in `hay`.
@@ -90,7 +93,11 @@ const fn crc_tables() -> [[u32; 256]; 8] {
         let mut c = i as u32;
         let mut k = 0;
         while k < 8 {
-            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
             k += 1;
         }
         t[0][i] = c;
@@ -165,14 +172,19 @@ mod tests {
     fn crc32_known_vectors() {
         assert_eq!(crc32(b""), 0);
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
-        assert_eq!(crc32(b"The quick brown fox jumps over the lazy dog"), 0x414F_A339);
+        assert_eq!(
+            crc32(b"The quick brown fox jumps over the lazy dog"),
+            0x414F_A339
+        );
         // PNG's IEND chunk: CRC over the type alone
         assert_eq!(crc32(b"IEND"), 0xAE42_6082);
     }
 
     #[test]
     fn crc32_split_points_agree() {
-        let data: Vec<u8> = (0..1000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+        let data: Vec<u8> = (0..1000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
         let whole = crc32(&data);
         for split in [0, 1, 3, 7, 8, 9, 15, 16, 17, 500, 999, 1000] {
             let mut c = Crc32::new();
@@ -185,7 +197,11 @@ mod tests {
         for &b in &data {
             r ^= b as u32;
             for _ in 0..8 {
-                r = if r & 1 != 0 { 0xEDB8_8320 ^ (r >> 1) } else { r >> 1 };
+                r = if r & 1 != 0 {
+                    0xEDB8_8320 ^ (r >> 1)
+                } else {
+                    r >> 1
+                };
             }
         }
         assert_eq!(!r, whole);

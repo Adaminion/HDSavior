@@ -41,8 +41,9 @@ const MAX_ENTRIES: usize = 4096;
 const MAX_STRIPS: u64 = 1 << 20;
 
 /// Signature at offset 8 of Panasonic RW2 / Leica RWL files.
-pub(crate) const RW2_SIGNATURE: [u8; 16] =
-    [0x88, 0xE7, 0x74, 0xD8, 0xF8, 0x25, 0x1D, 0x4D, 0x94, 0x7A, 0x6E, 0x77, 0x82, 0x2B, 0x5D, 0x6A];
+pub(crate) const RW2_SIGNATURE: [u8; 16] = [
+    0x88, 0xE7, 0x74, 0xD8, 0xF8, 0x25, 0x1D, 0x4D, 0x94, 0x7A, 0x6E, 0x77, 0x82, 0x2B, 0x5D, 0x6A,
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Flavour {
@@ -78,14 +79,20 @@ pub(crate) fn parse_header(h: &[u8]) -> Option<Header> {
         42 if little_endian && first_ifd >= 16 && h.get(8..12) == Some(b"CR\x02\0") => Flavour::Cr2,
         42 => Flavour::Classic,
         0x4F52 | 0x5352 => Flavour::Orf,
-        0x55 if little_endian && first_ifd >= 24 && h.get(8..24) == Some(&RW2_SIGNATURE[..]) => Flavour::Rw2,
+        0x55 if little_endian && first_ifd >= 24 && h.get(8..24) == Some(&RW2_SIGNATURE[..]) => {
+            Flavour::Rw2
+        }
         _ => return None,
     };
     // IFDs start on a word boundary, after the header
     if first_ifd < 8 || first_ifd & 1 != 0 {
         return None;
     }
-    Some(Header { little_endian, flavour, first_ifd })
+    Some(Header {
+        little_endian,
+        flavour,
+        first_ifd,
+    })
 }
 
 /// Size in bytes of one value of a TIFF field type.
@@ -129,17 +136,29 @@ struct Walker<'s, 'a> {
 impl Walker<'_, '_> {
     fn u16(&self, b: &[u8], off: usize) -> Option<u16> {
         let a = <[u8; 2]>::try_from(b.get(off..off.checked_add(2)?)?).ok()?;
-        Some(if self.le { u16::from_le_bytes(a) } else { u16::from_be_bytes(a) })
+        Some(if self.le {
+            u16::from_le_bytes(a)
+        } else {
+            u16::from_be_bytes(a)
+        })
     }
 
     fn u32(&self, b: &[u8], off: usize) -> Option<u32> {
         let a = <[u8; 4]>::try_from(b.get(off..off.checked_add(4)?)?).ok()?;
-        Some(if self.le { u32::from_le_bytes(a) } else { u32::from_be_bytes(a) })
+        Some(if self.le {
+            u32::from_le_bytes(a)
+        } else {
+            u32::from_be_bytes(a)
+        })
     }
 
     fn u64(&self, b: &[u8], off: usize) -> Option<u64> {
         let a = <[u8; 8]>::try_from(b.get(off..off.checked_add(8)?)?).ok()?;
-        Some(if self.le { u64::from_le_bytes(a) } else { u64::from_be_bytes(a) })
+        Some(if self.le {
+            u64::from_le_bytes(a)
+        } else {
+            u64::from_be_bytes(a)
+        })
     }
 
     /// One unsigned integer of a SHORT / LONG / IFD / LONG8 field.
@@ -176,8 +195,13 @@ impl Walker<'_, '_> {
     /// references data outside `max_len`.
     fn ifd(&mut self, off: u64, is_first: bool) -> Option<Ifd> {
         let limit = self.src.limit();
-        let n = self.src.arr::<2>(off).map(|a| if self.le { u16::from_le_bytes(a) } else { u16::from_be_bytes(a) })?
-            as usize;
+        let n = self.src.arr::<2>(off).map(|a| {
+            if self.le {
+                u16::from_le_bytes(a)
+            } else {
+                u16::from_be_bytes(a)
+            }
+        })? as usize;
         if n == 0 || n > MAX_ENTRIES {
             return None;
         }
@@ -187,7 +211,11 @@ impl Walker<'_, '_> {
             return None;
         }
         let raw = self.src.bytes(off, len)?.to_vec();
-        let mut ifd = Ifd { end: ifd_end, next: self.u32(&raw, 2 + 12 * n)? as u64, ..Ifd::default() };
+        let mut ifd = Ifd {
+            end: ifd_end,
+            next: self.u32(&raw, 2 + 12 * n)? as u64,
+            ..Ifd::default()
+        };
 
         let mut strip_offsets = None;
         let mut strip_counts = None;
@@ -210,7 +238,11 @@ impl Walker<'_, '_> {
             // count < 2^32 and size <= 8
             let total = count * size;
             let field = if total <= 4 {
-                Field { off: off + e as u64 + 8, typ, count }
+                Field {
+                    off: off + e as u64 + 8,
+                    typ,
+                    count,
+                }
             } else {
                 let value = self.u32(&raw, e + 8)? as u64;
                 let value_end = value.checked_add(total)?;
@@ -218,10 +250,18 @@ impl Walker<'_, '_> {
                     return None;
                 }
                 ifd.end = ifd.end.max(value_end);
-                Field { off: value, typ, count }
+                Field {
+                    off: value,
+                    typ,
+                    count,
+                }
             };
             // the first value, when the field is a single inline integer
-            let scalar = if count == 1 { self.int(&raw, e + 8, typ) } else { None };
+            let scalar = if count == 1 {
+                self.int(&raw, e + 8, typ)
+            } else {
+                None
+            };
             match tag {
                 0x0111 => strip_offsets = Some(field),
                 0x0117 => strip_counts = Some(field),
@@ -230,7 +270,9 @@ impl Walker<'_, '_> {
                 0x0201 => jpeg_offset = scalar,
                 0x0202 => jpeg_len = scalar,
                 // Compression: Nikon NEF, Sony ARW, Pentax PEF, Samsung SRW
-                0x0103 => ifd.raw_data |= matches!(scalar, Some(34713 | 32767 | 65535 | 32770 | 32772)),
+                0x0103 => {
+                    ifd.raw_data |= matches!(scalar, Some(34713 | 32767 | 65535 | 32770 | 32772))
+                }
                 // PhotometricInterpretation: colour filter array, linear raw
                 0x0106 => ifd.raw_data |= matches!(scalar, Some(32803 | 34892)),
                 0x014A => {
@@ -250,7 +292,9 @@ impl Walker<'_, '_> {
                 0x010F if is_first && typ == 2 => {
                     let n = (count as usize).min(ifd.make.len());
                     let (bytes, got) = self.src.side_peek::<16>(field.off);
-                    if let (Some(dst), Some(s)) = (ifd.make.get_mut(..n.min(got)), bytes.get(..n.min(got))) {
+                    if let (Some(dst), Some(s)) =
+                        (ifd.make.get_mut(..n.min(got)), bytes.get(..n.min(got)))
+                    {
                         dst.copy_from_slice(s);
                     }
                 }
@@ -306,7 +350,11 @@ impl Walker<'_, '_> {
 pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
     let (head, got) = src.side_peek::<24>(0);
     let header = parse_header(head.get(..got)?)?;
-    let mut w = Walker { src, le: header.little_endian, rw2: header.flavour == Flavour::Rw2 };
+    let mut w = Walker {
+        src,
+        le: header.little_endian,
+        rw2: header.flavour == Flavour::Rw2,
+    };
 
     let mut queue: VecDeque<(u64, bool, bool)> = VecDeque::new();
     let mut seen: HashSet<u64> = HashSet::new();
@@ -325,7 +373,8 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
             }
             continue;
         }
-        if seen.len() > MAX_IFDS {
+        // (the queue is bounded too: every directory adds a few entries)
+        if seen.len() > MAX_IFDS || queue.len() > MAX_IFDS {
             return None;
         }
         let Some(ifd) = w.ifd(off, is_first) else {
@@ -360,16 +409,24 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
         Flavour::Classic if raw_data => raw_ext(&make),
         Flavour::Classic => "tif",
     };
-    Some(Measured { len: end, confidence: Confidence::Probable, ext })
+    Some(Measured {
+        len: end,
+        confidence: Confidence::Probable,
+        ext,
+    })
 }
 
 /// Extension of a TIFF that carries sensor data, from the camera maker.
 fn raw_ext(make: &[u8; 16]) -> &'static str {
     let mut upper = *make;
     upper.make_ascii_uppercase();
-    for (prefix, ext) in
-        [(&b"NIKON"[..], "nef"), (b"SONY", "arw"), (b"PENTAX", "pef"), (b"RICOH", "pef"), (b"SAMSUNG", "srw")]
-    {
+    for (prefix, ext) in [
+        (&b"NIKON"[..], "nef"),
+        (b"SONY", "arw"),
+        (b"PENTAX", "pef"),
+        (b"RICOH", "pef"),
+        (b"SAMSUNG", "srw"),
+    ] {
         if upper.starts_with(prefix) {
             return ext;
         }

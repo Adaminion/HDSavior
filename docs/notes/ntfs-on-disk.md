@@ -5,6 +5,9 @@ Every line carries its evidence level:
 - **[B]** verified against bytes. Raw images built here with `mkntfs` / `ntfs-3g` 2022.10.3
   (sector 512 and 4096, cluster 512 … 2 MiB), populated through the FUSE mount, then inspected
   with an independent Python reader. ntfs-3g is not Windows; known differences are in section 12.
+- **[W]** verified against bytes written by real Windows: the public test volumes listed in section 15
+  (Windows XP with deleted files, a Windows 7-era volume, two Windows 10 volumes; clusters 512, 1024
+  and 4096). Read with the same Python reader.
 - **[H]** verified against a header or source file: `layout.h` = `/usr/include/ntfs-3g/layout.h`
   (ntfs-3g-dev 2022.10.3, line numbers given), `ntfs3` = Linux `fs/ntfs3` (`ntfs.h`, `super.c`,
   `index.c`, `run.c`, `fsntfs.c`), `crate` = Rust crate `ntfs` 0.4.0, `winnt.h` = mingw-w64.
@@ -25,7 +28,7 @@ Only the first 512 bytes are used, also on 4096-byte-sector volumes.
 | 0x0B | 2 | bytes per sector (512 and 4096 seen; valid: power of two, 512 … 4096) | [B] [H crate boot_sector.rs] |
 | 0x0D | 1 | sectors per cluster, encoded (below) | [B] [H layout.h:51] |
 | 0x15 | 1 | media descriptor (`F8`) | [B] |
-| 0x1C | 4 | hidden sectors = partition start LBA at format time (0 if the formatter did not know) | [B] [H layout.h:60] |
+| 0x1C | 4 | hidden sectors = partition start LBA at format time (0 if the formatter did not know; 128 and 2048 in the Windows samples) | [B] [W] [H layout.h:60] |
 | 0x28 | 8 | total sectors, signed; **partition sectors − 1** | [B] [H layout.h:78] |
 | 0x30 | 8 | `$MFT` start LCN | [B] [H layout.h:83] |
 | 0x38 | 8 | `$MFTMirr` start LCN | [B] [H layout.h:84] |
@@ -40,15 +43,17 @@ Encodings and rules
 - Sectors per cluster `v`: `v <= 0x80` → `v` sectors (power of two, not 0); `0xF4..=0xFF` → `2^(256 − v)`
   sectors; `0x81..=0xF3` is invalid. [H ntfs3 super.c `true_sectors_per_clst`] [D libfsntfs "244 to 255"].
   Seen: `01 02 04 08 10 80`, `F8` (128 KiB at 512), `F5` (1 MiB), `F4` (2 MiB at 512), `F7` (2 MiB at 4096),
-  `20` (128 KiB at 4096: still a direct value). [B]
+  `20` (128 KiB at 4096: still a direct value). [B] Windows samples: `01`, `02`, `08`. [W]
 - Record / index size `v` (signed): `v > 0` → `v` clusters; `v < 0` → `2^(−v)` bytes. Seen: `02` (2 × 512),
-  `01`, `F6` (−10 → 1024), `F4` (−12 → 4096); index: `08 04 02 01 F4`. [B]
+  `01`, `F6` (−10 → 1024), `F4` (−12 → 4096); index: `08 04 02 01 F4`. [B] Windows writes the same values
+  (`02`/`08` at 512-byte clusters, `01`/`04` at 1 KiB, `F6`/`01` at 4 KiB). [W]
   Bound the exponent before shifting: ntfs3 accepts at most 12 (4096) for both. [H ntfs3 super.c]
 - Cluster size = bytes per sector × sectors per cluster, at most 2 MiB. [H crate, ntfs3] Windows `format /A`
   offers 512 … 64K, 128K, 256K, 512K, 1M, 2M. [D MS format]
 - Backup boot sector: byte-identical copy in the sector directly after the volume, at
   `volume_start + total_sectors × bytes_per_sector` (= last sector of the partition). True for 512- and
-  4096-byte sectors. There is no copy in the middle (that was NT 3.51 and older). [B] [H layout.h:38-43]
+  4096-byte sectors. There is no copy in the middle (that was NT 3.51 and older). [B] [W: three samples]
+  [H layout.h:38-43]
   So a boot sector found at `X` is either a primary (volume starts at `X`) or a backup (volume starts at
   `X − total_sectors × bps`); `hidden sectors` can disambiguate on whole-disk scans when it is non-zero.
 - Windows only reads the primary boot sector and does not require `55 AA`. [H ntfs3 super.c comments]
@@ -72,16 +77,17 @@ Encodings and rules
   block `i`. On disk the last two bytes of every block equal the USN. [B]
 - The array must end inside the first block: `usa_ofs + 2 × count <= 510`. [H layout.h:185-189] [D MS]
 - Seen: FILE 1024 → ofs 0x30, count 3; FILE 4096 → ofs 0x30, count 9 (first attribute at 0x48);
-  INDX 4096 → ofs 0x28, count 9 (first entry at 0x40). [B]
+  INDX 4096 → ofs 0x28, count 9 (first entry at 0x40). [B] Every Windows record and index block: FILE
+  0x30 / 3, INDX 0x28 / 9. [W]
 
 ## 3. FILE record header
 
 | Off | Size | Field | Evidence |
 |---|---|---|---|
 | 0x00 | 8 | multi-sector header (section 2) | [B] |
-| 0x08 | 8 | `$LogFile` sequence number (always 0 on ntfs-3g volumes) | [B] [H layout.h:352] |
+| 0x08 | 8 | `$LogFile` sequence number (always 0 on ntfs-3g volumes; non-zero in most Windows records) | [B] [W] [H layout.h:352] |
 | 0x10 | 2 | sequence number | [B] [H layout.h:354] |
-| 0x12 | 2 | link count = number of `$FILE_NAME` attributes, DOS alias included; 0 in extension records | [B] [H layout.h:359] |
+| 0x12 | 2 | link count = number of `$FILE_NAME` attributes, DOS alias included; 0 in extension records. Windows leaves it unchanged when the file is deleted, ntfs-3g sets it to 0 | [B] [W] [H layout.h:359] |
 | 0x14 | 2 | offset of the first attribute | [B] [H layout.h:369] |
 | 0x16 | 2 | flags | [B] [H layout.h:263-270] |
 | 0x18 | 4 | bytes in use (multiple of 8; = offset of the end marker + 8) | [B] [H layout.h:375] |
@@ -89,12 +95,14 @@ Encodings and rules
 | 0x20 | 8 | base record reference; 0 in a base record | [B] [H layout.h:380] [D MS] |
 | 0x28 | 2 | next attribute instance | [B] [H layout.h:393] |
 | 0x2A | 2 | NTFS 3.1+: reserved / high 16 bits of the record number | [H layout.h:401; ntfs3 ntfs.h "High part of MFT record?"] |
-| 0x2C | 4 | NTFS 3.1+: record number, low 32 bits | [B] [H layout.h:402] |
+| 0x2C | 4 | NTFS 3.1+: record number, low 32 bits | [B] [W] [H layout.h:402] |
 | 0x30 (3.1+) / 0x2A (≤ 3.0) | 2 × count | update sequence array | [B for 0x30] [H layout.h:345-413 vs 420-485] |
 
-Flags: `0x0001` in use; `0x0002` directory (has a `$I30` index); `0x0004` set on `$Extend` children;
+Flags: `0x0001` in use; `0x0002` directory (has a `$I30` index); `0x0004` seen on some `$Extend` files only;
 `0x0008` has a non-`$I30` ("view") index. Seen: files `0x0001`, directories `0x0003`, `$Secure` `0x0009`,
-`$Quota`/`$ObjId`/`$Reparse` `0x000D`, deleted file `0x0000`, deleted directory `0x0002`. [B] [H ntfs3 ntfs.h `RECORD_FLAG_*`]
+`$Quota`/`$ObjId`/`$Reparse` `0x000D`, deleted file `0x0000`, deleted directory `0x0002`. [B] [W] [H ntfs3 ntfs.h `RECORD_FLAG_*`]
+`0x0004` is not a reliable `$Extend` marker: on Windows 10 only `$Repair` (`0x0005`) and `$Deleted` (`0x0007`) carry
+it besides the three view-index files; `$RmMetadata`, `$TxfLog`, `$Txf`, `$Tops` have plain `0x0001` / `0x0003`. [W]
 
 Record number
 
@@ -102,43 +110,53 @@ Record number
   NTFS ≤ 3.0 (`FILE*`, USA at 0x2A; NT4 / Windows 2000). [H layout.h:345-485; ntfs-3g mft.c
   `ntfs_mft_record_layout`] [D libfsntfs: "Version 3.1: MFT entry index"] Not producible with mkntfs (always 3.1).
 - Equal to the slot number in all 51 661 records of the test volume, except mkntfs's never-used records
-  16–23, whose number field is 0. [B] Treat the field as a claim to be checked, not as truth.
+  16–23, whose number field is 0. [B] Correct in every record of the Windows samples, never-used ones
+  included. [W] Treat the field as a claim to be checked, not as truth.
 
-File reference (8 bytes): low 48 bits record number, high 16 bits sequence number. [B] [H layout.h:322-330]
+File reference (8 bytes): low 48 bits record number, high 16 bits sequence number. [B] [W] [H layout.h:322-330]
 
 Sequence number
 
-- A record that was never used has 1 on mkntfs / ntfs-3g volumes; system files 1–15 have sequence = record
-  number; `$MFT` (0) has 1. [B] [H layout.h:205-208; ntfs-3g mft.c] Microsoft documents 0 for a segment that is
-  "not used". [D MS]
+- System files 1–15 have sequence = record number; `$MFT` (0) has 1; the first use of any other record has
+  1. [B] [W] [H layout.h:205-208]
+- A record that was never used has sequence 1 on mkntfs / ntfs-3g and on the Windows 7-era sample, **0** on
+  the Windows XP sample ("it is 0 if the segment is not used" [D MS]); on the Windows 10 samples such slots
+  are all zero bytes. [B] [W]
 - It is incremented when the record is **freed** (file deleted), not when the slot is reused; `0xFFFF`
   wraps to 1; 0 stays 0. [D MS: "incremented each time that a file record segment is freed"]
   [H layout.h:354-358; ntfs-3g mft.c `ntfs_mft_record_free`] [B: delete 1 → 2; the next file created in that slot is in use with 2]
+  [W, Windows XP: nine files and directories deleted once are free with sequence 2; the slot that was a
+  directory, was deleted, became a file and was deleted again has 3]
 - Therefore a reference `(N, s)` is satisfied by record `N` **in use with sequence `s`**, or by record `N`
   **not in use with sequence `s + 1`** (the referenced object was deleted). Record `N` in use with `s + 1`
-  is a different, newer object. [B]
+  is a different, newer object. [B] [W: `dir1\dir2\frag3.dat` resolves through two deleted directories
+  (children hold `(33, 1)` and `(34, 1)`, the records are free with sequence 2); `sing2.dat` holds `(37, 1)`
+  and slot 37 is a deleted *file* with sequence 3, so it must not resolve]
 - A reference whose sequence is 0 means "do not check". [H layout.h:286-287]
 - Fresh volumes are full of sequence-1 records, so `(N, 1)` in an old record very often equals the
   `(number, sequence)` of an unrelated record written later into slot `N`. [B: old child with parent `(64, 1)`
   next to a new directory in slot 64 with sequence 1 after re-format]
 
-Record states seen [B]
+Record states seen
 
-- Deleted (ntfs-3g): in-use bit cleared, directory bit kept, sequence + 1, link count 0, attributes left in
-  place (`$FILE_NAME` with the parent reference, `$DATA` with runlist and sizes). A deleted directory's
-  `$INDEX_ROOT` is empty.
-- Never used (mkntfs, records 27–63): `FILE`, flags 0, sequence 1, first attribute is the end marker.
-  Records 16–23: flags 0, sequence = record number, number field 0, a lone `$STANDARD_INFORMATION`.
-- Slots past the MFT's initialized size are zero-filled or still hold older records (no guarantee).
+- Deleted (ntfs-3g and Windows XP): in-use bit cleared, directory bit kept, sequence + 1, attributes left
+  in place (`$FILE_NAME` with the parent reference, `$DATA` with runlist and sizes, named streams too). A
+  deleted directory's `$INDEX_ROOT` is empty. Link count: 0 on ntfs-3g, unchanged on Windows. All nine deleted
+  streams of the Windows XP sample were rebuilt from their records with the published MD5 values. [B] [W]
+- Never used: `FILE`, flags 0, no attributes (first attribute is the end marker, bytes in use 0x40), correct
+  record number; sequence 1 (mkntfs records 27–63; 222 records of the Windows 7-era sample) or 0 (Windows XP
+  records 16–23). mkntfs records 16–23 are different: sequence = record number, number field 0, a lone
+  `$STANDARD_INFORMATION`. [B] [W]
+- Slots past the MFT's initialized size are zero-filled or still hold older records (no guarantee). [B]
 - Extension record: flags `0x0001` only (never the directory bit), link count 0, base reference =
   (base number, base sequence at link time), its own sequence and record number, no
-  `$STANDARD_INFORMATION`; any attribute type can be the first attribute.
+  `$STANDARD_INFORMATION`; any attribute type can be the first attribute. [B]
 - Deleted file with extension records: base and every extension have their **own** sequence incremented,
   but the extensions' base reference still carries the base's **old** sequence (base 3085: seq 3, free;
-  extensions: base ref `(3085, 2)`).
+  extensions: base ref `(3085, 2)`). [B, ntfs-3g; no Windows sample with extension records was available]
 - Extension released while the file lives (truncate): extension free, sequence + 1, base reference
   unchanged and equal to the still-in-use base's current sequence; ntfs-3g empties such a record
-  (end marker first) but old attribute bytes remain behind the marker.
+  (end marker first) but old attribute bytes remain behind the marker. [B]
 
 ## 4. Attribute header
 
@@ -180,14 +198,19 @@ Rules
 - The non-resident header is 0x40 or 0x48 bytes. Never assume either: take the name from `name offset` and
   the runlist from `mapping pairs offset`. Seen: plain `0x40/0x40`; named `$I30` name 0x40, runs 0x48;
   sparse or compressed: name offset 0x48, runs 0x48; named stream `bigstream`: name 0x40, runs 0x58. [B]
-- End marker: type `0xFFFFFFFF`. The 4 bytes after it are not a length. [B] [H layout.h:341-343]
+- End marker: type `0xFFFFFFFF`. The 4 bytes after it are not a length: `00 00 00 00` in records written by
+  a formatter or ntfs-3g, `82 79 47 11` in records written by the Windows driver. [B] [W] [H layout.h:341-343]
+- `name offset` is meaningless when `name length` is 0: Windows writes 0 in about half of the unnamed
+  attributes and 0x18 (resident) / 0x40 (non-resident) in the others. [W] [D MS: "undefined when NameLength is 0"]
 - Allocated / real / initialized sizes are valid only in the extent with lowest VCN 0; they are 0 in all
   other extents. [B] [D MS: "not valid if the LowestVcn member is nonzero"] [H layout.h:789]
 - `initialized <= real`. Bytes in `[initialized, real)` read as zero even if clusters are allocated.
   [B: `extended.bin`: 3 clusters allocated, initialized 10 000, real 500 000; reconstruction with that rule
   equals what the driver returns] [D libfsntfs]
-- Empty non-resident attribute: lowest 0, highest −1, no runs. [H layout.h:773; ntfs3 run.c "evcn + 1 == svcn"]
-  ntfs-3g converts a file truncated to 0 back to resident (length 0). [B]
+- Empty non-resident attribute: lowest 0, highest −1, all sizes 0, no runs. [W: `$Repair` unnamed `$DATA`]
+  [H layout.h:773; ntfs3 run.c "evcn + 1 == svcn"] ntfs-3g converts a file truncated to 0 back to resident. [B]
+- Initialized size 0 with a full allocation exists on every Windows volume with shadow copies (the
+  `{GUID}{3808876b-…}` files in `System Volume Information`) and in `$BadClus:$Bad`. [W]
 - Decide contiguity from the sum of run lengths, not from `highest VCN`. On consistent records
   `sum(lengths) == highest − lowest + 1`. [B] [H ntfs3 run.c; layout.h:774 "Can be 0 for single extent"]
 - "Compressed" means: non-resident **and** `flags & 0x00FF != 0`. A resident attribute can carry `0x0001`
@@ -210,14 +233,17 @@ record are sorted by type, then name. [B]
 - Header byte: low nibble = byte count of the run length, high nibble = byte count of the LCN delta.
   A `00` byte ends the list. [B] [D MS: "count byte = v + (l * 16)"]
 - Length: little-endian. Microsoft defines it as a **signed** quantity, so encoders add a zero byte when
-  the top bit would be set: 128 clusters is `80 00`, not `80`. [B: `22 80 00 68 40`] [D MS] A length of 0 or
+  the top bit would be set: 128 clusters is `80 00`, not `80`. [B: `22 80 00 68 40`] [W: `22 80 00 8C 13`,
+  `32 80 00 20 BF 00`] [D MS] A length of 0 or
   a negative length is corruption. [H ntfs-3g runlist.c "Assume a negative length to indicate data
   corruption"; ntfs3 run.c `if (!len) return -EINVAL`]
 - Delta: signed, sign-extended, added to the LCN of the **previous non-sparse run** (0 before the first).
   [B: `31 09 DF 3C FF` = −49 953; `31 01 47 81 00` uses 3 bytes for +33 095; in `sparse.bin`
   `31 01 47 81 00`, `02 FF 00`, `21 01 00 01` gives LCN 33 095, hole of 255, LCN 33 351]
 - Delta size 0 = sparse run (hole), reads as zeros. [B: `02 FF 00`, `01 0F`] [H layout.h:656-663; ntfs3 run.c]
-- A delta that is present but 0 is a real run. Only `$Boot` has it (`11 02 00` = 2 clusters at LCN 0). [B]
+  A sparse run can appear in an attribute without the sparse flag (`$BadClus:$Bad`: `03 7F 77 02`, flags 0). [W]
+- A delta that is present but 0 is a real run. Only `$Boot` has it (`11 02 00` = 2 clusters at LCN 0;
+  Windows: `11 10 00`). [B] [W]
   Implementations disagree here: the `ntfs` crate treats delta 0 as sparse, ntfs3 rejects it, Microsoft's
   text says "CurrentLcn of 0 … unallocated". [H crate non_resident.rs; ntfs3 run.c] [D MS] No user file can
   own LCN 0.
@@ -226,8 +252,9 @@ record are sorted by type, then name. [B]
 
 ## 6. `$STANDARD_INFORMATION` (0x10)
 
-Resident, base record only. 48 bytes (NTFS 1.2 layout; also what ntfs-3g writes for every file it creates)
-or 72 bytes (what Windows writes on NTFS 3.x). Accept both. [B] [H layout.h:910-990]
+Resident, base record only. 48 bytes (NTFS 1.2 layout; what ntfs-3g writes for every file it creates, and
+what Windows `format` leaves in records 5, 7, 12–15, on XP and 7 also 3 and 4) or 72 bytes (everything the
+Windows driver creates). Accept both. [B] [W] [H layout.h:910-990]
 
 | Off | Size | Field |
 |---|---|---|
@@ -249,7 +276,8 @@ or 72 bytes (what Windows writes on NTFS 3.x). Accept both. [B] [H layout.h:910-
   `0x400` reparse point, `0x800` compressed, `0x1000` offline, `0x2000` not indexed, `0x4000` encrypted,
   `0x00040000` recall on open, `0x00080000` pinned, `0x00100000` unpinned, `0x00400000` recall on data
   access. [H layout.h:828-891; winnt.h:5961-5974] The directory bit `0x10` is not used: directories show
-  `0x20` / `0x26` here. [B]
+  `0x20` / `0x26` here (ntfs-3g), `0x00000000` / `0x00000006` (Windows 10) or `0x10000000` (Windows XP). [B] [W]
+  Do not derive "is a directory" from this attribute.
 
 ## 7. `$FILE_NAME` (0x30)
 
@@ -273,12 +301,19 @@ Resident. Also the key of every `$I30` index entry. [B] [H layout.h:1103-1142]
 - Directory test in a name or index entry: `flags & 0x10000000`. [B] [H layout.h:877]
 - Sizes and times in the MFT copy are stale: written at create / rename only. [B: `real = 0` beside a
   `$DATA` of 5000 bytes] [H layout.h:1094-1097] [D libfsntfs] The copy inside the parent's index is kept
-  current (ntfs-3g) and for sparse or compressed files its allocated size is the really allocated bytes. [B]
+  current by ntfs-3g; for sparse or compressed files its allocated size is the really allocated bytes. [B]
+  Windows updates the index copy lazily: stale index blocks show real size 0 for files of 10 MiB. [W]
 - One attribute per hard link. A long name plus its 8.3 alias are two attributes (namespace 1 and 2,
-  same parent) and count as 2 links. Three hard links: 3 attributes, 2 different parents. [B]
+  same parent) and count as 2 links. [B] [W] Three hard links: 3 attributes, 2 different parents. [B]
 - Root directory: record 5, name `.`, parent `(5, 5)`, namespace 3. [B]
-- ntfs-3g writes namespace 0 for everything it creates (1 + 2 only after setting a DOS name);
-  mkntfs system files use 3. [B] Windows writes 1, 2 and 3.
+- Namespaces in practice: ntfs-3g writes 0 for everything it creates (1 + 2 only after setting a DOS
+  name); mkntfs system files use 3. [B] Windows XP and 7 with 8.3 names on: 3 when the name is a valid 8.3
+  name, otherwise a 1 + 2 pair. Windows 10 volume with 8.3 names off: **0 for every name created after the
+  format**, user files included. Windows 7 and 10 also use 0 for the `$Extend` files the driver creates. [W]
+- In a Windows record the DOS alias comes **before** the long name (`SYSTEM~1`, then
+  `System Volume Information`). [W]
+- The reparse flag `0x400` and the tag at 0x3C are present in the parent's index entry but can be absent in
+  the record's own `$FILE_NAME` (written before the reparse point was set). [W: `a_link`, tag `0xA000000C`]
 - A `$FILE_NAME` can live in an extension record. [B: two cases, a file and a directory]
 
 ## 8. `$ATTRIBUTE_LIST` (0x20)
@@ -320,7 +355,7 @@ Resident. Also the key of every `$I30` index entry. [B] [H layout.h:1103-1142]
 | 0x00 | 4 | indexed attribute type (`0x30`) |
 | 0x04 | 4 | collation rule (1 = file name) |
 | 0x08 | 4 | index block size in bytes |
-| 0x0C | 1 | blocks per index block: clusters when cluster ≤ block, else 512-byte units (8) |
+| 0x0C | 1 | blocks per index block: clusters when cluster ≤ block (8 at 512-byte clusters, 1 at 4 KiB [W]), else 512-byte units (8) |
 | 0x10 | 16 | node header |
 
 Node header (in `$INDEX_ROOT` at 0x10, in an `INDX` block at 0x18) [B] [H layout.h:2084-2103]
@@ -356,9 +391,13 @@ Index entry [B] [H layout.h:2301-2382]
 - VCN unit of a block: `VCN × cluster size` when cluster ≤ index block size, else `VCN × 512`, also on
   4096-byte-sector volumes. Blocks are numbered 0, 8, 16 … for 512-byte and for ≥ 8 KiB clusters, 0, 4, 8 …
   for 1 KiB, 0, 2, 4 … for 2 KiB, 0, 1, 2 … for 4 KiB. [B: nine sector/cluster combinations]
-  [H ntfs3 index.c "Index record is smaller than a cluster, use 512 blocks"]
+  [H ntfs3 index.c "Index record is smaller than a cluster, use 512 blocks"] The Windows samples only
+  contain blocks with VCN 0, so the counting itself is not confirmed on Windows bytes.
 - The last entry has flags `0x2`, key length 0, length 0x10 (0x18 with a sub-node). [B]
-- A file with a long name and an 8.3 alias has two entries with the same reference. [B]
+- A file or directory with a long name and an 8.3 alias has two entries with the same reference
+  (`System Volume Information` and `SYSTEM~1` → `(36, 1)`). [B] [W]
+- Volumes with shadow copies hold several older copies of the same index block and of MFT clusters at
+  other disk offsets (four older copies of the root block, 88 and 92 stray `FILE` records in the samples). [W]
 - A large directory's `$INDEX_ROOT` still holds separator entries that are in no `INDX` block; a small
   directory has all its entries there and no `INDX` block at all. [B]
 - `$INDEX_ALLOCATION` can be split over extension records like `$DATA`; each extent has its own lowest VCN. [B]
@@ -376,8 +415,8 @@ Index entry [B] [H layout.h:2301-2382]
 | 11 | `$Extend` (directory) | [B] |
 | 12–15 | reserved, marked in use, empty; 15 receives the first extra `$DATA` extent of `$MFT` | [B] [H layout.h:241-244] |
 | 16–23 | not in use after format; kept for extension records (and chkdsk's log); "Windows will only use records 16 to 24 for normal files if the volume is completely out of space"; seen zero-filled on XP | [B: free] [H ntfs-3g mft.c comment above `ntfs_mft_record_alloc`] [D libfsntfs] |
-| 24, 25, 26 | `$Extend\$Quota`, `$ObjId`, `$Reparse` (parent `(11, 11)`) | [B] [D libfsntfs] |
-| 27 … | Windows Vista+: `$Extend\$RmMetadata`, `$Repair`, `$TxfLog`, `$Txf`, `$Tops`, `$TxfLog.blf`; Windows 10: `$Extend\$Deleted` at 29; `$Extend\$UsnJrnl` has no fixed number | [D libfsntfs] |
+| 24, 25, 26 | `$Extend\$Quota`, `$ObjId`, `$Reparse` (parent `(11, 11)`) | [B] [W] [D libfsntfs] |
+| 27 … | Windows XP: 27 = `System Volume Information`, user files from 28. Windows 7-era: 27 `$RmMetadata`, 28 `$Repair`, 29 `$TxfLog`, 30 `$Txf`, 31 `$Tops`, 32 `$TxfLog.blf`, 33–34 log containers, user files from 35. Windows 10: 29 `$Deleted`, 30–35 TxF, 36 `System Volume Information`, 37 `WPSettings.dat`, user files from 38. `$Extend\$UsnJrnl` has no fixed number | [W] [D libfsntfs] |
 
 - First record available to users: 24 on Windows (ntfs3 `MFT_REC_USER = 24`, `MFT_REC_FREE = 16`); ntfs-3g
   allocates from 64 (`RESERVED_MFT_RECORDS`). [H ntfs3 ntfs.h; ntfs-3g mft.c] [B: first file = record 64]
@@ -386,7 +425,9 @@ Index entry [B] [H layout.h:2301-2382]
 ## 11. Reparse points and files whose unnamed `$DATA` holds no data
 
 `$REPARSE_POINT` (0xC0) value: 0x00 tag (4), 0x04 data length (2), 0x06 reserved (2), 0x08 data.
-The tag is also copied to `$FILE_NAME` + 0x3C. [H layout.h:2465-2470, 1133]
+The tag is also copied to `$FILE_NAME` + 0x3C of the parent's index entry; read it from the attribute.
+[W: symbolic link, resident value `0C 00 00 A0 80 00 00 00 …`, `$STANDARD_INFORMATION` flags `0x420`,
+resident `$DATA` of length 0] [H layout.h:2465-2470, 1133]
 
 | Tag | Meaning | Evidence |
 |---|---|---|
@@ -411,13 +452,14 @@ The tag is also copied to `$FILE_NAME` + 0x3C. [H layout.h:2465-2470, 1133]
 | First user record | 64 | 24 and up | [B] [H] |
 | Consequence | no user record is lost by an mkntfs re-format | top-level folders and early files lose their records | [B] |
 | `$MFT` location | byte 16 384 of the volume for clusters ≤ 8 KiB (LCN 2 for larger clusters); `$MFTMirr` mid-volume | a different fixed address | [B] / [D R-TT] |
-| Name namespace | 0 (POSIX) | 1, 2, 3 | [B] / [D] |
-| `$STANDARD_INFORMATION` | 48 bytes plus a `$SECURITY_DESCRIPTOR` attribute per file | 72 bytes | [B] / [D libfsntfs] |
-| `$LogFile` sequence number | 0 | set | [B] |
+| Name namespace | 0 (POSIX) | 3 or a 1 + 2 pair with 8.3 names on; 0 with 8.3 names off (Windows 10 data volumes) | [B] / [W] |
+| `$STANDARD_INFORMATION` | 48 bytes plus a `$SECURITY_DESCRIPTOR` attribute per file | 72 bytes for user files | [B] / [W] |
+| `$LogFile` sequence number | 0 | set | [B] / [W] |
 | Attribute list | always non-resident | resident first | [B] / [D] |
 | Split `$DATA` | first extent stays in the base record | mapping pairs moved to child records | [B] / [D] |
-| Delete | keeps the last `$FILE_NAME`, except when it sat in an extension record: then the name is removed | keeps it | [B] [H ntfs-3g dir.c comment] |
-| Never-used records | 16–23 carry record number 0 | not known here | [B] |
+| Delete | link count set to 0; keeps the last `$FILE_NAME`, except when it sat in an extension record: then the name is removed | link count unchanged; name kept | [B] [H ntfs-3g dir.c comment] / [W] |
+| Never-used records | `FILE`, sequence 1, no attributes; 16–23 carry record number 0 | XP: `FILE`, sequence 0, no attributes; 7-era: `FILE`, sequence 1, no attributes; 10: zero bytes | [B] / [W] |
+| End marker tail | `FFFFFFFF 00000000` | `FFFFFFFF 82794711` in driver-written records | [B] / [W] |
 | Symbolic links | `IntxLNK` files | reparse points | [B] |
 
 Anything in the right-hand column must be covered by `hds-testkit` or the Windows CI run.
@@ -438,7 +480,9 @@ For a directory whose index allocation is one run at LCN `L`, the block is at
   directories, not blocks; many wrong pairs also have a negative volume offset.
 - Using only the base record's `$INDEX_ALLOCATION` extent loses votes: 407 of 2705 on the test volume.
 - `origin = disk_offset − record_number × record_size` is negative for MFT fragments that sit early on
-  the disk and hold high record numbers (seen: −1 978 368). Use signed arithmetic.
+  the disk and hold high record numbers: 18 of the 98 origins on the test volume (minimum −2 109 440).
+  Use signed arithmetic. Those 98 origins were: 89 from the real MFT's 95 runs, 1 from the `$MFTMirr`
+  copy of records 0–3, 8 single-record origins from slots 16–23 (record number field 0).
 
 ## 14. Pitfalls checklist
 
@@ -466,6 +510,9 @@ For a directory whose index allocation is one run at LCN `L`, the block is at
     first 256 KiB. [B]
 19. Names are UTF-16 code units, not guaranteed valid UTF-16. [D libfsntfs]
 20. Files with reparse tags WOF / cloud / dedup have an unnamed `$DATA` that reads as zeros. [D]
+21. Link count is not a deletion marker (Windows keeps it); `name offset` is meaningless for unnamed
+    attributes; a never-used record can have sequence 0 or 1. [W]
+22. Namespace 0 is normal on Windows 10 data volumes; a DOS alias precedes the long name in the record. [W]
 
 ## 15. Sources
 
@@ -487,3 +534,16 @@ For a directory whose index allocation is one run at LCN `L`, the block is at
 - R-TT, "NTFS Recovery after Quick Format" (search summary only):
   <https://www.r-tt.com/Articles/NTFS_Recovery_after_Quick_Format/>.
 - mingw-w64 `winnt.h` (`/usr/share/mingw-w64/include/winnt.h`) for reparse tags and file attribute constants.
+- Windows-written sample volumes used for [W]:
+  - Digital Forensics Tool Testing image 7, "NTFS Undelete" (Brian Carrier, 2004): Windows XP, 1 KiB
+    clusters, eight deleted files, two deleted directories, published MD5 values.
+    <https://sourceforge.net/projects/dftt/files/Test%20Images/7_%20NTFS%20File%20Recovery%20%28and%20Leap%20Year%29%20%231/7-undel-ntfs.zip>
+    (image MD5 `e7dbb96759d9cd62b729463ebfe61dab`).
+  - `vsstest.qcow2` from log2timeline/plaso (Windows 7-era, 4 KiB clusters, shadow copies):
+    <https://raw.githubusercontent.com/log2timeline/plaso/main/test_data/vsstest.qcow2>.
+  - `vss.raw` (Windows 10, 512-byte clusters, shadow copies) and `ntfs-fixed.vhd` (Windows 10, 4 KiB
+    clusters, partition at sector 128) from log2timeline/dfvfs:
+    <https://raw.githubusercontent.com/log2timeline/dfvfs/main/test_data/vss.raw>,
+    <https://raw.githubusercontent.com/log2timeline/dfvfs/main/test_data/ntfs-fixed.vhd>.
+  None of them contains an attribute list, a sparse-flagged or compressed attribute, a cluster larger than
+  the index block, or 4096-byte sectors; those remain [B] / [H] / [D] only.

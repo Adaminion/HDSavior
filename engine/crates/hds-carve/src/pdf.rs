@@ -43,6 +43,9 @@ use crate::{Confidence, Measured};
 const GIVE_UP: u64 = 128 * 1024 * 1024;
 
 const MARKER: &[u8] = b"%%EOF";
+/// `%%EOF` markers examined before giving up. A PDF has one per revision,
+/// plus those of embedded PDFs; a file made of nothing else is not a PDF.
+const MAX_MARKERS: u32 = 4096;
 
 fn is_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\r' | b'\n' | 0x0C)
@@ -71,12 +74,16 @@ fn digits(b: &[u8]) -> Option<(u64, &[u8])> {
 
 /// `true` when `b` starts with `<int> <int> obj`.
 fn starts_with_object(b: &[u8]) -> bool {
-    let Some((_, rest)) = digits(b) else { return false };
+    let Some((_, rest)) = digits(b) else {
+        return false;
+    };
     let after = skip_space(rest);
     if after.len() == rest.len() {
         return false;
     }
-    let Some((_, rest)) = digits(after) else { return false };
+    let Some((_, rest)) = digits(after) else {
+        return false;
+    };
     let after = skip_space(rest);
     after.len() != rest.len() && after.starts_with(b"obj")
 }
@@ -91,7 +98,10 @@ fn linearized_length(head: &[u8]) -> Option<u64> {
     while let Some(p) = find_sub(dict.get(from..)?, b"/L") {
         let value = dict.get(from + p + 2..)?;
         // `/L` itself, not `/Linearized` or another name starting with L
-        if value.first().is_some_and(|&c| is_space(c) || c.is_ascii_digit()) {
+        if value
+            .first()
+            .is_some_and(|&c| is_space(c) || c.is_ascii_digit())
+        {
             return digits(skip_space(value)).map(|(v, _)| v);
         }
         from += p + 2;
@@ -102,12 +112,17 @@ fn linearized_length(head: &[u8]) -> Option<u64> {
 /// `true` when the bytes just before `end` are `%%EOF` plus optional
 /// trailing white space.
 fn ends_with_marker(src: &mut Src, end: u64) -> bool {
-    let Some(start) = end.checked_sub(32) else { return false };
-    let Some(tail) = src.side::<32>(start) else { return false };
+    let Some(start) = end.checked_sub(32) else {
+        return false;
+    };
+    let Some(tail) = src.side::<32>(start) else {
+        return false;
+    };
     let Some(p) = tail.windows(MARKER.len()).rposition(|w| w == MARKER) else {
         return false;
     };
-    tail.get(p + MARKER.len()..).is_some_and(|rest| rest.iter().all(|&c| is_space(c)))
+    tail.get(p + MARKER.len()..)
+        .is_some_and(|rest| rest.iter().all(|&c| is_space(c)))
 }
 
 /// The number between `startxref` and the `%%EOF` at `marker`.
@@ -140,7 +155,9 @@ fn startxref_before(src: &mut Src, marker: u64) -> Option<u64> {
 /// `true` when a cross-reference table or stream starts at `off`.
 fn xref_at(src: &mut Src, off: u64) -> bool {
     let (buf, got) = src.side_peek::<40>(off);
-    let Some(b) = buf.get(..got) else { return false };
+    let Some(b) = buf.get(..got) else {
+        return false;
+    };
     let b = skip_space(b);
     b.starts_with(b"xref") || starts_with_object(b)
 }
@@ -148,7 +165,9 @@ fn xref_at(src: &mut Src, off: u64) -> bool {
 /// What the bytes after an accepted end look like.
 fn update_follows(src: &mut Src, end: u64) -> bool {
     let (buf, got) = src.side_peek::<64>(end);
-    let Some(b) = buf.get(..got) else { return false };
+    let Some(b) = buf.get(..got) else {
+        return false;
+    };
     let b = skip_space(b);
     if b.starts_with(b"%PDF-") {
         return false;
@@ -186,7 +205,13 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
     if !head.starts_with(b"%PDF-") {
         return None;
     }
-    let done = |len, confidence| Some(Measured { len, confidence, ext: "pdf" });
+    let done = |len, confidence| {
+        Some(Measured {
+            len,
+            confidence,
+            ext: "pdf",
+        })
+    };
 
     let mut best: Option<u64> = None;
     let mut pos = 0u64;
@@ -201,6 +226,7 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
     }
 
     let mut barren = 0u64;
+    let mut examined = 0u32;
     let mut hits: Vec<u64> = Vec::new();
     loop {
         let w = src.window_min(pos, MARKER.len());
@@ -221,6 +247,10 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
             if best.is_some_and(|b| marker < b) {
                 continue;
             }
+            examined += 1;
+            if examined > MAX_MARKERS {
+                return None;
+            }
             if let Some(end) = end_at_marker(src, marker) {
                 if !update_follows(src, end) {
                     return done(end, Confidence::Probable);
@@ -238,7 +268,11 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
             }
         }
         // keep an overlap so that a marker split across two refills is found
-        pos += if wlen >= MARKER.len() { (wlen - (MARKER.len() - 1)) as u64 } else { wlen as u64 };
+        pos += if wlen >= MARKER.len() {
+            (wlen - (MARKER.len() - 1)) as u64
+        } else {
+            wlen as u64
+        };
     }
     // The data ended (or went quiet) after a section that announced an
     // update which never completed: the last complete revision stands.
@@ -251,10 +285,22 @@ mod tests {
 
     #[test]
     fn linearized_dictionary() {
-        assert_eq!(linearized_length(b"%PDF-1.3\n5 0 obj\n<< /Linearized 1 /L 2416 /H [ 1 2 ] >>"), Some(2416));
-        assert_eq!(linearized_length(b"%PDF-1.5\n1 0 obj<</Linearized 1/L 123456/O 3>>endobj"), Some(123456));
-        assert_eq!(linearized_length(b"1 0 obj<</L 77/Linearized 1>>"), Some(77));
-        assert_eq!(linearized_length(b"1 0 obj<</Linearized 1/Length 9>>"), None);
+        assert_eq!(
+            linearized_length(b"%PDF-1.3\n5 0 obj\n<< /Linearized 1 /L 2416 /H [ 1 2 ] >>"),
+            Some(2416)
+        );
+        assert_eq!(
+            linearized_length(b"%PDF-1.5\n1 0 obj<</Linearized 1/L 123456/O 3>>endobj"),
+            Some(123456)
+        );
+        assert_eq!(
+            linearized_length(b"1 0 obj<</L 77/Linearized 1>>"),
+            Some(77)
+        );
+        assert_eq!(
+            linearized_length(b"1 0 obj<</Linearized 1/Length 9>>"),
+            None
+        );
         assert_eq!(linearized_length(b"1 0 obj<</Length 9/L 5>>"), None);
         assert_eq!(linearized_length(b"/Linearized 1 /L 5 >>"), None);
     }

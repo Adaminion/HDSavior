@@ -21,10 +21,14 @@
 //! own descriptors, and they fail that test.
 //!
 //! Then the central directory is walked, and the end record must follow it
-//! directly. `Exact` is reported when that record agrees with the walk
-//! (entry count, directory size and directory offset, taken from the ZIP64
-//! record when the 32-bit fields are saturated); `Probable` when the chain
-//! is intact but the numbers disagree (an archive cut out of a larger file).
+//! directly. The record states where the directory starts, counted from the
+//! start of the archive; that must be where the walk found it, otherwise the
+//! candidate is not the start of an archive but a local header in the middle
+//! of one (every entry of every archive has one, and one in 512 of them
+//! sits on a sector boundary). `Exact` is reported when the record also
+//! agrees with the walk on entry count and directory size (taken from the
+//! ZIP64 record when the 32-bit fields are saturated), `Probable` when
+//! those two disagree.
 //!
 //! Compressed data is never inflated and CRCs are not checked: that would
 //! mean reading every byte of archives that can be skipped in a handful of
@@ -132,8 +136,11 @@ fn starts_entry(sig: u32) -> bool {
 fn skip_descriptor(src: &mut Src, at: u64, size: u64, zip64: bool) -> Option<u64> {
     let (buf, got) = src.side_peek::<28>(at);
     let b = buf.get(..got)?;
-    let shapes: [(bool, bool); 4] =
-        if zip64 { [(true, true), (true, false), (false, true), (false, false)] } else { [(true, false), (true, true), (false, false), (false, true)] };
+    let shapes: [(bool, bool); 4] = if zip64 {
+        [(true, true), (true, false), (false, true), (false, false)]
+    } else {
+        [(true, false), (true, true), (false, false), (false, true)]
+    };
     for (signed, wide) in shapes {
         let mut p = 0usize;
         if signed {
@@ -143,7 +150,11 @@ fn skip_descriptor(src: &mut Src, at: u64, size: u64, zip64: bool) -> Option<u64
             p = 4;
         }
         // crc, compressed size, uncompressed size
-        let stated = if wide { le64(b, p + 4) } else { le32(b, p + 4).map(u64::from) };
+        let stated = if wide {
+            le64(b, p + 4)
+        } else {
+            le32(b, p + 4).map(u64::from)
+        };
         let len = p + 4 + if wide { 16 } else { 8 };
         if stated == Some(size) && le32(b, len).is_some_and(starts_entry) {
             return at.checked_add(len as u64);
@@ -191,7 +202,7 @@ fn find_descriptor(src: &mut Src, data: u64, zip64: bool) -> Option<u64> {
         if hit.is_some() {
             break hit;
         }
-        pos += (wlen - 3) as u64;
+        pos = pos.checked_add((wlen - 3) as u64)?;
     };
     src.hop_mode();
     found
@@ -205,10 +216,12 @@ fn descriptor_without_signature(src: &mut Src, data: u64, header: u64, zip64: bo
             continue;
         };
         let size = start - data;
+        // (crc, then the compressed size; `start + 4 < header` cannot overflow)
         let stated = if len == 20 {
             src.side::<8>(start + 4).map(u64::from_le_bytes)
         } else {
-            src.side::<4>(start + 4).map(|a| u32::from_le_bytes(a) as u64)
+            src.side::<4>(start + 4)
+                .map(|a| u32::from_le_bytes(a) as u64)
         };
         if stated == Some(size) {
             return Some(header);
@@ -224,7 +237,12 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
     let mut entries = 0u64;
 
     // local headers and data
+    let mut records = 0u64;
     loop {
+        records += 1;
+        if records > MAX_ENTRIES {
+            return None;
+        }
         let sig = src.le32(pos)?;
         if sig == SIG_CENTRAL {
             break;
@@ -239,9 +257,6 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
             return None;
         }
         entries += 1;
-        if entries > MAX_ENTRIES {
-            return None;
-        }
         let h = src.arr::<30>(pos)?;
         let flags = le16(&h, 6)?;
         let method = le16(&h, 8)?;
@@ -251,18 +266,23 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
         if !known_method(method) {
             return None;
         }
-        let name_at = pos + 30;
-        let extra_at = name_at + name_len;
-        let data = extra_at + extra_len;
+        let name_at = pos.checked_add(30)?;
+        let extra_at = name_at.checked_add(name_len)?;
+        let data = extra_at.checked_add(extra_len)?;
         if data > limit {
             return None;
         }
 
         let mut name = [0u8; 64];
         let shown = name_len.min(name.len() as u64) as usize;
-        name.get_mut(..shown)?.copy_from_slice(src.bytes(name_at, shown)?);
+        name.get_mut(..shown)?
+            .copy_from_slice(src.bytes(name_at, shown)?);
         // names longer than the buffer cannot equal any name of interest
-        let name = if name_len as usize == shown { name.get(..shown)? } else { &[][..] };
+        let name = if name_len as usize == shown {
+            name.get(..shown)?
+        } else {
+            &[][..]
+        };
         contents.name(name);
 
         // ZIP64 extended information: uncompressed, then compressed size
@@ -279,7 +299,11 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
         }
 
         let streamed = flags & 0x0008 != 0;
-        let size = if size32 == 0xFFFF_FFFF { size64? } else { size32 as u64 };
+        let size = if size32 == 0xFFFF_FFFF {
+            size64?
+        } else {
+            size32 as u64
+        };
         pos = if streamed && size == 0 {
             // Either really empty, or unknown when the header was written:
             // the descriptor decides, wherever it is.
@@ -337,7 +361,7 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
             return None;
         }
         consistent &= le64(&locator, 8)? == pos;
-        pos = locator_at + 20;
+        pos = locator_at.checked_add(20)?;
     }
 
     let h = src.arr::<22>(pos)?;
@@ -351,12 +375,39 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
     let end = pos.checked_add(22 + comment)?;
 
     let (wide_count, wide_size, wide_offset) = wide.unwrap_or((u64::MAX, u64::MAX, u64::MAX));
-    consistent &= if count == 0xFFFF && wide.is_some() { wide_count == listed } else { count as u64 == listed & 0xFFFF };
-    consistent &= if size == 0xFFFF_FFFF && wide.is_some() { wide_size == directory_len } else { size as u64 == directory_len };
-    consistent &= if offset == 0xFFFF_FFFF && wide.is_some() { wide_offset == directory } else { offset as u64 == directory };
+    // The directory must be where the end record says it is, counted from
+    // this candidate's first byte. If it is not, the candidate is a local
+    // header somewhere inside an archive (or behind a self-extractor stub),
+    // not the start of one.
+    let stated_offset = if offset == 0xFFFF_FFFF && wide.is_some() {
+        wide_offset
+    } else {
+        offset as u64
+    };
+    if stated_offset != directory {
+        return None;
+    }
+    consistent &= if count == 0xFFFF && wide.is_some() {
+        wide_count == listed
+    } else {
+        count as u64 == listed & 0xFFFF
+    };
+    consistent &= if size == 0xFFFF_FFFF && wide.is_some() {
+        wide_size == directory_len
+    } else {
+        size as u64 == directory_len
+    };
 
-    let confidence = if consistent { Confidence::Exact } else { Confidence::Probable };
-    Some(Measured { len: end, confidence, ext: contents.ext() })
+    let confidence = if consistent {
+        Confidence::Exact
+    } else {
+        Confidence::Probable
+    };
+    Some(Measured {
+        len: end,
+        confidence,
+        ext: contents.ext(),
+    })
 }
 
 #[cfg(test)]
@@ -377,20 +428,74 @@ mod tests {
     #[test]
     fn extension_from_contents() {
         assert_eq!(classify(&["a.txt", "b/c.png"], None), "zip");
-        assert_eq!(classify(&["[Content_Types].xml", "_rels/.rels", "word/document.xml"], None), "docx");
-        assert_eq!(classify(&["xl/workbook.xml", "[Content_Types].xml"], None), "xlsx");
-        assert_eq!(classify(&["[Content_Types].xml", "ppt/presentation.xml"], None), "pptx");
-        assert_eq!(classify(&["[Content_Types].xml", "visio/document.xml"], None), "vsdx");
+        assert_eq!(
+            classify(
+                &["[Content_Types].xml", "_rels/.rels", "word/document.xml"],
+                None
+            ),
+            "docx"
+        );
+        assert_eq!(
+            classify(&["xl/workbook.xml", "[Content_Types].xml"], None),
+            "xlsx"
+        );
+        assert_eq!(
+            classify(&["[Content_Types].xml", "ppt/presentation.xml"], None),
+            "pptx"
+        );
+        assert_eq!(
+            classify(&["[Content_Types].xml", "visio/document.xml"], None),
+            "vsdx"
+        );
         // a folder called word/ alone does not make a document
         assert_eq!(classify(&["word/notes.txt"], None), "zip");
-        assert_eq!(classify(&["[Content_Types].xml", "FixedDocSeq.fdseq"], None), "zip");
-        assert_eq!(classify(&["META-INF/MANIFEST.MF", "org/x/Main.class"], None), "jar");
-        assert_eq!(classify(&["META-INF/MANIFEST.MF", "AndroidManifest.xml", "classes.dex"], None), "apk");
-        assert_eq!(classify(&["mimetype", "META-INF/container.xml"], Some("application/epub+zip")), "epub");
-        assert_eq!(classify(&["mimetype"], Some("application/vnd.oasis.opendocument.text")), "odt");
-        assert_eq!(classify(&["mimetype"], Some("application/vnd.oasis.opendocument.spreadsheet\n")), "ods");
-        assert_eq!(classify(&["mimetype"], Some("application/vnd.oasis.opendocument.presentation")), "odp");
-        assert_eq!(classify(&["mimetype"], Some("application/x-something-else")), "zip");
+        assert_eq!(
+            classify(&["[Content_Types].xml", "FixedDocSeq.fdseq"], None),
+            "zip"
+        );
+        assert_eq!(
+            classify(&["META-INF/MANIFEST.MF", "org/x/Main.class"], None),
+            "jar"
+        );
+        assert_eq!(
+            classify(
+                &["META-INF/MANIFEST.MF", "AndroidManifest.xml", "classes.dex"],
+                None
+            ),
+            "apk"
+        );
+        assert_eq!(
+            classify(
+                &["mimetype", "META-INF/container.xml"],
+                Some("application/epub+zip")
+            ),
+            "epub"
+        );
+        assert_eq!(
+            classify(
+                &["mimetype"],
+                Some("application/vnd.oasis.opendocument.text")
+            ),
+            "odt"
+        );
+        assert_eq!(
+            classify(
+                &["mimetype"],
+                Some("application/vnd.oasis.opendocument.spreadsheet\n")
+            ),
+            "ods"
+        );
+        assert_eq!(
+            classify(
+                &["mimetype"],
+                Some("application/vnd.oasis.opendocument.presentation")
+            ),
+            "odp"
+        );
+        assert_eq!(
+            classify(&["mimetype"], Some("application/x-something-else")),
+            "zip"
+        );
     }
 
     #[test]

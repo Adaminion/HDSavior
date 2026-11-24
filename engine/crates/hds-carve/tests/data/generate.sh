@@ -104,7 +104,7 @@ b.save("exif_src.jpg", quality=78)
 b.save("special_jpeg_mpo.jpg", format="MPO", save_all=True,
        append_images=[Image.open("small.png")], quality=70)
 EOF
-cjpeg -quality 70 -restart 1 -outfile jpeg_restart.jpg base.ppm
+cjpeg -quality 70 -restart 2B -outfile jpeg_restart.jpg base.ppm
 cjpeg -quality 70 -arithmetic -outfile jpeg_arithmetic.jpg base.ppm
 cjpeg -quality 70 -progressive -restart 2 -outfile jpeg_progressive_restart.jpg base.ppm
 convert base.png -sampling-factor 1x1 -quality 72 -set comment "written by ImageMagick" jpeg_imagemagick_comment.jpg
@@ -175,7 +175,9 @@ b = Image.open("base.png")
 s = Image.open("small.png")
 s.save("tiff_pillow_uncompressed.tif")
 fr = [Image.open(f"frame{i}.png") for i in range(4)]
-fr[0].save("tiff_pillow_lzw_multipage.tif", save_all=True, append_images=fr[1:], compression="tiff_lzw")
+# Pillow pads every appended frame to a multiple of 16 bytes: the file ends
+# with a few zero bytes that nothing in it refers to
+fr[0].save("special_tiff_pillow_multipage_padded.tif", save_all=True, append_images=fr[1:], compression="tiff_lzw")
 m = Image.open("smooth.png")
 m.save("src_for_tiffcp.tif")
 a = np.asarray(m)
@@ -264,10 +266,15 @@ qpdf --object-streams=generate pdf_reportlab.pdf pdf_qpdf_object_streams.pdf
 qpdf --linearize pdf_reportlab.pdf pdf_qpdf_linearized.pdf
 qpdf --linearize --object-streams=generate pdf_ghostscript.pdf pdf_qpdf_linearized_objstm.pdf
 convert small.png pdf_imagemagick_image.pdf
-# incremental updates: exiftool appends a new section instead of rewriting
-cp pdf_reportlab.pdf pdf_incremental_update.pdf
-exiftool -q -overwrite_original -Title="updated once" pdf_incremental_update.pdf
-exiftool -q -overwrite_original -Author="updated twice" pdf_incremental_update.pdf
+# incremental updates: pypdf, then exiftool, each append a new section
+# (objects, cross-reference table, trailer, %%EOF) instead of rewriting
+python3 - <<'EOF'
+from pypdf import PdfReader, PdfWriter
+w = PdfWriter(PdfReader("pdf_reportlab.pdf"), incremental=True)
+w.add_metadata({"/Subject": "appended by pypdf"})
+w.write("pdf_incremental_update.pdf")
+EOF
+exiftool -q -overwrite_original -Title="updated again" pdf_incremental_update.pdf
 cp pdf_qpdf_linearized.pdf pdf_linearized_then_updated.pdf
 exiftool -q -overwrite_original -Title="linearized, then updated" pdf_linearized_then_updated.pdf
 # a PDF that carries another complete PDF as an uncompressed attachment:
@@ -282,7 +289,7 @@ mkdir -p ztree/sub/empty && cp text1.txt ztree/ && cp text2.txt ztree/sub/ && cp
 (cd ztree && echo "archive comment written by zip -z" | zip -q -0 -r -z ../zip_infozip_stored_comment.zip .)
 (cd ztree && zip -q -r -P secret ../zip_infozip_encrypted.zip text1.txt sub/text2.txt)
 (cd ztree && zip -q -fz -r ../zip_infozip_forced_zip64.zip text1.txt sub/text2.txt)
-(cd ztree && cat text1.txt | zip -q ../zip_infozip_stdin_descriptor.zip -)
+(cd ztree && cat text1.txt | zip -q ../zip_infozip_stdin_zip64.zip -)
 (cd ztree && zip -q -fd -r ../zip_infozip_forced_descriptors.zip text1.txt sub)
 (cd ztree && 7z a -bso0 -bsp0 -tzip ../zip_7zip.zip text1.txt sub)
 python3 - <<'EOF'
@@ -356,7 +363,7 @@ EOF
 # ------------------------------------------------------------ RIFF family --
 say "avi / wav / webp"
 $FF -i tone.wav -ac 1 -ar 8000 -c:a pcm_s16le wav_pcm16.wav
-$FF -i tone.wav -ac 1 -ar 8000 -c:a pcm_u8 -af atrim=end_sample=4001 wav_pcm8_odd_length.wav
+$FF -i tone.wav -ac 1 -c:a pcm_u8 -af aresample=8000,atrim=end_sample=4001 wav_pcm8_odd_length.wav
 $FF -i tone.wav -t 0.5 -ac 2 -ar 8000 -c:a pcm_s16le -rf64 always wav_rf64.wav
 $FF -i tone.wav -ac 1 -ar 8000 -c:a pcm_s16le -write_bext 1 -metadata title="bext and LIST" wav_bext_list.wav
 $FF -i tone.wav -ac 1 -ar 8000 -c:a adpcm_ms wav_adpcm_fact.wav
@@ -382,8 +389,8 @@ printf 'CHAPTER01=00:00:00.000\nCHAPTER01NAME=Start\nCHAPTER02=00:00:00.500\nCHA
 mkvmerge -q -o mkv_mkvmerge.mkv --chapters chapters.txt --attach-file text1.txt --title "HDSavior sample" mp4_ffmpeg_moov_last.mp4
 mkvmerge -q -o mkv_mkvmerge_audio.mka -D mp4_ffmpeg_moov_last.mp4
 # written to a pipe: the muxer cannot seek back, the segment size stays unknown
-$FF -i src.nut $X264 -c:a libvorbis -b:a 32k -f matroska - > special_mkv_unknown_size.mkv
-$FF -i src.nut -c:v libvpx -b:v 60k -an -f webm -live 1 - > special_mkv_live_unknown_clusters.webm
+$FF -i src.nut $X264 -c:a libvorbis -b:a 32k -cluster_time_limit 300 -f matroska - > special_mkv_unknown_size.mkv
+$FF -i src.nut -c:v libvpx -b:v 60k -an -f webm -live 1 - > special_mkv_live_stream.webm
 
 # ------------------------------------------------------------------- MP3 --
 say "mp3"
@@ -415,7 +422,8 @@ cp noise.bin ztree/noise.bin
 (cd ztree && echo "archive comment" > ../c.txt && rar a -idq -rr5 -z../c.txt ../rar_v5_recovery_comment.rar text1.txt sub/text2.txt)
 (cd ztree && rar a -idq -m0 ../rar_v5_stored.rar text1.txt sub/small.png)
 (cd ztree && rar a -idq -s -ma5 ../rar_v5_solid.rar text1.txt sub/text2.txt noise.bin)
-(cd ztree && rar a -idq -v4k -m0 ../rar_v5_volume.rar noise.bin && mv ../rar_v5_volume.part1.rar ../rar_v5_first_volume.rar && rm -f ../rar_v5_volume.part*.rar)
+# RAR 5 fills a volume up to its nominal size with zeros after the end block
+(cd ztree && rar a -idq -v4k -m0 ../rar_v5_volume.rar noise.bin && mv ../rar_v5_volume.part1.rar ../special_rar_v5_volume_padded.rar && rm -f ../rar_v5_volume.part*.rar)
 (cd ztree && rar a -idq -hpsecret ../special_rar_v5_encrypted_headers.rar text1.txt)
 if [ -n "${RAR4:-}" ]; then
   (cd ztree && "$RAR4" a -idq -r ../rar_v4_rar420.rar .)
@@ -436,8 +444,18 @@ fi
 say "copy"
 shopt -s nullglob
 n=0
-for f in jpeg_* png_* gif_* bmp_* tiff_*.tif tiff_*.dng pdf_* zip_* mp4_* heic_* wav_* avi_* webp_* mkv_* mp3_* 7z_* rar_* special_*; do
-  cp "$f" "$OUT/$f"; n=$((n + 1))
+PREFIXES="jpeg png gif bmp tiff pdf zip mp4 heic wav avi webp mkv mp3 7z rar special"
+for p in $PREFIXES; do
+  for f in "${p}"_*; do
+    cp "$f" "$OUT/$f"; n=$((n + 1))
+  done
+done
+# Samples that this run did not produce (optional tools missing, or a sample
+# was renamed) are left alone; say which, so that stale ones get noticed.
+for p in $PREFIXES; do
+  for f in "$OUT/${p}"_*; do
+    [ -e "$W/$(basename "$f")" ] || echo "kept, not regenerated: $(basename "$f")" >&2
+  done
 done
 echo "$n samples written to $OUT"
 du -cb "$OUT"/*.* | tail -1
