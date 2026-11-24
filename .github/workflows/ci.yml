@@ -2,15 +2,150 @@ name: CI
 
 on:
   push:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  # Crates that are finished; the others join as they are completed.
+  CRATES: -p hds-ntfs -p hds-io -p hds-carve
+
 jobs:
-  placeholder:
-    runs-on: ubuntu-latest
+  linux:
+    name: Linux (engine tests on real NTFS fixtures, app analysis)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - run: echo "Build and test jobs are added once the engine and app exist."
+
+      - name: Install fixture tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ntfs-3g fuse3 fdisk ffmpeg python3-pil
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - name: Build the NTFS fixtures (mkntfs + ntfs-3g)
+        run: |
+          sudo scripts/linux/make-fixtures.sh "$GITHUB_WORKSPACE/fixtures-out"
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/fixtures-out"
+          ls -la "$GITHUB_WORKSPACE/fixtures-out"
+
+      - name: Format
+        working-directory: engine
+        run: cargo fmt $CRATES -- --check
+
+      - name: Clippy
+        working-directory: engine
+        run: cargo clippy $CRATES --all-targets -- -D warnings
+
+      - name: Tests (with fixtures)
+        working-directory: engine
+        env:
+          HDS_FIXTURES: ${{ github.workspace }}/fixtures-out
+        run: cargo test $CRATES
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.50.1
+          channel: stable
+          cache: true
+
+      - name: Flutter analyze
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter analyze
+
+  windows:
+    name: Windows (engine tests, raw disk and destination guard on real virtual disks)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - name: Clippy (Windows code paths)
+        working-directory: engine
+        shell: bash
+        run: cargo clippy $CRATES --all-targets -- -D warnings
+
+      - name: Tests
+        working-directory: engine
+        shell: bash
+        run: cargo test $CRATES
+
+      - name: Build winprobe
+        working-directory: engine
+        shell: bash
+        run: cargo build --release -p hds-io --example winprobe
+
+      - name: Raw disk, destination guard and output primitives on virtual disks
+        shell: pwsh
+        run: scripts/windows/ci-io-probe.ps1 -Probe engine/target/release/examples/winprobe.exe
+
+  windows-app:
+    name: Windows app build (Flutter, requireAdministrator manifest, engine bundling)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - name: Build the engine
+        working-directory: engine
+        shell: bash
+        run: cargo build --release -p hds-engine
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.50.1
+          channel: stable
+          cache: true
+
+      - name: Build the app
+        working-directory: app
+        shell: pwsh
+        env:
+          HDSAVIOR_ENGINE_EXE: ${{ github.workspace }}\engine\target\release\hdsavior-engine.exe
+        run: |
+          flutter pub get
+          flutter build windows --release
+          $bundle = 'build\windows\x64\runner\Release'
+          if (-not (Test-Path "$bundle\hdsavior.exe")) { throw 'hdsavior.exe missing' }
+          if (-not (Test-Path "$bundle\hdsavior-engine.exe")) { throw 'the engine was not bundled' }
+          # The manifest must ask for administrator rights.
+          $exe = [IO.File]::ReadAllBytes((Resolve-Path "$bundle\hdsavior.exe"))
+          $text = [Text.Encoding]::ASCII.GetString($exe)
+          if ($text -notmatch 'requireAdministrator') { throw 'requireAdministrator not in the embedded manifest' }
+          Get-ChildItem $bundle
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hdsavior-windows-preview
+          path: app/build/windows/x64/runner/Release
+          retention-days: 7
