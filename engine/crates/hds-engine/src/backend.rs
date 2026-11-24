@@ -322,14 +322,21 @@ pub trait Backend: Send + Sync {
     /// `read_file`: `not_found`, `bad_request` for a folder, `unsupported`
     /// for a file whose content is not stored as plain clusters.
     fn read_file(&self, args: &ReadFileArgs) -> Result<FileBytes, ProtocolError>;
+
+    /// The logical sector size the session's source was scanned with, if
+    /// there is a session: `session_attach_source` opens an image file
+    /// with it (an image carries no sector size of its own, and a session
+    /// of a 4096-byte-sector disk must not be read as 512).
+    fn session_sector_size(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// The backend this build of the engine serves (`serve`, the command-line
-/// interface, the transcript test). Until `hds-core` and `hds-recover` are
-/// connected it is [`UnavailableBackend`]; connecting them means returning
-/// their implementation of [`Backend`] here.
+/// interface, the transcript test): [`RealBackend`](crate::real_backend::RealBackend),
+/// on top of `hds-core` and `hds-recover`.
 pub fn build_backend() -> Arc<dyn Backend> {
-    Arc::new(UnavailableBackend)
+    Arc::new(crate::real_backend::RealBackend::new())
 }
 
 /// The backend of an engine built without the scanner and the recovery

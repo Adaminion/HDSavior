@@ -23,7 +23,9 @@ name = "hds-engine"
 version = "0.1.0"
 dependencies = [
  "hds-carve",
+ "hds-core",
  "hds-io",
+ "hds-recover",
  "serde",
  "serde_json",
  "windows-sys",

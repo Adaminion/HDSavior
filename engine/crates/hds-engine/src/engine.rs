@@ -938,7 +938,13 @@ impl Engine {
         self.not_busy()?;
         self.session()?;
         validate::path("path", &args.path)?;
-        let source = open_source(args.kind, Path::new(&args.path), None)
+        // An image is read with the sector size the session was scanned
+        // with; a disk reports its own.
+        let sector_size = match args.kind {
+            SourceKind::Image => self.backend.session_sector_size(),
+            SourceKind::Disk => None,
+        };
+        let source = open_source(args.kind, Path::new(&args.path), sector_size)
             .map_err(|e| ProtocolError::from_io("cannot open the source", &e))?;
         let mut result = self
             .backend
@@ -971,7 +977,10 @@ impl Engine {
         let size = self.session()?.source_size;
         validate::geometry(args.cluster_size, args.volume_offset, size)?;
         let task = TaskContext::new(self.out.clone(), TaskName::GeometrySet);
-        let mut catalog = self.backend.geometry_set(&args, &task)?;
+        let mut catalog = self
+            .backend
+            .geometry_set(&args, &task)
+            .map_err(|e| self.after_failed_change(e))?;
         self.adopt_same_catalog(&mut catalog);
         reply(&catalog)
     }
@@ -984,9 +993,43 @@ impl Engine {
                 "the stray records cannot be made a file system",
             ));
         }
-        let mut catalog = self.backend.instance_set(&args)?;
+        let mut catalog = self
+            .backend
+            .instance_set(&args)
+            .map_err(|e| self.after_failed_change(e))?;
         self.adopt_new_catalog(&mut catalog);
         reply(&catalog)
+    }
+
+    /// A failed `geometry_set` or `instance_set` whose error data says
+    /// `catalog_reloaded`: the backend could not put its previous catalog
+    /// back and rebuilt it from the session, so the node set may differ and
+    /// a new epoch starts (PROTOCOL.md "Catalog epochs"). The new epoch is
+    /// added to the error's data; without a catalog the session has none.
+    fn after_failed_change(&mut self, mut error: ProtocolError) -> ProtocolError {
+        let reloaded = error
+            .data
+            .as_ref()
+            .and_then(|d| d.get(crate::real_backend::CATALOG_RELOADED))
+            .and_then(Value::as_bool)
+            == Some(true);
+        if !reloaded {
+            return error;
+        }
+        match self.backend.catalog_info() {
+            Ok(mut catalog) => {
+                self.adopt_new_catalog(&mut catalog);
+                if let Some(Value::Object(data)) = &mut error.data {
+                    data.insert("epoch".to_string(), Value::from(catalog.epoch));
+                }
+            }
+            Err(_) => {
+                if let Some(session) = &mut self.session {
+                    session.catalog = None;
+                }
+            }
+        }
+        error
     }
 
     fn list_children(&self, mut args: ListChildrenArgs) -> Handled {

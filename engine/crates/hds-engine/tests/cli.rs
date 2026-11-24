@@ -99,20 +99,46 @@ fn help_and_disks() {
 }
 
 #[test]
-fn commands_that_need_the_scanner_fail_with_exit_1() {
+fn the_build_backend_scans_and_refuses_what_it_cannot_do() {
     let dir = TempDir::new("cli");
     let image = zero_image(&dir, "src.img", 1 << 20);
     let session = dir.join("s.hds");
     let out = run(&["scan", &image, "--session", &session], None);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let lines = json_lines(&out);
     assert!(
         lines[0]["source"].is_object(),
         "the open_source result comes first"
     );
-    assert_eq!(lines.last().unwrap()["error"]["code"], "unsupported");
+    let done = lines.last().unwrap();
+    assert_eq!(done["event"], "scan_done");
+    assert_eq!(done["data"]["status"], "completed");
+    assert!(done["data"]["catalog"].is_object());
     let out = run(&["info", "--session", &session], None);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // A source without a single record cannot prove its identity (B4:
+    // fewer than 8 samples need `force`): the session is browsed alone.
+    let loaded = json_lines(&out).last().unwrap().clone();
+    assert_eq!(loaded["source_attached"], false);
+    assert_eq!(loaded["source_error"]["code"], "source_mismatch");
+    assert_eq!(loaded["catalog"]["scan_complete"], true);
+    // Imaging is not connected in this build.
+    let out = run(&["image", &image, "--dest", &dir.join("x.img")], None);
     assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        json_lines(&out).last().unwrap()["error"]["code"],
+        "unsupported"
+    );
     let out = run(
         &[
             "image",

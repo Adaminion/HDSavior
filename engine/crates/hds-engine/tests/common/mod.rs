@@ -66,6 +66,34 @@ pub struct Harness {
 }
 
 impl Harness {
+    /// An in-process engine over the backend this build serves.
+    pub fn real() -> Harness {
+        Harness {
+            engine: InProcess::start(hds_engine::backend::build_backend()),
+            fake: FakeBackend::new(FakeConfig::default()),
+            events: Vec::new(),
+        }
+    }
+
+    /// Like [`Harness::wait_event`] with a deadline of `timeout`.
+    pub fn wait_event_for(&mut self, name: &str, timeout: Duration) -> Value {
+        if let Some(i) = self.events.iter().position(|e| e.event == name) {
+            return self.events.remove(i).data;
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            assert!(Instant::now() < deadline, "no {name} in time");
+            match self.engine.next_line(timeout) {
+                Some(line) => match OutputLine::parse(&line) {
+                    Some(OutputLine::Event(event)) if event.event == name => return event.data,
+                    Some(OutputLine::Event(event)) => self.events.push(event),
+                    other => panic!("unexpected line {other:?}"),
+                },
+                None => panic!("no {name} in time"),
+            }
+        }
+    }
+
     pub fn new(jobs: FakeJobs) -> Harness {
         let fake = FakeBackend::new(FakeConfig {
             jobs,

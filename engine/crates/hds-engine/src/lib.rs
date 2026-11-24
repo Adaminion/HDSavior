@@ -8,6 +8,7 @@
 //!   guard's pre-check and the job manager.
 //! * [`backend`] - the [`Backend`](backend::Backend) trait: everything that
 //!   needs `hds-core` or `hds-recover`, at the protocol level.
+//! * [`real_backend`] - its implementation on `hds-core` and `hds-recover`.
 //! * [`server`] - `serve` over stdin / stdout, and [`InProcess`](server::InProcess)
 //!   for the command-line interface.
 //! * [`cli`] - the subcommands of ARCHITECTURE.md section 5.6.
@@ -32,6 +33,7 @@ pub mod engine;
 pub mod output;
 pub mod platform;
 pub mod protocol;
+pub mod real_backend;
 pub mod server;
 pub mod testing;
 pub mod transcript;

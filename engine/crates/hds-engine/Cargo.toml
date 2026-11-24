@@ -19,6 +19,10 @@ path = "src/main.rs"
 [dependencies]
 hds-io = { workspace = true }
 hds-carve = { workspace = true }
+# The real backend (module `real_backend`): scanner, session, catalog and
+# queries from hds-core; flags, ratings and the content reader from hds-recover.
+hds-core = { workspace = true }
+hds-recover = { workspace = true }
 # The wire form of the protocol (PROTOCOL.md): one JSON object per line.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

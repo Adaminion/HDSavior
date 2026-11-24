@@ -154,9 +154,24 @@ fn hello_and_disks_with_the_build_backend() {
         json!({"path": image, "purpose": "image"}),
     );
     assert_eq!(check.result.unwrap()["verdict"], "overlaps_source");
-    // Without scanner: an honest refusal, not a crash.
-    let scan = e.call(5, "scan_start", json!({}));
-    assert_eq!(scan.error.unwrap().code.as_str(), "unsupported");
+    // The build backend scans; imaging is not connected yet: an honest
+    // refusal, not a crash.
+    let image_job = e.call(
+        5,
+        "image_start",
+        json!({"dest": dir.join("copy.img"), "allow_unknown_disk": true}),
+    );
+    assert_eq!(image_job.error.unwrap().code.as_str(), "unsupported");
+    let scan = e.call(6, "scan_start", json!({}));
+    assert!(scan.ok, "{scan:?}");
+    let done = loop {
+        match e.next() {
+            OutputLine::Event(ev) if ev.event == "scan_done" => break ev,
+            OutputLine::Event(_) => {}
+            OutputLine::Response(r) => panic!("unexpected response {r:?}"),
+        }
+    };
+    assert_eq!(done.data["status"], "completed");
     let (status, rest, stderr) = e.wait();
     assert!(status.success(), "{status:?}");
     assert!(rest.is_empty(), "{rest:?}");
