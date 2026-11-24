@@ -139,7 +139,7 @@
 //!
 //! | Kind, extensions | Signature | End | Confidence | Known gaps |
 //! |---|---|---|---|---|
-//! | [`Jpeg`](FileKind::Jpeg): `jpg` | `FF D8 FF` and a first segment as real encoders write it: APP0 `JFIF`/`JFXX`, APP1 `Exif`/XMP, APP2 ICC/MPF/FlashPix, APP8 SPIFF, APP12 `Ducky`, APP13 `Photoshop 3.0`, APP14 `Adobe`, a printable COM, or a structurally valid DQT, DHT, SOF or DRI (40 bits or more) | Marker segments by their lengths, tables and frame header checked; each scan's entropy-coded data scanned for the next marker (`FF00` stuffing, `RSTn` in order, fill bytes); ends at the first `EOI` at marker level, so an Exif thumbnail inside APP1 never ends the file | Exact | Data behind `EOI` is left out on purpose: further images of an MPO file, motion-photo video, vendor trailers. The entropy-coded data is decoded (Huffman, not the picture) to verify the end; files it does not cover are measured, unverified. After a scan was found broken, the search for the next marker gives up at 64 KiB of zeros. Other first segments (APP3-7, 9-11, 15), hierarchical JPEG and JPEG-LS are not sniffed. |
+//! | [`Jpeg`](FileKind::Jpeg): `jpg` | `FF D8 FF` and a first segment as real encoders write it: APP0 `JFIF`/`JFXX`, APP1 `Exif`/XMP, APP2 ICC/MPF/FlashPix, APP8 SPIFF, APP12 `Ducky`, APP13 `Photoshop 3.0`, APP14 `Adobe`, a printable COM, or a structurally valid DQT, DHT, SOF or DRI (40 bits or more) | Marker segments by their lengths, tables and frame header checked; each scan's entropy-coded data scanned for the next marker (`FF00` stuffing, `RSTn` in order, fill bytes); ends at the first `EOI` at marker level, so an Exif thumbnail inside APP1 never ends the file | Exact | Data behind `EOI` is left out on purpose: further images of an MPO file, motion-photo video, vendor trailers. The entropy-coded data is decoded (Huffman, not the picture) to verify the end; files it does not cover are measured, unverified. Foreign data that is valid entropy-coded data for the same frame passes only if the MCU counts add up exactly - practically only for a copy of the same picture with other metadata, shifted by a few bytes. After a scan was found broken, the search for the next marker gives up at 64 KiB of zeros. Other first segments (APP3-7, 9-11, 15), hierarchical JPEG and JPEG-LS are not sniffed. |
 //! | [`Png`](FileKind::Png): `png` | 8-byte signature, `IHDR` with length 13 and valid fields (128 bits) | Chunk walk through `IEND`, **every CRC verified** (the whole file is read: PNGs are small and this is the one image format that can prove it is intact) | Exact | Apple's `CgBI` variant, MNG and JNG are not sniffed. |
 //! | [`Gif`](FileKind::Gif): `gif` | `GIF87a`/`GIF89a`, non-zero screen size (48 bits) | Block walk: image descriptors, the four extension types, data sub-blocks, trailer `3B`; at least one image | Exact | No checksums; the LZW codes are decoded (as pixel counts) to verify the end. Files with stray bytes between blocks are rejected. A line of text starting with `GIF89a` can pass `sniff` (not `measure`). |
 //! | [`Bmp`](FileKind::Bmp): `bmp` | `BM`, reserved words zero, a known DIB header size, one plane, valid depth and compression, sane dimensions (about 100 bits) | Arithmetic on the header: pixel offset + padded rows (+ V5 embedded profile), compared with the file-size field | Exact when both agree; Probable for RLE data, a missing or smaller size field, or up to 1 KiB of declared padding | Length from the header alone. JPEG/PNG-compressed DIBs are rejected. |
@@ -469,9 +469,12 @@ pub struct Measured {
     /// Whether the structure proves the end: the walk reached `len` by
     /// following the format's own chain through every payload, and what it
     /// found there confirms the end (an end marker, an end record, an
-    /// index or header read *behind* the last payload). `false` when the
-    /// end is only arithmetic on a header written before the payload, or
-    /// when the format has no end at all. The rule for every kind is in
+    /// index or header read *behind* the last payload; for JPEG and GIF,
+    /// the compressed data decoded to exactly the picture's size). `false`
+    /// when the end is only arithmetic on a header written before the
+    /// payload, when the format has no end at all, and when the walker
+    /// looked for more of the file where the data (or `max_len`) ends and
+    /// stopped because there was nothing. The rule for every kind is in
     /// the crate documentation ("Verified ends"); the carving job rates a
     /// carved file `good` only when this is `true` (ALGORITHMS I3).
     ///

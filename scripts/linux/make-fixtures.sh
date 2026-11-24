@@ -536,20 +536,29 @@ format_volume() {
     helper format --state "$STATE" --which "$which" --volume "$VOL" -- -Q -F "$@" >/dev/null
 }
 
-# build_old PROFILE [helper populate options: --compression, --prelude N, ...]
+# build_old PROFILE [--straddle BYTES] [helper populate options: --compression, --prelude N, ...]
 # populate through a read-write mount (in two phases with a remount in
 # between), capture through a read-only mount, cross-check raw, keep a copy of
-# the pre-accident volume
+# the pre-accident volume.  --straddle BYTES (profile repart): three phases;
+# after the first, straddle-plan reads the unmounted volume and picks the fill
+# files whose cuts make room for files across byte BYTES of the volume.
 build_old() {
-    local profile=$1 phase mount_opt=""
+    local profile=$1 phase phases="1 2" mount_opt="" straddle=""
     shift
+    if [ "${1:-}" = "--straddle" ]; then
+        straddle=$2 phases="1 2 3"
+        shift 2
+    fi
     case " $* " in *" --compression "*) mount_opt=compression ;; esac
     step "populate ($profile${*:+ $*}) through ntfs-3g"
-    for phase in 1 2; do
+    for phase in $phases; do
         mount_vol "$VOL" rw "$mount_opt"
         helper populate --state "$STATE" --root "$MNT" --samples "$SAMPLES" --profile "$profile" \
             --phase "$phase" "$@"
         umount_vol
+        if [ "$phase" = 1 ] && [ -n "$straddle" ]; then
+            helper straddle-plan --state "$STATE" --volume "$VOL" --boundary "$straddle"
+        fi
     done
     step "capture ground truth through a read-only mount"
     mount_vol "$VOL" ro
@@ -876,7 +885,7 @@ scenario_repartition() {
         "Whole-disk image with an MBR. The old NTFS volume filled a 128 MiB partition at sector 2048 (4 KiB clusters, data all over it). Accident: the disk was re-partitioned into two 56 MiB partitions (the last 16 MiB stay unpartitioned) and both were quick-formatted; the first one starts where the old volume did, and its new \$MFT's slots up to 255 were zeroed. The nominal scan range is the first partition." \
         --boundary 255
     format_volume old -c 4096 "${GEO[@]}" -p "$start" -L OLD-REPART
-    build_old repart --prelude 255 --compression
+    build_old repart --straddle "$p1" --prelude 255 --compression
     wait_after_last_write "$VOL" accident
     local old_vol=$VOL p1vol="$WORK/$NAME.p1.img" p2vol="$WORK/$NAME.p2.img"
     step "re-partition: cut the two new partitions out of the old one, format them, put them back"

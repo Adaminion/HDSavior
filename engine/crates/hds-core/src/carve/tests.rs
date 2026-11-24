@@ -88,6 +88,44 @@ fn extension_names() {
 }
 
 #[test]
+#[allow(clippy::single_range_in_vec_init)]
+fn i4_a_carved_file_inside_a_deleted_file() {
+    const C: u64 = 4096;
+    let mut set = CarvedSet::new();
+    set.apply(&CarveRun {
+        kinds: KindSet::all(),
+        geometry: geometry(),
+        files: vec![
+            file(10 * C, 3 * C, FileKind::Jpeg, "jpg", true),
+            file(20 * C, C + 1, FileKind::Png, "png", true),
+            file(40 * C, 100, FileKind::Gif, "gif", true),
+        ],
+    });
+    let own = |at: u64| Some(at);
+    // nothing carved there, or carved bytes that only touch or cross the
+    // extents, do not count
+    assert!(!set.overwrites_deleted(&[0..C, 5 * C..9 * C], own(0), 5 * C));
+    assert!(!set.overwrites_deleted(&[11 * C..20 * C], own(11 * C), 9 * C));
+    assert!(!set.overwrites_deleted(&[20 * C..21 * C], own(20 * C), C));
+    assert!(!set.overwrites_deleted(&[], None, 0));
+    // the file's own content: at its first byte, no longer than it
+    assert!(!set.overwrites_deleted(&[10 * C..13 * C], own(10 * C), 3 * C));
+    assert!(!set.overwrites_deleted(&[10 * C..14 * C], own(10 * C), 3 * C + 5));
+    // inside, and not its own: written over it
+    assert!(set.overwrites_deleted(&[9 * C..14 * C], own(9 * C), 5 * C));
+    assert!(set.overwrites_deleted(&[10 * C..14 * C], own(10 * C), 3 * C - 1));
+    assert!(set.overwrites_deleted(&[10 * C..14 * C], None, 4 * C));
+    assert!(set.overwrites_deleted(&[39 * C..41 * C], own(39 * C), 2 * C));
+    // extents in any order, overlapping or touching, are joined: the PNG
+    // spans two clusters held by two runs
+    assert!(set.overwrites_deleted(&[21 * C..22 * C, 0..C, 20 * C..21 * C], own(0), 3 * C));
+    assert!(set.overwrites_deleted(&[20 * C..21 * C + 1, 20 * C..20 * C + 5], own(0), 3 * C));
+    assert!(!set.overwrites_deleted(&[21 * C..22 * C, 0..C, 20 * C..21 * C - 1], own(0), 3 * C));
+    // empty ranges are ignored
+    assert!(!set.overwrites_deleted(&[50 * C..50 * C, 40 * C..40 * C], own(0), 3 * C));
+}
+
+#[test]
 fn a_carved_file_as_node_and_plan() {
     let measured = Measured {
         len: 70_000,
@@ -450,6 +488,7 @@ mod next_to_mft_records {
     }
 
     #[test]
+    #[allow(clippy::single_range_in_vec_init)]
     fn files_next_to_old_mft_records() {
         let g = CarveGeometry::new(C, 0).unwrap();
         let png = sample("png_rgb.png");

@@ -77,7 +77,7 @@ use crate::live::{LiveIndex, LiveSnapshot, LiveState, RecordClass};
 use crate::session::SessionMeta;
 use crate::store::{RecordId, ScanStore};
 
-pub use overrides::{KindChoice, Overrides};
+pub use overrides::{KindChoice, Overrides, Target, MAX_WITNESSES};
 
 pub(crate) const NONE: u32 = u32::MAX;
 
@@ -187,8 +187,10 @@ pub struct Container {
 pub struct Instance {
     /// Its id.
     pub id: InstanceId,
-    /// Stable identity across rebuilds: the lowest disk offset of its
-    /// records (the key of [`Overrides`]).
+    /// The lowest disk offset of its records: orders the instances and
+    /// names one within a layout. It changes when a resumed scan adds
+    /// records below it; overrides name instances by a [`Target`]
+    /// ([`Layout::target_of`]) instead.
     pub key: u64,
     /// Its kind.
     pub kind: InstanceKind,
@@ -383,6 +385,7 @@ pub struct Layout {
     protected: Vec<Protected>,
     contradictions: u64,
     unexplained: u64,
+    unmatched_overrides: usize,
     /// Log lines of the decisions (merges, choices), for diagnostics.
     pub log: Vec<String>,
 }
@@ -635,6 +638,7 @@ pub fn analyze(
         protected: Vec::new(),
         contradictions: frags.contradictions,
         unexplained: frags.unexplained,
+        unmatched_overrides: 0,
         live,
         log,
     };
@@ -735,19 +739,42 @@ impl Layout {
             .instances
             .iter()
             .position(|i| i.kind == InstanceKind::Strays);
-        // Kind overrides (never on strays).
-        let choices: Vec<Option<KindChoice>> = self
-            .instances
-            .iter()
-            .enumerate()
-            .map(|(i, inst)| {
-                if Some(i) == strays {
-                    None
-                } else {
-                    overrides.kind(inst.key)
+        // Overrides, by the instance that holds most of their records
+        // (never strays); the one set last wins.
+        let n_inst = self.instances.len();
+        let mut choices: Vec<Option<KindChoice>> = vec![None; n_inst];
+        let mut manual_geo: Vec<Option<(u32, u64)>> = vec![None; n_inst];
+        let mut forced: Option<usize> = None;
+        let mut unmatched = 0usize;
+        for (t, c) in overrides.kinds() {
+            match self.resolve(store, t).map(InstanceId::index) {
+                Some(i) => {
+                    if let Some(slot) = choices.get_mut(i) {
+                        *slot = Some(*c);
+                    }
+                    if *c == KindChoice::Main {
+                        forced = Some(i);
+                    }
                 }
-            })
-            .collect();
+                None => unmatched = unmatched.saturating_add(1),
+            }
+        }
+        for (i, c) in choices.iter_mut().enumerate() {
+            if *c == Some(KindChoice::Main) && Some(i) != forced {
+                *c = None;
+            }
+        }
+        for (t, cs, off) in overrides.geometries() {
+            match self.resolve(store, t).map(InstanceId::index) {
+                Some(i) => {
+                    if let Some(slot) = manual_geo.get_mut(i) {
+                        *slot = Some((*cs, *off));
+                    }
+                }
+                None => unmatched = unmatched.saturating_add(1),
+            }
+        }
+        self.unmatched_overrides = unmatched;
         for (inst, c) in self.instances.iter_mut().zip(&choices) {
             if Some(inst.id.index()) == strays {
                 continue;
@@ -772,9 +799,6 @@ impl Layout {
             .filter(|&i| choices.get(i).copied().flatten() != Some(KindChoice::Other))
             .collect();
         let auto = self.auto_main(&pickable);
-        let forced = (0..self.instances.len()).rev().find(|&i| {
-            choices.get(i).copied().flatten() == Some(KindChoice::Main) && Some(i) != strays
-        });
         let main = forced.or(auto);
         self.main = main.and_then(|i| u32::try_from(i).ok()).map(InstanceId);
         self.log.push(format!(
@@ -847,8 +871,8 @@ impl Layout {
             self.starts.clone(),
         );
         let mut effective: Vec<Option<Geometry>> = Vec::with_capacity(self.instances.len());
-        for inst in &self.instances {
-            let g = match overrides.geometry(inst.key) {
+        for (inst, manual) in self.instances.iter().zip(&manual_geo) {
+            let g = match *manual {
                 Some((cs, off)) if Some(inst.id.index()) != strays => {
                     let files = InstanceFiles::build(store, &inst.records);
                     Some(geometry::manual(
@@ -867,7 +891,7 @@ impl Layout {
         }
         let main_geo = main.and_then(|m| effective.get(m).cloned().flatten());
         for (i, inst) in self.instances.iter().enumerate() {
-            let manual = overrides.geometry(inst.key).is_some() && Some(i) != strays;
+            let manual = manual_geo.get(i).is_some_and(|g| g.is_some()) && Some(i) != strays;
             let inherit = !manual
                 && matches!(inst.kind, InstanceKind::Older | InstanceKind::Strays)
                 && !effective
@@ -1088,6 +1112,52 @@ impl Layout {
     /// The instance with this key.
     pub fn instance_by_key(&self, key: u64) -> Option<&Instance> {
         self.instances.iter().find(|i| i.key == key)
+    }
+
+    /// The instance an override target names now: the one that holds the
+    /// most of its records (ties: the lower id), never strays. `None` when
+    /// none of its records is in an instance (all in strays or current).
+    pub fn resolve(&self, store: &ScanStore, target: &Target) -> Option<InstanceId> {
+        let mut counts: BTreeMap<u32, u32> = BTreeMap::new();
+        for &off in target.offsets() {
+            let Some(id) = store.record_at(off) else {
+                continue;
+            };
+            let Some(&i) = self.rec_inst.get(id.index()) else {
+                continue;
+            };
+            if i == NONE {
+                continue;
+            }
+            let e = counts.entry(i).or_insert(0);
+            *e = e.saturating_add(1);
+        }
+        counts
+            .into_iter()
+            .filter(|&(i, _)| {
+                self.instances
+                    .get(usize::try_from(i).unwrap_or(usize::MAX))
+                    .is_some_and(|x| x.kind != InstanceKind::Strays)
+            })
+            .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+            .map(|(i, _)| InstanceId(i))
+    }
+
+    /// The override target of an instance (`None` for strays or an
+    /// instance without records).
+    pub fn target_of(&self, store: &ScanStore, id: InstanceId) -> Option<Target> {
+        let inst = self.instance(id)?;
+        if inst.kind == InstanceKind::Strays {
+            return None;
+        }
+        Target::of(store, &inst.records)
+    }
+
+    /// Overrides of the last [`Layout::apply`] that apply to no instance:
+    /// all their records went to strays or to a current volume. They are
+    /// kept (a later scan can bring their instance back).
+    pub fn unmatched_overrides(&self) -> usize {
+        self.unmatched_overrides
     }
 
     /// The main instance.

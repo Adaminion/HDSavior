@@ -46,7 +46,7 @@ mod tests;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::ops::Range;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use hds_carve::{kinds_for_extension, matches_extension, FileKind, SNIFF_LEN};
@@ -82,6 +82,8 @@ pub const END_RANK: usize = 4;
 /// (boot sectors, signature anchors); F7 gathers the evidence of any other
 /// pair itself.
 pub const MAX_CANDIDATES: usize = 16;
+/// Long loops poll the cancel flag every this many steps.
+const CANCEL_POLL: u32 = 1 << 16;
 
 /// Where a cluster size came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -710,10 +712,11 @@ pub(crate) fn content_check(
 /// How [`gather`] collects signature anchors.
 #[derive(Debug, Clone, Copy)]
 enum SigMode {
-    /// Keep the best `n` anchor offsets by the F3 ranking: only those can
-    /// be among the checked candidates (signature anchors exist only
-    /// without index votes, so a candidate with signature votes ranks
-    /// above every candidate without).
+    /// Keep the best `n` anchor offsets by the F3 ranking. Signature
+    /// anchors exist only without index votes, so a candidate with
+    /// signature votes ranks above every candidate without: the best `n`
+    /// candidates overall are exactly what they would be with every
+    /// anchor offset kept, evidence included.
     Top(usize),
     /// Count the votes for this one offset only (F7).
     At(u64),
@@ -728,7 +731,8 @@ fn gather(
     inst_files: &InstanceFiles,
     cs: u32,
     sig: SigMode,
-) -> BTreeMap<u64, Cand> {
+    cancel: &AtomicBool,
+) -> Result<BTreeMap<u64, Cand>, HeadError> {
     let store = ctx.store;
     let cs64 = u64::from(cs);
     let mut cands: BTreeMap<u64, Cand> = BTreeMap::new();
@@ -886,7 +890,7 @@ fn gather(
                 // The `keep` best by the F3 ranking key, in a bounded
                 // max-heap (the worst kept one on top).
                 let mut best: BinaryHeap<(RankKey, u64, u64)> = BinaryHeap::new();
-                merge_anchor_votes(ctx, &anchors, &mut |off, n| {
+                merge_anchor_votes(ctx, &anchors, cancel, &mut |off, n| {
                     if ctx.valid_offset(i128::from(off)).is_none() {
                         return;
                     }
@@ -897,7 +901,7 @@ fn gather(
                     if best.len() > keep {
                         best.pop();
                     }
-                });
+                })?;
                 found.extend(best.into_iter().map(|(_, off, n)| (off, n)));
             }
         }
@@ -909,7 +913,7 @@ fn gather(
             }
         }
     }
-    cands
+    Ok(cands)
 }
 
 /// F1-F6 for one instance. `members` are its records (number, id) by
@@ -931,8 +935,9 @@ pub(crate) fn compute(
         members,
         inst_files,
         cs,
-        SigMode::Top(CHECK_CANDIDATES),
-    );
+        SigMode::Top(MAX_CANDIDATES.max(CHECK_CANDIDATES)),
+        cancel,
+    )?;
 
     // F3 on the best candidates.
     let mut ranked: Vec<(RankKey, u64)> = cands.iter().map(|(&o, c)| (c.rank_key(), o)).collect();
@@ -1061,12 +1066,14 @@ fn anchor_files(
 ///
 /// A k-way merge by cursors over the per-kind sorted hit lists, shifted on
 /// the fly: memory is one heap entry per (file, kind), whatever the number
-/// of carve hits; time is O(files x hits x log(files x kinds)).
+/// of carve hits; time is O(files x hits x log(files x kinds)), with
+/// `cancel` polled every [`CANCEL_POLL`] steps.
 fn merge_anchor_votes(
     ctx: &GeoContext<'_>,
     anchors: &[(u64, &'static [FileKind])],
+    cancel: &AtomicBool,
     found: &mut dyn FnMut(u64, u64),
-) {
+) -> Result<(), HeadError> {
     let hits = ctx.carve_by_kind();
     let list_of = |kind: FileKind| -> &[u64] {
         hits.get(usize::from(carve_kind_code(kind)))
@@ -1086,7 +1093,12 @@ fn merge_anchor_votes(
     // The offset being counted, its number of distinct files, and the
     // last file counted for it (entries of one file are adjacent).
     let mut cur: Option<(u64, u64, usize)> = None;
+    let mut steps = 0u32;
     while let Some(Reverse((v, fi, ki, pos))) = heap.pop() {
+        steps = steps.wrapping_add(1);
+        if steps.checked_rem(CANCEL_POLL) == Some(0) && cancel.load(Ordering::Relaxed) {
+            return Err(HeadError::Cancelled);
+        }
         match &mut cur {
             Some((cv, cn, last)) if *cv == v => {
                 if *last != fi {
@@ -1117,6 +1129,7 @@ fn merge_anchor_votes(
             found(cv, cn);
         }
     }
+    Ok(())
 }
 
 /// The number of anchor files that vote for `off` (a hit of one of their
@@ -1195,7 +1208,8 @@ pub(crate) fn manual(
         inst_files,
         cluster_size,
         SigMode::At(volume_offset),
-    );
+        cancel,
+    )?;
     let same = cands.get(&volume_offset);
     let (checked, matched) =
         content_check(ctx, cluster_size, volume_offset, inst_files, heads, cancel)?;

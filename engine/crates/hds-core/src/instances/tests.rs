@@ -409,7 +409,7 @@ fn d7_an_instance_inside_a_file_is_embedded() {
     assert_eq!(guest.label, "[Inside guest.img]");
     // instance_set "other" makes it a volume of its own.
     let mut o = Overrides::new();
-    o.set_kind(guest.key, Some(KindChoice::Other));
+    o.set_kind(run.store(), l, guest.id, Some(KindChoice::Other));
     let l2 = run.reanalyze(&o);
     let g2 = l2.instance(guest.id).unwrap();
     assert_eq!(g2.kind, InstanceKind::Other);
@@ -442,7 +442,7 @@ fn d8_the_anchor_is_main_and_instance_set_overrules_it() {
     assert_eq!(l.instance(big).unwrap().kind, InstanceKind::Other);
     // instance_set main on the other one; the previous main becomes other.
     let mut o = Overrides::new();
-    o.set_kind(l.instance(big).unwrap().key, Some(KindChoice::Main));
+    o.set_kind(run.store(), l, big, Some(KindChoice::Main));
     let l2 = run.reanalyze(&o);
     assert_eq!(l2.main(), Some(big));
     assert_eq!(l2.instance(anchor).unwrap().kind, InstanceKind::Other);
@@ -456,7 +456,7 @@ fn d8_the_anchor_is_main_and_instance_set_overrules_it() {
     assert_eq!(again.instances(), l2.instances());
     assert_eq!(again.protected(), l2.protected());
     // "auto" withdraws it.
-    o.set_kind(l.instance(big).unwrap().key, None);
+    o.set_kind(run.store(), l, big, None);
     assert_eq!(run.reanalyze(&o).main(), Some(anchor));
 }
 
@@ -870,11 +870,12 @@ mod synth {
     }
 }
 
-/// Reviewer: many record-0 holders whose $MFT runs cover the whole disk:
-/// each placement scans every record inside its runs (holders x records).
+/// Review finding: many record-0 holders whose $MFT runs cover the whole
+/// disk made each D4(c) placement scan every record inside its runs
+/// (holders x records). Measurement: `RV_HOLDERS`, `RV_RECS`.
 #[test]
 #[ignore]
-fn rv_many_mft_holders() {
+fn scale_many_mft_holders() {
     let holders: u64 = std::env::var("RV_HOLDERS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
     let recs: u32 = std::env::var("RV_RECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30000);
     let mib = (8 + u64::from(recs) * 1024 / MIB + holders * 3 * 1024 / MIB + 4) as usize;
@@ -895,36 +896,92 @@ fn rv_many_mft_holders() {
     println!("records {} instances {} scan+analysis {:.2}s", run.store().record_count(), run.layout.instances().len(), t0.elapsed().as_secs_f64());
 }
 
-/// Reviewer: an override is keyed by the instance's lowest record offset;
-/// records found later at a lower offset (a resumed scan) change the key
-/// and the stored choice no longer applies.
-#[test]
-fn rv_override_key_changes_when_records_are_added() {
+/// Two old instances B (files 300..329 at 1 MiB naming directories
+/// 30..49 at 5 MiB, both older) and a newer A at 8 MiB.
+fn resumed_lab() -> Lab {
     let mut lab = Lab::new(16);
-    // B2: directories 30..49 at 5 MiB (old times).
     let o2 = 5 * MIB - 30 * 1024;
     for n in 30..50 {
         lab.rec(o2, &dir(n, 1, ROOT, &format!("d{n}"), t(10)));
     }
-    // B1: files 300..329 at 1 MiB naming those directories.
     let o1 = MIB - 300 * 1024;
     for n in 300..330 {
-        lab.rec(o1, &file(n, 1, fref(u64::from(30 + n % 20), 1), "b.txt", t(10), None));
+        lab.rec(
+            o1,
+            &file(n, 1, fref(u64::from(30 + n % 20), 1), "b.txt", t(10), None),
+        );
     }
-    // A: newer files 30..79 at 8 MiB (sequence 2: they never resolve B1's references).
+    // A: newer files 30..79 (sequence 2: they never resolve B1's
+    // references).
     let oa = 8 * MIB - 30 * 1024;
     for n in 30..80 {
         lab.rec(oa, &file(n, 2, ROOT, "a.txt", t(1000), None));
     }
-    // Stopped scan: only [4 MiB, 16 MiB) read so far. The user picks B.
+    lab
+}
+
+#[test]
+fn overrides_survive_a_resumed_scan_that_adds_lower_records() {
+    // Review finding: overrides were keyed by the lowest record offset; a
+    // resumed scan that found records of the instance below it dropped the
+    // user's choice silently.
+    let lab = resumed_lab();
+    // A scan stopped early: only [4 MiB, 16 MiB) read. The user picks B
+    // as main and sets its geometry.
     let partial = lab.run(Some(4 * MIB..16 * MIB));
-    let b = partial.layout.instance(partial.inst(5 * MIB).unwrap()).unwrap().clone();
+    let b = partial.inst(5 * MIB).unwrap();
+    let b_key = partial.layout.instance(b).unwrap().key;
     let mut ov = Overrides::new();
-    ov.set_kind(b.key, Some(KindChoice::Main));
+    ov.set_kind(partial.store(), &partial.layout, b, Some(KindChoice::Main));
+    ov.set_geometry(partial.store(), &partial.layout, b, Some((4096, 2 * MIB)));
     let partial2 = lab.run_with(Some(4 * MIB..16 * MIB), &ov);
     assert_eq!(partial2.kind(5 * MIB), Some(InstanceKind::Main));
-    // Resumed scan finds B1 at 1 MiB: same instance, but the choice is gone.
+    // The resumed (full) scan finds B1 at 1 MiB: one instance with a lower
+    // key, and the choices still apply to it.
     let full = lab.run_with(None, &ov);
-    assert_eq!(full.inst(MIB), full.inst(5 * MIB), "B1 and B2 are one instance");
-    assert_eq!(full.kind(5 * MIB), Some(InstanceKind::Main), "the user's choice of main was lost");
+    let fb = full.inst(5 * MIB).unwrap();
+    assert_eq!(full.inst(MIB), Some(fb), "B1 and B2 are one instance");
+    assert_ne!(full.layout.instance(fb).unwrap().key, b_key);
+    assert_eq!(full.kind(5 * MIB), Some(InstanceKind::Main));
+    assert!(full.layout.instance(fb).unwrap().manual);
+    let g = full.layout.instance(fb).unwrap().geometry.clone().unwrap();
+    assert_eq!(
+        (g.volume_offset, g.offset_source),
+        (2 * MIB, crate::geometry::OffsetSource::Manual)
+    );
+    assert_eq!(full.layout.unmatched_overrides(), 0);
+    // Without the override, B is older and A main.
+    let auto = lab.run(None);
+    assert_eq!(auto.kind(5 * MIB), Some(InstanceKind::Older));
+    // "auto" on the joined instance withdraws the choice made on part of
+    // it, through the old target.
+    let mut ov2 = ov.clone();
+    ov2.set_kind(full.store(), &full.layout, fb, None);
+    assert!(ov2.kinds().is_empty());
+    assert_eq!(lab.run_with(None, &ov2).kind(5 * MIB), Some(InstanceKind::Older));
+}
+
+#[test]
+fn overrides_resolve_to_the_instance_holding_most_of_their_records() {
+    let lab = resumed_lab();
+    let full = lab.run(None);
+    let a = full.inst(8 * MIB).unwrap();
+    let b = full.inst(5 * MIB).unwrap();
+    let ta = full.layout.target_of(full.store(), a).unwrap();
+    assert!(ta.offsets().len() <= MAX_WITNESSES);
+    assert_eq!(full.layout.resolve(full.store(), &ta), Some(a));
+    // Strays have no target; an override whose records are all strays
+    // applies to nothing and is counted.
+    let strays = full.layout.instances().last().unwrap();
+    assert_eq!(strays.kind, InstanceKind::Strays);
+    assert_eq!(full.layout.target_of(full.store(), strays.id), None);
+    let mut ov = Overrides::new();
+    ov.set_kind(full.store(), &full.layout, b, Some(KindChoice::Main));
+    ov.set_kind(full.store(), &full.layout, a, Some(KindChoice::Other));
+    // Main replaces any earlier Main; Other on A stays.
+    ov.set_kind(full.store(), &full.layout, a, Some(KindChoice::Main));
+    assert_eq!(ov.kinds().len(), 1);
+    let l = full.reanalyze(&ov);
+    assert_eq!(l.main(), Some(a));
+    assert_eq!(l.unmatched_overrides(), 0);
 }

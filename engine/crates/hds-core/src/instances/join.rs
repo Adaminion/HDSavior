@@ -209,11 +209,17 @@ pub(crate) struct Work<'a> {
     pub insts: Vec<Option<IState>>,
     next_version: u64,
     placements: BTreeMap<u32, Placement>,
+    /// Fragments by origin: (origin, fragment index), ascending.
+    frag_by_origin: Vec<(i64, u32)>,
+    /// (c) reverse index: per instance root, the holders whose placement
+    /// counted records of it (holder ids as they were then; resolve with
+    /// `find`). Moved to the keeper on every merge, so it lists every
+    /// holder that can place an instance.
+    placed_by: HashMap<u32, Vec<u32>>,
     files_cache: HashMap<u32, FilesEntry>,
     content_cache: HashMap<(u32, u64, u32, u64), (u64, u64)>,
     pass_roots: Vec<u32>,
     pass_validated: Vec<u32>,
-    pass_holders: Vec<u32>,
     pub log: Vec<String>,
 }
 
@@ -240,11 +246,21 @@ impl<'a> Work<'a> {
             insts: Vec::with_capacity(nseg),
             next_version: 1,
             placements: BTreeMap::new(),
+            frag_by_origin: {
+                let mut v: Vec<(i64, u32)> = frags
+                    .fragments
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (f.origin, u32::try_from(i).unwrap_or(NONE)))
+                    .collect();
+                v.sort_unstable();
+                v
+            },
+            placed_by: HashMap::new(),
             files_cache: HashMap::new(),
             content_cache: HashMap::new(),
             pass_roots: Vec::new(),
             pass_validated: Vec::new(),
-            pass_holders: Vec::new(),
             log: Vec::new(),
         };
         // Cuts touching each segment.
@@ -520,6 +536,14 @@ impl<'a> Work<'a> {
         let fresh = self.placements.get(&x).is_some_and(|p| p.signature == sig);
         if !fresh {
             let p = self.compute_placement(sig);
+            for c in &p.counts {
+                for &root in c.keys() {
+                    let list = self.placed_by.entry(root).or_default();
+                    if list.last() != Some(&x) {
+                        list.push(x);
+                    }
+                }
+            }
             self.placements.insert(x, p);
         }
         self.placements.get(&x)
@@ -571,40 +595,71 @@ impl<'a> Work<'a> {
                 }
             }
         }
-        let by_offset = store.records_by_offset();
+        // A record numbered n of size z at disk offset d is placed by a run
+        // (disk start, VCN byte vbase) when d - n x z == start - vbase:
+        // exactly the records of the fragments at that origin whose
+        // numbers fall inside the run. Counted per segment (records of a
+        // segment share their instance), so a run costs O(log + segments),
+        // whatever the number of records it covers.
         let mut counts = Vec::new();
         for o in own {
             let mut c: BTreeMap<u32, u64> = BTreeMap::new();
+            let mut hits: Vec<(u32, u64)> = Vec::new();
             for vr in &map.runs {
                 let Some(lcn) = vr.run.lcn else { continue };
                 let Some(start) = lcn.checked_mul(cs64).and_then(|b| b.checked_add(o)) else {
                     continue;
                 };
-                let end = vr.run.length.saturating_mul(cs64).saturating_add(start);
                 let Some(vbase) = vr.vcn.checked_mul(cs64) else {
                     continue;
                 };
-                let first = by_offset
-                    .partition_point(|&id| store.record(id).map_or(0, |r| r.disk_offset()) < start);
-                for &id in by_offset.get(first..).unwrap_or(&[]) {
-                    let Some(t) = store.record(id) else { continue };
-                    let d = t.disk_offset();
-                    if d >= end {
+                let vend = vr.run.length.saturating_mul(cs64).saturating_add(vbase);
+                let Ok(origin) = i64::try_from(i128::from(start).saturating_sub(i128::from(vbase)))
+                else {
+                    continue;
+                };
+                let from = self.frag_by_origin.partition_point(|&(x, _)| x < origin);
+                for &(x, fi) in self.frag_by_origin.get(from..).unwrap_or(&[]) {
+                    if x != origin {
                         break;
                     }
-                    let n = self.frags.num.get(id.index()).copied().unwrap_or(NONE);
-                    if n == NONE {
+                    let Some(f) = self.frags.fragments.get(usize::try_from(fi).unwrap_or(usize::MAX))
+                    else {
                         continue;
-                    }
-                    let want = vbase.saturating_add(d.saturating_sub(start));
-                    if u64::from(n).checked_mul(u64::from(t.record_size())) != Some(want) {
+                    };
+                    let z = u64::from(f.record_size);
+                    let (Some(lo), Some(hi)) = (vbase.checked_div(z), vend.checked_div(z)) else {
                         continue;
-                    }
-                    if let Some(root) = self.root_of(id) {
-                        let e = c.entry(root).or_insert(0);
-                        *e = e.saturating_add(1);
+                    };
+                    // Numbers n with vbase <= n x z < vend.
+                    let lo = if lo.checked_mul(z) == Some(vbase) {
+                        lo
+                    } else {
+                        lo.saturating_add(1)
+                    };
+                    let hi = if hi.checked_mul(z) == Some(vend) {
+                        hi
+                    } else {
+                        hi.saturating_add(1)
+                    };
+                    let i0 = f.records.partition_point(|&(n, _)| u64::from(n) < lo);
+                    let i1 = f.records.partition_point(|&(n, _)| u64::from(n) < hi);
+                    for &sid in &f.segments {
+                        let Some(seg) = self.frags.segments.get(sid.index()) else {
+                            continue;
+                        };
+                        let k = seg.end.min(i1).saturating_sub(seg.start.max(i0));
+                        if k == 0 {
+                            continue;
+                        }
+                        hits.push((sid.0, u64::try_from(k).unwrap_or(u64::MAX)));
                     }
                 }
+            }
+            for (sid, k) in hits {
+                let root = self.find(sid);
+                let e = c.entry(root).or_insert(0);
+                *e = e.saturating_add(k);
             }
             counts.push(c);
         }
@@ -646,7 +701,9 @@ impl<'a> Work<'a> {
             .map(|g| (g.chosen.cluster_size, g.chosen.volume_offset))
     }
 
-    /// F3 of `x`'s validated geometry over `y`'s files (cached).
+    /// F3 of `x`'s validated geometry over `y`'s files (cached); `None`
+    /// without a validated geometry or when `y` has fewer than
+    /// [`CONTENT_MIN`] checkable files.
     fn content(
         &mut self,
         x: u32,
@@ -663,6 +720,11 @@ impl<'a> Work<'a> {
             return Ok(Some(r));
         }
         let (_, files) = self.files_of(y);
+        if files.checkable.len() < usize::try_from(CONTENT_MIN).unwrap_or(usize::MAX) {
+            // Fewer than CONTENT_MIN checkable files can give neither
+            // evidence nor a contradiction: read no heads for them.
+            return Ok(None);
+        }
         let r = geometry::content_check(self.ctx, cs, off, &files, heads, cancel)?;
         self.content_cache.insert((x, xv, y, yv), r);
         Ok(Some(r))
@@ -840,6 +902,12 @@ impl<'a> Work<'a> {
         if let Some(p) = self.placements.remove(&gone) {
             self.placements.entry(keep).or_insert(p);
         }
+        if let Some(v) = self.placed_by.remove(&gone) {
+            let list = self.placed_by.entry(keep).or_default();
+            list.extend(v);
+            list.sort_unstable();
+            list.dedup();
+        }
         self.files_cache.remove(&gone);
         self.files_cache.remove(&keep);
         self.content_cache
@@ -902,20 +970,24 @@ impl<'a> Work<'a> {
             if let Some(s) = self.st(m) {
                 out.extend(s.adj.keys().copied());
             }
-            let holders: Vec<u32> = self
-                .pass_holders
-                .iter()
-                .copied()
-                .filter(|&r| self.st(r).is_some_and(|s| s.rec0.is_some()))
-                .collect();
-            for x in holders {
-                if x == m {
-                    if let Some(p) = self.placement(m) {
-                        for c in &p.counts {
-                            out.extend(c.iter().filter(|(_, &n)| n >= MAP_MIN).map(|(&k, _)| k));
-                        }
+            // m as a holder: what its placement counts.
+            if self.st(m).is_some_and(|s| s.rec0.is_some()) {
+                if let Some(p) = self.placement(m) {
+                    for c in &p.counts {
+                        out.extend(c.iter().filter(|(_, &n)| n >= MAP_MIN).map(|(&k, _)| k));
                     }
-                } else if self.map_evidence(x, m) >= MAP_MIN {
+                }
+            }
+            // m as the other side: only holders that placed records of
+            // it can (every holder's placement was computed at the start
+            // of the pass), not every holder.
+            let placed_by = self.placed_by.get(&m).cloned().unwrap_or_default();
+            for x in placed_by {
+                let x = self.find(x);
+                if x != m
+                    && self.st(x).is_some_and(|s| s.rec0.is_some())
+                    && self.map_evidence(x, m) >= MAP_MIN
+                {
                     out.insert(x);
                 }
             }
@@ -952,12 +1024,18 @@ impl<'a> Work<'a> {
             .copied()
             .filter(|&r| self.validated_geo(r).is_some())
             .collect();
-        self.pass_holders = self
-            .pass_roots
-            .iter()
-            .copied()
-            .filter(|&r| self.st(r).is_some_and(|s| s.rec0.is_some()))
-            .collect();
+        if step == 2 {
+            // Every holder's placement, so that `placed_by` is complete.
+            let holders: Vec<u32> = self
+                .pass_roots
+                .iter()
+                .copied()
+                .filter(|&r| self.st(r).is_some_and(|s| s.rec0.is_some()))
+                .collect();
+            for h in holders {
+                let _ = self.placement(h);
+            }
+        }
         let push = |w: &mut Work<'_>,
                     heap: &mut BinaryHeap<Entry>,
                     m: u32,
@@ -984,12 +1062,6 @@ impl<'a> Work<'a> {
                 continue;
             }
             let keep = self.merge(a, b);
-            let gone = if keep == a { b } else { a };
-            for h in &mut self.pass_holders {
-                if *h == gone {
-                    *h = keep;
-                }
-            }
             merged = true;
             self.log
                 .push(format!("D4 step {step} merged {a}+{b} by {ev:?} -> {keep}"));

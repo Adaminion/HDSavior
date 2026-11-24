@@ -854,7 +854,7 @@ fn zip_retries_share_one_pass_over_the_disk() {
         kinds: KindSet::all(),
         geometry: geometry(4096, 0),
         hits,
-        done: ranges(&[0..size]),
+        done: std::iter::once(0..size).collect(),
         protected_files: none(),
         overwritten: none(),
         live_allocated: none(),

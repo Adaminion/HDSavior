@@ -193,6 +193,28 @@ class Tree:
         """Register a file that was written by special means (sparse writes, truncation ...)."""
         return self._add(path, "file", size, data_sha, ctype, tags)
 
+    def rewrite(self, path, data):
+        """Replace the content of an existing file; it keeps its MFT record."""
+        e = self.live[path]
+        with open(self.real(path), "r+b") as f:
+            f.write(data)
+            f.truncate(len(data))
+        if os.lstat(self.real(path)).st_ino != e["mft_record"]:
+            fail("%r changed its MFT record when it was rewritten" % path)
+        e["size"], e["sha256"] = len(data), sha256_hex(data)
+        return e
+
+    def truncate(self, path, size):
+        """Cut an existing file to size bytes (the driver frees the clusters behind it)."""
+        e = self.live[path]
+        os.truncate(self.real(path), size)
+        with open(self.real(path), "rb") as f:
+            data = f.read()
+        if len(data) != size:
+            fail("%r reads back %d bytes after truncation to %d" % (path, len(data), size))
+        e["size"], e["sha256"] = size, sha256_hex(data)
+        return e
+
     def rename(self, path, new_path):
         """Move an entry (and everything below it) to another folder; it keeps its MFT record."""
         if new_path in self.live or new_path in self.deleted:
@@ -905,10 +927,94 @@ def profile_host(t, opts, phase):
     trash_early(t)
 
 
+# repartition: the end of the first new partition (REPART_P1 bytes into the
+# old volume) must have old files lying across it.  Where ntfs-3g puts a file
+# depends on everything written before it (and the sample set depends on the
+# toolchain), so the files that straddle it are made by construction instead:
+# see profile_repart and cmd_straddle_plan.
+REPART_FILL = 1 << 20           # size of the files that fill the volume
+REPART_ACROSS = 4               # files made to straddle the boundary
+
+
+def write_until_enospc(path, data):
+    """Write data to a new file until it is all written or the volume is full; returns the bytes written."""
+    pos = 0
+    with open(path, "wb", buffering=0) as f:
+        for step in (65536, 4096):
+            while pos < len(data):
+                want = min(step, len(data) - pos)
+                try:
+                    n = f.write(data[pos:pos + want]) or 0
+                except OSError as e:
+                    if e.errno != errno.ENOSPC:
+                        raise
+                    n = 0
+                pos += n
+                if n < want:
+                    break
+    if os.path.getsize(path) != pos:
+        fail("%s: %d bytes on the volume, %d written" % (path, os.path.getsize(path), pos))
+    return pos
+
+
+def fill_volume(t, folder, size):
+    """Fill every free cluster with files of size bytes; returns (files written in full, empty files).
+
+    All files are created (empty) first, a few more than the free space
+    needs: once the data fills the MFT zone, the $MFT could only grow
+    somewhere else and would become fragmented.  The last file written is
+    shorter; those behind it stay empty.
+    """
+    t.mkdir(folder)
+    st = os.statvfs(t.root)
+    count = st.f_bfree * st.f_frsize // size + 2
+    paths = ["%s/fill-%03d.bin" % (folder, i) for i in range(count)]
+    for p in paths:
+        t.write(p, b"")
+    for i, p in enumerate(paths):
+        data = C.rnd(p, size)
+        n = write_until_enospc(t.real(p), data)
+        e = t.live[p]
+        e["size"], e["sha256"] = n, sha256_hex(data[:n])
+        if n < size:
+            return i, count - i - 1
+    fail("%d files of %d bytes did not fill the volume" % (count, size))
+
+
 def profile_repart(t, opts, phase):
-    """The large old volume of repartition: data all over the volume."""
-    if phase == 2:
+    """The large old volume of repartition: data all over the volume, which ends up full.
+
+    Phase 1 creates the tree, REPART_ACROSS empty files in "across" and then
+    fills every free cluster with 1 MiB files ("fill").  Between phases 1 and
+    2, make-fixtures.sh runs "straddle-plan" on the unmounted volume: it reads
+    where the fill files landed and pairs fill files lying wholly before the
+    end of the first new partition with ones lying wholly behind it.  Phase 2
+    cuts both files of a pair to half their size, which frees 128 clusters on
+    each side of the boundary, and right away writes one "across" file that
+    needs exactly those 256 clusters.  Nothing else on the volume is free
+    (straddle-plan checks that fewer than 64 clusters are), so the file must
+    take clusters on both sides: it straddles the boundary whatever the
+    allocator prefers.  Then a further fill file is cut in half, so that phase
+    3 (trash_late) has room, and the early trash is deleted.
+    """
+    if phase == 3:
         return trash_late(t)
+    if phase == 2:
+        plan = opts["plan"]
+        if not plan or len(plan["pairs"]) != REPART_ACROSS:
+            fail("repart: phase 2 needs the plan of straddle-plan")
+        half = REPART_FILL // 2
+        for i, (before, behind) in enumerate(plan["pairs"]):
+            t.truncate(before, half)
+            t.truncate(behind, half)
+            p = "across/across-%d.bin" % i
+            t.rewrite(p, C.rnd(p, REPART_FILL - 777))
+        t.truncate(plan["reserve"], half)
+        t.notes.append("the volume was filled up with 1 MiB files (fill/); %d pairs of them, one wholly in "
+                       "front of the first new partition's end and one wholly behind it, were cut to half "
+                       "their size and an across/ file of 256 clusters written right after each cut: with no "
+                       "other free space it had to take clusters on both sides" % REPART_ACROSS)
+        return trash_early(t)
     if opts["prelude"]:
         add_prelude(t, opts["prelude"])
     add_samples(t, "media")
@@ -922,7 +1028,57 @@ def profile_repart(t, opts, phase):
     for i in range(200):
         t.typed("late/late-%03d.%s" % (i, ["png", "pdf", "zip", "txt"][i % 4]), 30000 + 1300 * (i % 50))
     add_trash(t)
-    trash_early(t)
+    t.mkdir("across")
+    for i in range(REPART_ACROSS):
+        t.write("across/across-%d.bin" % i, b"")
+    full, empty = fill_volume(t, "fill", REPART_FILL)
+    log("volume filled: %d fill files of %d bytes, one shorter, %d left empty" % (full, REPART_FILL, empty))
+
+
+def cmd_straddle_plan(args):
+    """repartition, between populate phases 1 and 2: choose the fill files to cut (see profile_repart).
+
+    Reads the unmounted volume raw.  --boundary is the end of the first new
+    partition in bytes from the start of the old volume.
+    """
+    state = load_state(args.state)
+    vol = RawVolume(args.volume)
+    cs = vol.cs
+    edge = args.boundary // cs                     # first cluster behind the boundary
+    total = vol.boot["total_sectors"] * vol.sector // cs
+    bits = Bitmap(vol).bits
+    free = sum(1 for c in range(total) if not bits[c // 8] >> (c % 8) & 1)
+    freed = (REPART_FILL - REPART_FILL // 2) // cs  # clusters a cut frees on each side
+    if free >= freed // 2:
+        fail("straddle-plan: %d clusters are still free after filling the volume; a written file could "
+             "avoid one side of the boundary" % free)
+    before, behind = [], []
+    for e in state["tree"]["live"]:
+        if not e["path"].startswith("fill/") or e["size"] != REPART_FILL:
+            continue
+        n = e["mft_record"]
+        if base_of(e["path"]) not in [x["name"] for x in names_of(vol, n)]:
+            fail("straddle-plan: record %d is not %s" % (n, e["path"]))
+        s = vol.stream(n)
+        if s is None or s["resident"] or s["size"] != REPART_FILL:
+            fail("straddle-plan: unexpected $DATA in %s" % e["path"])
+        runs = [(lcn, length) for lcn, length in s["runs"] if lcn is not None]
+        if max(lcn + length for lcn, length in runs) <= edge:
+            before.append((-max(lcn + length for lcn, length in runs), e["path"]))
+        elif min(lcn for lcn, _ in runs) >= edge:
+            behind.append((min(lcn for lcn, _ in runs), e["path"]))
+    before.sort()
+    behind.sort()
+    if len(before) < REPART_ACROSS or len(behind) < REPART_ACROSS + 1:
+        fail("straddle-plan: %d fill files lie wholly before cluster %d, %d wholly behind it; %d and %d needed"
+             % (len(before), edge, len(behind), REPART_ACROSS, REPART_ACROSS + 1))
+    pairs = [[before[i][1], behind[i][1]] for i in range(REPART_ACROSS)]
+    state["straddle_plan"] = {"boundary": args.boundary, "free_clusters": free, "pairs": pairs,
+                              "reserve": behind[-1][1]}
+    vol.close()
+    save_state(args.state, state)
+    log("straddle plan: %d clusters free; %d fill files wholly before cluster %d, %d wholly behind it; "
+        "cutting %s" % (free, len(before), edge, len(behind), ", ".join("%s + %s" % tuple(p) for p in pairs)))
 
 
 PROFILES = {
@@ -937,6 +1093,9 @@ PROFILES = {
     "repart": profile_repart,
 }
 
+# Every profile is populated in two phases (two mounts), repart in three.
+LAST_PHASE = {"repart": 3}
+
 
 def cmd_populate(args):
     state = load_state(args.state)
@@ -944,10 +1103,11 @@ def cmd_populate(args):
     t = Tree(args.root, args.samples, old["cluster_size"], old["mft_record_size"])
     opts = {"compression": args.compression, "prelude": args.prelude, "restored": args.restored,
             "source": args.source}
-    if args.phase == 2:
+    if args.phase > 1:
         t.restore(state.pop("tree"))
+    opts["plan"] = state.get("straddle_plan")
     PROFILES[args.profile](t, opts, args.phase)
-    if args.phase == 1:
+    if args.phase < LAST_PHASE.get(args.profile, 2):
         state["tree"] = t.dump()
         save_state(args.state, state)
         return
@@ -2901,10 +3061,15 @@ def _(state, ctx):
     outside_bad = [e for e in outside if not e["after"]["content_intact"]]
     straddle = [e for e in outside if any(lo <= ctx["volume_offset"] + o * state["old_volume"]["cluster_size"] < hi
                                           for o, _ in [(r[0], r[1]) for r in e["ondisk"]["runs"] if r[0] is not None])]
-    if not inside_ok or not outside_ok or not outside_bad or not straddle:
+    # Minimums with a wide margin: the volume is full (profile_repart), so the
+    # second partition's format can only hit old files, and REPART_ACROSS
+    # files are made to straddle the boundary.
+    need = (50, 100, 5, REPART_ACROSS)
+    have = (len(inside_ok), len(outside_ok), len(outside_bad), len(straddle))
+    if any(h < n for h, n in zip(have, need)):
         fail("repartition: %d intact files inside the first partition, %d intact and %d damaged files reaching "
-             "beyond it, %d straddling its end; all four are required"
-             % (len(inside_ok), len(outside_ok), len(outside_bad), len(straddle)))
+             "beyond it, %d straddling its end; all four are required (at least %d, %d, %d and %d)"
+             % (have + need))
     end = ctx["volume_offset"] + ctx["volume_length"]
     with open(ctx["image_path"], "rb") as f:
         f.seek(end - state["old_volume"]["sector_size"])
@@ -3852,12 +4017,19 @@ def main():
     p.add_argument("--samples", required=True)
     p.add_argument("--profile", choices=sorted(PROFILES), required=True)
     p.add_argument("--compression", action="store_true")
-    p.add_argument("--phase", type=int, choices=(1, 2), required=True)
+    p.add_argument("--phase", type=int, choices=(1, 2, 3), required=True)
     p.add_argument("--prelude", type=int, default=0,
                    help="create the prelude first, pushing later entries past this record number")
     p.add_argument("--restored", action="store_true", help="gen2: creation times as restored from a backup")
     p.add_argument("--source", default="", help="host: the volume image stored as a file")
     p.set_defaults(fn=cmd_populate)
+
+    p = sub.add_parser("straddle-plan")
+    p.add_argument("--state", required=True)
+    p.add_argument("--volume", required=True)
+    p.add_argument("--boundary", type=int, required=True,
+                   help="bytes from the start of the volume to the boundary files must straddle")
+    p.set_defaults(fn=cmd_straddle_plan)
 
     p = sub.add_parser("capture")
     p.add_argument("--state", required=True)

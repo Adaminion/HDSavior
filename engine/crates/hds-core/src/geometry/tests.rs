@@ -17,7 +17,7 @@ use std::sync::atomic::AtomicBool;
 
 use super::*;
 use crate::instances::testlab::*;
-use crate::instances::{InstanceKind, KindChoice, Overrides};
+use crate::instances::{InstanceKind, KindChoice, Overrides, MAX_WITNESSES};
 
 const MIB: u64 = 1 << 20;
 const CS: u64 = 4096;
@@ -369,9 +369,8 @@ fn f7_a_manual_geometry_replaces_the_computed_one() {
     signatures(&mut lab, 25, 12 * MIB);
     let run = lab.run(None);
     let id = run.inst(12 * MIB + 30 * 1024).unwrap();
-    let key = run.layout.instance(id).unwrap().key;
     let mut o = Overrides::new();
-    o.set_geometry(key, Some((4096, MIB)));
+    o.set_geometry(run.store(), &run.layout, id, Some((4096, MIB)));
     let l = run.reanalyze(&o);
     let inst = l.instance(id).unwrap();
     let g = inst.geometry.as_ref().unwrap();
@@ -389,6 +388,157 @@ fn f7_a_manual_geometry_replaces_the_computed_one() {
         run.layout.instance(id).unwrap().own_geometry
     );
     assert_eq!(inst.records, run.layout.instance(id).unwrap().records);
+}
+
+/// Signature-anchor votes per offset counted naively: for every PNG file
+/// of the instance at `origin`, every PNG hit `d` votes for `d - lcn x cs`.
+fn naive_png_votes(run: &Run, lcns: &[u64]) -> std::collections::HashMap<u64, u64> {
+    let hits: Vec<u64> = run
+        .store()
+        .carve_hits()
+        .filter(|h| h.kind() == hds_carve::FileKind::Png)
+        .map(|h| h.disk_offset())
+        .collect();
+    let mut votes = std::collections::HashMap::new();
+    for &l in lcns {
+        let mut mine = std::collections::BTreeSet::new();
+        for &d in &hits {
+            if d >= l * CS {
+                mine.insert(d - l * CS);
+            }
+        }
+        for o in mine {
+            *votes.entry(o).or_insert(0u64) += 1;
+        }
+    }
+    votes
+}
+
+#[test]
+fn f2_many_signature_anchors_keep_only_the_best_candidates() {
+    // Review finding: every offset with 3 votes became a stored candidate
+    // (and the vote streams were copied per file). 10,240 PNG heads at
+    // every sector of [6 MiB, 11 MiB) give thousands of offsets with
+    // votes from all 25 files.
+    let mut lab = Lab::new(16);
+    signatures(&mut lab, 25, 12 * MIB);
+    let mut o = 6 * MIB;
+    while o < 11 * MIB {
+        lab.put(o, &png_head());
+        o += 512;
+    }
+    let run = lab.run(None);
+    let inst = run
+        .layout
+        .instance(run.inst(12 * MIB + 30 * 1024).unwrap())
+        .unwrap();
+    let lcns: Vec<u64> = (0..25).map(png_lcn).collect();
+    let naive = naive_png_votes(&run, &lcns);
+    let anchored = naive.values().filter(|&&v| v >= ANCHOR_VOTES).count();
+    assert!(anchored > 5000, "{anchored} offsets with 3 votes");
+    assert!(
+        inst.candidates.len() <= MAX_CANDIDATES,
+        "{} candidates kept",
+        inst.candidates.len()
+    );
+    // The votes counted by the merge equal the naive count, and the kept
+    // ones are the best: all with the most votes.
+    let top = naive.values().copied().max().unwrap();
+    assert_eq!(top, 25);
+    for c in &inst.candidates {
+        assert_eq!(
+            c.signature_votes,
+            naive.get(&c.volume_offset).copied().unwrap_or(0),
+            "votes at {}",
+            c.volume_offset
+        );
+    }
+    assert!(inst.candidates[..CHECK_CANDIDATES]
+        .iter()
+        .all(|c| c.signature_votes == top));
+    // The true offset still wins and is validated.
+    let g = inst.own_geometry.as_ref().unwrap();
+    assert_eq!((g.volume_offset, g.signature_checked, g.signature_ok), (0, 25, 25));
+    assert!(g.validated);
+    // F7 on an offset that is not among the kept candidates: its evidence
+    // is gathered for that pair.
+    let (&far, &votes) = naive
+        .iter()
+        .filter(|&(o, &v)| v >= ANCHOR_VOTES && o % 512 == 0)
+        .filter(|(o, _)| inst.candidates.iter().all(|c| c.volume_offset != **o))
+        .max_by_key(|&(o, v)| (*v, *o))
+        .unwrap();
+    let mut ov = Overrides::new();
+    ov.set_geometry(run.store(), &run.layout, inst.id, Some((4096, far)));
+    let l = run.reanalyze(&ov);
+    let g = l.instance(inst.id).unwrap().geometry.clone().unwrap();
+    assert_eq!((g.volume_offset, g.offset_source), (far, OffsetSource::Manual));
+    assert_eq!(g.signature_votes, votes);
+}
+
+#[test]
+fn f2_f5_many_boot_hits_are_not_quadratic() {
+    // Review finding: every candidate's F5 scanned every boot hit, and all
+    // 2 x hits candidates were sized and stored.
+    let n = 5000u64;
+    let mut lab = Lab::new(16 + (n * 2048 / MIB) as usize + 2);
+    for k in 0..n {
+        let off = 16 * MIB + k * 2048;
+        lab.put(
+            off,
+            &boot_sector(512, 8, 16383 + k, 4, 8, -10, 1, (off / 512) as u32),
+        );
+    }
+    resident_files(&mut lab, 4 * MIB, 30..60);
+    let t0 = std::time::Instant::now();
+    let run = lab.run(None);
+    let secs = t0.elapsed().as_secs_f64();
+    let inst = run
+        .layout
+        .instance(run.inst(4 * MIB + 30 * 1024).unwrap())
+        .unwrap();
+    assert!(
+        inst.candidates.len() <= MAX_CANDIDATES,
+        "{} candidates kept",
+        inst.candidates.len()
+    );
+    // The best boot reading (consistent with its hidden sectors) is chosen
+    // and sized by its own boot sector.
+    let g = inst.own_geometry.as_ref().unwrap();
+    assert_eq!(g.offset_source, OffsetSource::Boot);
+    assert_eq!(g.volume_offset, 16 * MIB);
+    assert_eq!(g.total_clusters, 16383 * 512 / CS);
+    assert!(secs < 30.0, "{secs:.1} s");
+}
+
+#[test]
+fn d4b_reads_no_heads_for_instances_too_small_to_check() {
+    // Review finding: D4(b) read one head per (validated instance,
+    // one-record instance) pair, though fewer than 3 checkable files give
+    // neither evidence nor a contradiction.
+    let n = 300u64;
+    let mut lab = Lab::new(64);
+    signatures(&mut lab, 25, 12 * MIB);
+    for k in 0..n {
+        let num = 100_000 + k as u32 * 7;
+        lab.rec_at(
+            20 * MIB + k * 3 * 1024,
+            &file(num, 1, ROOT, "x.jpg", t(100), Some((3000 + k, 1))),
+        );
+    }
+    let run = lab.run(None);
+    let main = own(&run, 12 * MIB + 30 * 1024);
+    assert!(main.validated);
+    let mut alone = Lab::new(64);
+    signatures(&mut alone, 25, 12 * MIB);
+    let base = alone.run(None).heads.reads();
+    assert_eq!(
+        run.heads.reads(),
+        base,
+        "the one-record instances cost no head reads"
+    );
+    // They are strays, as before.
+    assert_eq!(run.kind(20 * MIB), Some(InstanceKind::Strays));
 }
 
 #[test]
@@ -411,7 +561,7 @@ fn f4_older_instances_inherit_mains_geometry_and_other_keeps_its_own() {
     );
     // instance_set "other": read with its own geometry.
     let mut o = Overrides::new();
-    o.set_kind(older.key, Some(KindChoice::Other));
+    o.set_kind(run.store(), &run.layout, older.id, Some(KindChoice::Other));
     let l = run.reanalyze(&o);
     let g = l.instance(older.id).unwrap().geometry.as_ref().unwrap();
     assert_ne!(g.offset_source, OffsetSource::Inherited);
@@ -445,105 +595,46 @@ fn heads_round_trip_and_hostile_payloads() {
 #[test]
 fn overrides_round_trip_and_hostile_payloads() {
     let mut o = Overrides::new();
-    o.set_kind(10, Some(KindChoice::Main));
-    o.set_kind(20, Some(KindChoice::Main)); // replaces the first main
-    o.set_kind(30, Some(KindChoice::Other));
-    o.set_geometry(20, Some((8192, 1 << 20)));
-    assert_eq!(o.kind(10), None);
-    assert_eq!(o.kind(20), Some(KindChoice::Main));
+    o.push_kind(vec![10, 4096], KindChoice::Main);
+    o.push_kind(vec![30], KindChoice::Other);
+    o.push_geometry(vec![20, 1 << 40], 8192, 1 << 20);
+    assert!(!o.is_empty());
     let p = o.to_payload();
     assert_eq!(Overrides::from_payload(&p).unwrap(), o);
     for cut in 0..p.len() {
         assert!(Overrides::from_payload(&p[..cut]).is_err());
     }
+    // A count bomb, an empty target, too many witnesses, a wrong version.
+    let mut bomb = p[..5].to_vec();
+    bomb.extend_from_slice(&(u64::MAX / 2).to_le_bytes());
+    assert!(Overrides::from_payload(&bomb).is_err());
+    let mut empty = Overrides::new();
+    empty.push_kind(Vec::new(), KindChoice::Main);
+    assert!(Overrides::from_payload(&empty.to_payload()).is_err());
+    let mut many = Overrides::new();
+    many.push_kind((0..=MAX_WITNESSES as u64).collect(), KindChoice::Main);
+    assert!(Overrides::from_payload(&many.to_payload()).is_err());
+    let mut v9 = p.clone();
+    v9[4] = 9;
+    assert!(Overrides::from_payload(&v9).is_err());
     // An impossible cluster size is refused.
     let mut bad = Overrides::new();
-    bad.set_geometry(1, Some((3000, 0)));
+    bad.push_geometry(vec![1], 3000, 0);
     assert!(Overrides::from_payload(&bad.to_payload()).is_err());
-    o.set_kind(20, None);
-    o.set_geometry(20, None);
-    o.set_kind(30, None);
-    assert!(o.is_empty());
-}
-
-fn rv_peak_kb() -> u64 {
-    let s = std::fs::read_to_string("/proc/self/status").unwrap();
-    s.lines().find(|l| l.starts_with("VmHWM")).unwrap().split_whitespace().nth(1).unwrap().parse().unwrap()
-}
-
-/// Reviewer: signature anchors materialise one stream of all matching
-/// carve hits per sampled file (64 x hits).
-#[test]
-#[ignore]
-fn rv_signature_anchor_memory() {
-    let mib: u64 = std::env::var("RV_MIB").ok().and_then(|v| v.parse().ok()).unwrap_or(256);
-    let step: u64 = std::env::var("RV_STEP").ok().and_then(|v| v.parse().ok()).unwrap_or(512);
-    let mut lab = Lab::new(mib as usize);
-    let head = png_head();
-    let mut o = 16 * MIB;
-    while o + 512 <= mib * MIB {
-        lab.put(o, &head);
-        o += step;
-    }
-    for i in 0..100u32 {
-        lab.rec(4 * MIB, &file(30 + i, 1, ROOT, &format!("p{i}.png"), t(100), Some((4096 + u64::from(i) * 7, 1))));
-    }
-    let source = lab.source();
-    drop(lab);
-    let range = 0..source.size();
-    let ranged = hds_io::RangedSource::new(source.clone(), range.clone()).unwrap();
-    let options = crate::scan::ScanOptions::default();
-    let meta = crate::session::SessionMeta::new(crate::session::SourceIdentity::from(&source.info()), range, options).unwrap();
-    let mut session = crate::session::Session::new(meta);
-    let cancel = AtomicBool::new(false);
-    crate::scan::scan(&ranged, &options, &mut session, &mut crate::scan::NoObserver, &cancel);
-    println!("carve hits {}", session.store().carve_hits().count());
-    let live = crate::live::LiveState { scan_time: Some(SCAN), snapshot: None };
-    let mut heads = Heads::new();
-    heads.attach(Some(ranged.clone()));
-    std::fs::write("/proc/self/clear_refs", "5").unwrap();
-    let before = rv_peak_kb();
-    let t0 = std::time::Instant::now();
-    let input = crate::instances::AnalysisInput::new(session.store(), session.meta(), &live);
-    let layout = crate::instances::analyze(&input, &mut heads, &Overrides::new(), &cancel).unwrap();
-    let ncand: usize = layout.instances().iter().map(|i| i.candidates.len()).sum();
-    println!("analysis {:.2}s, peak before {} MiB after {} MiB, candidates {}", t0.elapsed().as_secs_f64(), before / 1024, rv_peak_kb() / 1024, ncand);
-}
-
-/// Reviewer: many boot hits make F2/F5 quadratic (every candidate's F5
-/// scans every boot hit).
-#[test]
-#[ignore]
-fn rv_many_boot_hits() {
-    let n: u64 = std::env::var("RV_BOOTS").ok().and_then(|v| v.parse().ok()).unwrap_or(20000);
-    let mib = (16 + n * 2048 / MIB + 2) as usize;
-    let mut lab = Lab::new(mib);
-    for k in 0..n {
-        let off = 16 * MIB + k * 2048;
-        lab.put(off, &boot_sector(512, 8, 16383 + k, 4, 8, -10, 1, (off / 512) as u32));
-    }
-    resident_files(&mut lab, 4 * MIB, 30..60);
-    let t0 = std::time::Instant::now();
-    let run = lab.run(None);
-    let ncand: usize = run.layout.instances().iter().map(|i| i.candidates.len()).sum();
-    println!("boot hits {} scan+analysis {:.2}s candidates {}", run.store().boot_hits().len(), t0.elapsed().as_secs_f64(), ncand);
-}
-
-/// Reviewer: D4(b) in step 4 reads heads for every (validated instance,
-/// instance) pair, also for one-record instances that can never reach 3
-/// checked files.
-#[test]
-#[ignore]
-fn rv_tiny_fragments_cost_head_reads() {
-    let n: u64 = std::env::var("RV_TINY").ok().and_then(|v| v.parse().ok()).unwrap_or(5000);
-    let mut lab = Lab::new(64);
-    signatures(&mut lab, 25, 12 * MIB);
-    for k in 0..n {
-        let num = 100_000 + k as u32 * 7;
-        lab.rec_at(20 * MIB + k * 3 * 1024, &file(num, 1, ROOT, "x.jpg", t(100), Some((3000 + k, 1))));
-    }
-    let t0 = std::time::Instant::now();
-    let run = lab.run(None);
-    let validated = run.layout.instances().iter().filter(|i| i.own_geometry.as_ref().is_some_and(|g| g.validated)).count();
-    println!("tiny {} instances {} validated {} head reads {} stored {} {:.2}s", n, run.layout.instances().len(), validated, run.heads.reads(), run.heads.len(), t0.elapsed().as_secs_f64());
+    // Version 1 (one lowest-record offset per override) is still read.
+    let mut v1 = b"HDOV".to_vec();
+    v1.push(1);
+    v1.extend_from_slice(&1u64.to_le_bytes());
+    v1.extend_from_slice(&4096u64.to_le_bytes());
+    v1.push(0);
+    v1.extend_from_slice(&1u64.to_le_bytes());
+    v1.extend_from_slice(&8192u64.to_le_bytes());
+    v1.extend_from_slice(&4096u32.to_le_bytes());
+    v1.extend_from_slice(&(1u64 << 20).to_le_bytes());
+    let o1 = Overrides::from_payload(&v1).unwrap();
+    assert_eq!(o1.kinds().len(), 1);
+    assert_eq!(o1.kinds()[0].0.offsets(), &[4096]);
+    assert_eq!(o1.kinds()[0].1, KindChoice::Main);
+    assert_eq!(o1.geometries()[0].0.offsets(), &[8192]);
+    assert_eq!((o1.geometries()[0].1, o1.geometries()[0].2), (4096, 1 << 20));
 }

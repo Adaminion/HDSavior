@@ -10,7 +10,11 @@
 //! middle of a scan. Random data breaks a Huffman stream within a few
 //! hundred bits; zeros, text, or the entropy data of another JPEG (even one
 //! with the same tables) can decode for a while, but they shift the MCU
-//! count, and the scan then fails to end exactly at a marker. Nothing is
+//! count, and the scan then fails to end exactly at a marker. (What can
+//! pass is foreign data that decodes, for this very frame, to exactly the
+//! MCUs that are missing: in practice the data of a copy of the same
+//! picture with other metadata, which is the right picture give or take a
+//! few blocks.) Nothing is
 //! reconstructed: no coefficient values are kept beyond what decoding needs
 //! (the DC predictors, and for progressive refinement scans one bit per
 //! coefficient saying whether it is already non-zero).
