@@ -1085,10 +1085,14 @@ fn pdf_trailer_across_read_blocks() {
 #[test]
 fn zip_descriptor_across_read_blocks() {
     // A streamed archive whose first entry is stretched so that its data
-    // descriptor's signature lies across a block edge. Compressed data is
-    // not inflated, so the stretch is arbitrary bytes; the sizes in the
-    // descriptor and the directory offset in the end record are fixed up.
-    let data = sample("zip_python_stream_descriptors.zip").data;
+    // descriptor's signature lies across a block edge. The entry's method
+    // is changed from DEFLATE (whose stream is walked to its end) to bzip2
+    // (whose data is searched for the descriptor), so the stretch can be
+    // arbitrary bytes; the sizes in the descriptor and the directory offset
+    // in the end record are fixed up.
+    let mut data = sample("zip_python_stream_descriptors.zip").data;
+    assert_eq!(&data[8..10], &[8, 0]);
+    data[8] = 12;
     let descriptor = find(&data, b"PK\x07\x08");
     let eocd = data.len() - 22;
     for &edge in &EDGES {

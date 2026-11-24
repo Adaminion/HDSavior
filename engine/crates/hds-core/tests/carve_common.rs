@@ -72,9 +72,14 @@ pub fn sample(name: &str) -> Sample {
         .unwrap_or_else(|| panic!("{name}"))
 }
 
-/// What `hds_carve` measures for the sample alone.
+/// What `hds_carve` measures for the sample on its own, followed by free
+/// space (as in the cluster slack behind a carved file). With nothing at
+/// all behind it, walkers that look behind the end find nothing and do
+/// not verify the end.
 pub fn alone(s: &Sample) -> hds_carve::Measured {
-    hds_carve::measure(s.kind, &s.data, s.data.len() as u64).unwrap()
+    let mut data = s.data.clone();
+    data.resize(s.data.len() + 4096, 0);
+    hds_carve::measure(s.kind, &data, data.len() as u64).unwrap()
 }
 
 /// A deterministic generator.
@@ -232,7 +237,7 @@ pub fn recover_files(
             plan.folders.push(ext_folder(id, 1, f.ext()));
         }
         plan.files
-            .push(f.plan_file(1000 + plan.files.len() as u64, Some(id), flags(f)));
+            .push(f.plan_file(1000 + plan.files.len() as u64, Some(id), flags(f), true));
     }
     let dest = TempDir::new("recover");
     let mut outcomes = Outcomes::default();

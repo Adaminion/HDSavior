@@ -139,11 +139,93 @@ impl CarvedSet {
         self.files.get(i)
     }
 
-    /// The bytes of all carved files, for I4: a deleted file whose extents
-    /// intersect this set is `overwritten`.
+    /// The bytes of all carved files. This is *not* the test of I4 (a
+    /// deleted file is not overwritten merely because carved bytes touch
+    /// its extents, nor by its own content): that is
+    /// [`overwrites_deleted`](Self::overwrites_deleted).
     #[must_use]
     pub fn covered(&self) -> RangeSet {
         self.files.iter().map(CarvedFile::range).collect()
+    }
+
+    /// I4: whether a carved file lies inside the extents of a deleted file,
+    /// which makes that file `overwritten`.
+    ///
+    /// `extents` are the deleted file's data extents as absolute byte
+    /// ranges (any order; overlapping or adjacent ones are joined), `start`
+    /// the absolute offset of its first byte (`None` when byte 0 is not on
+    /// the disk: resident, sparse) and `size` its real size.
+    ///
+    /// A carved file counts when every byte of it lies inside the extents,
+    /// except the file's own content: deleted files are not protected from
+    /// carving (I2 a), so a deleted file whose record survived and whose
+    /// clusters were not reused is carved as well - at its own first byte,
+    /// no longer than itself. That carved file is not something written
+    /// over it, and the deleted file stays as it is. (ALGORITHMS I4 does
+    /// not spell this out; without it every intact, contiguous deleted file
+    /// of a supported type would be rated `damaged`.) Something written
+    /// over the file that starts at its first byte and is longer than it is
+    /// still counts.
+    ///
+    /// Costs `O(e log n)` for `e` extents and `n` carved files when the
+    /// extents come sorted and apart (otherwise they are sorted and joined
+    /// first, `O(e log e)`): the carved files that start inside an extent
+    /// are looked at until one lies inside it; of those that do not, there
+    /// is at most the file's own content and, per kind, one that runs past
+    /// the extent's end (carved files of one kind never overlap).
+    #[must_use]
+    pub fn overwrites_deleted(
+        &self,
+        extents: &[Range<u64>],
+        start: Option<u64>,
+        size: u64,
+    ) -> bool {
+        if self.files.is_empty() || extents.is_empty() {
+            return false;
+        }
+        // ascending, apart (neither overlapping nor touching), non-empty:
+        // then a carved file lies inside them exactly when it lies inside
+        // one of them
+        let merged;
+        let extents = if extents.iter().all(|r| r.start < r.end)
+            && extents
+                .windows(2)
+                .all(|w| matches!(w, [a, b] if a.end < b.start))
+        {
+            extents
+        } else {
+            let mut v: Vec<Range<u64>> = extents
+                .iter()
+                .filter(|r| r.start < r.end)
+                .cloned()
+                .collect();
+            v.sort_unstable_by_key(|r| r.start);
+            let mut out: Vec<Range<u64>> = Vec::with_capacity(v.len());
+            for r in v {
+                match out.last_mut() {
+                    Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+                    _ => out.push(r),
+                }
+            }
+            merged = out;
+            &merged[..]
+        };
+        for extent in extents {
+            let first = self.files.partition_point(|f| f.offset() < extent.start);
+            let inside = self
+                .files
+                .get(first..)
+                .unwrap_or(&[])
+                .iter()
+                .take_while(|f| f.offset() < extent.end);
+            for f in inside {
+                let own = start == Some(f.offset()) && f.len() <= size;
+                if !own && f.end() <= extent.end {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Takes the result of a carving job (I5): a run made with another

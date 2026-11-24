@@ -15,10 +15,14 @@
 //! it is (32-bit field, or the ZIP64 extra field when that is `FFFFFFFF`).
 //! Entries written by a streaming compressor have general-purpose bit 3 set
 //! and no size up front; the size follows the data in a *data descriptor*.
-//! Those entries have to be scanned for the descriptor, which is accepted
-//! only if the compressed size it states equals the distance scanned and a
-//! header signature follows it - a ZIP stored inside the entry brings its
-//! own descriptors, and they fail that test.
+//! When such an entry is DEFLATE-compressed (and not encrypted), the
+//! compressed stream is walked to its final block ([`deflate`]) and the
+//! descriptor must be right behind it; a stream that breaks off ends the
+//! candidate. Entries of other methods have to be scanned for the
+//! descriptor, which is accepted only if the compressed size it states
+//! equals the distance scanned and a header signature follows it - a ZIP
+//! stored inside the entry brings its own descriptors, and they fail that
+//! test.
 //!
 //! Then the central directory is walked, and the end record must follow it
 //! directly. The record states where the directory starts, counted from the
@@ -39,6 +43,7 @@
 //! `ppt/` (Office Open XML), `AndroidManifest.xml` (APK),
 //! `META-INF/MANIFEST.MF` (JAR).
 
+use crate::deflate;
 use crate::reader::Src;
 use crate::util::{le16, le32, le64};
 use crate::{Confidence, Measured};
@@ -304,7 +309,18 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
         } else {
             size32 as u64
         };
-        pos = if streamed && size == 0 {
+        pos = if streamed && size == 0 && method == 8 && flags & 1 == 0 {
+            // DEFLATE delimits itself: the descriptor must follow the end
+            // of the stream. A stream that breaks off is the end of the
+            // candidate (a fragmented archive, or none at all); searching
+            // on for something that looks like a descriptor would read
+            // to the work limit.
+            src.scan_mode();
+            let end = deflate::end(src, data);
+            src.hop_mode();
+            let end = end?;
+            skip_descriptor(src, end, end - data, zip64)?
+        } else if streamed && size == 0 {
             // Either really empty, or unknown when the header was written:
             // the descriptor decides, wherever it is.
             find_descriptor(src, data, zip64)?

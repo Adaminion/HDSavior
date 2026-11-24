@@ -129,17 +129,21 @@ fn a_carved_file_as_node_and_plan() {
         Some((20_000_000_000_000 - (1 << 20)) / 4096)
     );
 
-    // rating: good only with a verified end and no damage
+    // rating: good only with a verified end, a validated main geometry
+    // (F6) and no damage
     let none = RangeSet::new();
-    assert_eq!(f.rating(f.health_flags(&none, &none)), Rating::Good);
+    assert_eq!(f.rating(f.health_flags(&none, &none), true), Rating::Good);
+    assert_eq!(f.rating(FlagSet::EMPTY, false), Rating::Uncertain);
+    assert!(f.rating_context(false).geometry_not_validated);
+    assert!(!f.rating_context(true).geometry_not_validated);
     let unverified = file(1 << 20, 4096, FileKind::Bmp, "bmp", false);
-    assert!(unverified.rating_context().carved_end_unverified);
-    assert!(!unverified.rating_context().geometry_not_validated);
-    assert_eq!(unverified.rating(FlagSet::EMPTY), Rating::Uncertain);
+    assert!(unverified.rating_context(true).carved_end_unverified);
+    assert!(!unverified.rating_context(true).geometry_not_validated);
+    assert_eq!(unverified.rating(FlagSet::EMPTY, true), Rating::Uncertain);
     let over: RangeSet = std::iter::once(f.end() - 1..f.end() + 5).collect();
     let flags = f.health_flags(&over, &none);
     assert_eq!(flags, FlagSet::of(&[Flag::Overwritten]));
-    assert_eq!(f.rating(flags), Rating::Damaged);
+    assert_eq!(f.rating(flags, true), Rating::Damaged);
     let touching: RangeSet = std::iter::once(f.end()..f.end() + 5).collect();
     assert!(f.health_flags(&touching, &touching).is_empty());
     assert_eq!(
@@ -148,7 +152,12 @@ fn a_carved_file_as_node_and_plan() {
     );
 
     // plan: one run, all initialized, no record, no times
-    let p = f.plan_file(77, Some(9), FlagSet::EMPTY);
+    let p = f.plan_file(77, Some(9), FlagSet::EMPTY, true);
+    assert!(
+        f.plan_file(77, Some(9), FlagSet::EMPTY, false)
+            .context
+            .geometry_not_validated
+    );
     assert_eq!(p.node, 77);
     assert_eq!(p.folder, Some(9));
     assert_eq!(String::from_utf16(&p.name).unwrap(), "f0000000123.docx");
@@ -168,7 +177,7 @@ fn a_carved_file_as_node_and_plan() {
     assert_eq!(p.source.first_offset(), Some(123 * 512));
     assert_eq!(p.first_data_offset, Some(123 * 512));
     assert_eq!((p.record_number, p.record_offset), (None, None));
-    assert!(p.in_use && !p.context.carved_end_unverified);
+    assert!(p.in_use && !p.context.carved_end_unverified && !p.context.geometry_not_validated);
     assert_eq!(p.original_path, "[Carved files]/docx/f0000000123.docx");
     let root = carved_files_folder(1, None);
     assert_eq!(String::from_utf16(&root.name).unwrap(), "[Carved files]");
@@ -517,12 +526,21 @@ mod next_to_mft_records {
         );
         // the MP3 is complete after any frame: its end is not verified
         assert!(!run.files[2].end_verified() && run.files[0].end_verified());
-        // I4: the carved GIF lies inside the deleted file's extents
+        // I4: the carved GIF is the deleted file's own content (at its
+        // first byte, no longer than it): the deleted record keeps its data
         let mut set = CarvedSet::new();
         set.apply(&run);
-        assert!(set
-            .covered()
-            .intersects(200 * C..200 * C + gif.len() as u64));
-        assert!(!set.covered().intersects(100 * C..101 * C));
+        let gone = [200 * C..200 * C + (gif.len() as u64).div_ceil(C) * C];
+        assert!(set.covered().intersects(gone[0].clone()));
+        assert!(!set.overwrites_deleted(&gone, Some(200 * C), gif.len() as u64));
+        // had the deleted file been something else (a larger file of
+        // which the GIF now holds the first clusters), the GIF was written
+        // over it
+        let larger = [199 * C..203 * C];
+        assert!(set.overwrites_deleted(&larger, Some(199 * C), 4 * C));
+        assert!(set.overwrites_deleted(&larger, None, 4 * C));
+        // a file at the same place that was shorter than the GIF
+        assert!(set.overwrites_deleted(&gone, Some(200 * C), gif.len() as u64 - 1));
+        assert!(!set.overwrites_deleted(&[100 * C..101 * C], Some(100 * C), C));
     }
 }

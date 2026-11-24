@@ -16,14 +16,28 @@
 //! Multi-Picture file, Samsung/Google motion-photo trailers) is deliberately
 //! left out.
 //!
-//! No checksums exist in JPEG and the entropy data is not decoded, so a file
-//! whose tail was replaced by the tail of another JPEG still measures as
-//! `Exact`: the length is right for a contiguous file, the content is not
-//! proven.
+//! No checksums exist in JPEG. The end is verified by decoding: every scan's
+//! Huffman data must decode to exactly the MCUs the frame announces and end
+//! there, in front of the next marker ([`jpeg_entropy`]). A file whose scan
+//! does not decode (foreign data where the next cluster should be, a tail
+//! replaced by the tail of another JPEG) or that this decoder does not cover
+//! (arithmetic coding, lossless or hierarchical JPEG, `DNL`) is still
+//! measured to the first `EOI` at marker level, as before, but its end is
+//! not verified. After a scan was found broken, a run of
+//! [`ZERO_RUN`] zero bytes on the way to the next marker ends the search
+//! (`None`): the data is known to be damaged, and free space would otherwise
+//! be read up to the work limit.
+//!
+//! [`jpeg_entropy`]: crate::jpeg_entropy
 
+use crate::jpeg_entropy::{Decoder, FrameInfo, ScanEnd};
 use crate::reader::Src;
 use crate::util::{be16, find_byte};
 use crate::{Confidence, Measured};
+
+/// Zero bytes in a row after which the marker search behind a broken scan
+/// gives up.
+const ZERO_RUN: u64 = 64 * 1024;
 
 /// Upper bound on marker segments before the image data ends (a file with
 /// more is not a photograph; every segment consumes at least four bytes).
@@ -46,6 +60,7 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
     let mut scans = 0u32;
     let mut restart_interval = 0u16;
     let mut segments = 0u32;
+    let mut decoder = Decoder::new();
     loop {
         segments += 1;
         if segments > MAX_SEGMENTS {
@@ -75,8 +90,8 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
                     len: pos + 2,
                     confidence: Confidence::Exact,
                     ext: "jpg",
-                    // the scan ran into EOI at marker level
-                    end_verified: true,
+                    // every scan decoded to its last MCU, ending at a marker
+                    end_verified: decoder.all_verified,
                 });
             }
             // stuffed zero, TEM, a restart marker outside a scan, a second SOI
@@ -94,8 +109,15 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
             // SOS: scan header, then entropy-coded data up to the next marker
             0xDA => {
                 let f = frame.as_ref()?;
-                check_sos(src.bytes(body_off, body_len)?, f)?;
-                pos = scan_entropy(src, next, restart_interval)?;
+                let header = src.bytes(body_off, body_len)?.to_vec();
+                check_sos(&header, f)?;
+                pos = match decoder.scan(src, &header, next, restart_interval) {
+                    ScanEnd::Verified(at) => at,
+                    ScanEnd::Broken { resume, next_rst } => {
+                        scan_entropy(src, resume, restart_interval, next_rst, true)?
+                    }
+                    ScanEnd::Skipped => scan_entropy(src, next, restart_interval, 0, false)?,
+                };
                 scans += 1;
                 continue;
             }
@@ -104,9 +126,15 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
                 if frame.is_some() {
                     return None;
                 }
-                frame = Some(parse_sof(src.bytes(body_off, body_len)?, code)?);
+                let body = src.bytes(body_off, body_len)?;
+                frame = Some(parse_sof(body, code)?);
+                decoder.set_frame(FrameInfo::parse(body, code)?);
             }
-            0xC4 => check_dht(src.bytes(body_off, body_len)?)?,
+            0xC4 => {
+                let body = src.bytes(body_off, body_len)?;
+                check_dht(body)?;
+                decoder.define_tables(body);
+            }
             0xDB => check_dqt(src.bytes(body_off, body_len)?)?,
             0xDD => {
                 if len != 4 {
@@ -208,15 +236,28 @@ fn check_dqt(mut b: &[u8]) -> Option<()> {
 
 /// Scans entropy-coded data from `pos`; returns the offset of the `FF` that
 /// starts the marker ending the scan. `None` when the data ends first or the
-/// restart markers are out of order.
-fn scan_entropy(src: &mut Src, mut pos: u64, restart_interval: u16) -> Option<u64> {
-    let mut next_rst = 0u8;
+/// restart markers are out of order (`next_rst` is the one expected next),
+/// or, with `damaged`, after [`ZERO_RUN`] zero bytes in a row.
+fn scan_entropy(
+    src: &mut Src,
+    mut pos: u64,
+    restart_interval: u16,
+    mut next_rst: u8,
+    damaged: bool,
+) -> Option<u64> {
+    let mut zeros = 0u64;
     // The previous window ended with an `FF` whose partner is not seen yet.
     let mut pending_ff = false;
     loop {
         let w = src.window(pos);
         if w.is_empty() {
             return None;
+        }
+        if damaged {
+            zeros = zero_run(w, zeros);
+            if zeros >= ZERO_RUN {
+                return None;
+            }
         }
         let mut i = 0usize;
         if pending_ff {
@@ -249,6 +290,27 @@ fn scan_entropy(src: &mut Src, mut pos: u64, restart_interval: u16) -> Option<u6
             }
         }
         pos += w.len() as u64;
+    }
+}
+
+/// The longest run of zero bytes in `w` (a run of `before` zeros ends right
+/// in front of it) that reaches its end, or the longest inside it if that
+/// one is longer: enough to tell whether `ZERO_RUN` was reached.
+fn zero_run(w: &[u8], before: u64) -> u64 {
+    let mut run = before;
+    let mut longest = 0u64;
+    for &b in w {
+        if b == 0 {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    if longest >= ZERO_RUN {
+        longest
+    } else {
+        run
     }
 }
 

@@ -69,14 +69,23 @@
 //! * **Verified:** PNG (every chunk has a CRC, all are checked). For 7z and
 //!   RAR the archive's own headers are CRC-checked, including the one at the
 //!   end; the packed data is not.
-//! * **Anchored at the end:** JPEG (the scan must run into `EOI` without
-//!   meeting an illegal marker), GIF (trailer), ZIP (central directory and
-//!   end record where the local headers lead), MP4/MOV with the index last,
-//!   AVI with an index, Matroska (the last element ends where the segment
-//!   does), PDF (trailer pointing back at a cross-reference table). If such
-//!   a file is fragmented, the walk runs from its first fragment into
-//!   foreign data and practically always fails; the exception is foreign
-//!   data of the same format (the second half of another JPEG).
+//! * **Decoded:** JPEG (every scan's Huffman data is decoded to exactly the
+//!   MCUs the frame announces, and must end there, in front of a marker)
+//!   and GIF (every image's LZW codes must be valid and give exactly its
+//!   pixels, closed by the end code). Neither format has a checksum; this
+//!   is what catches foreign data, including the data of another file of
+//!   the same format.
+//! * **Anchored at the end:** ZIP (central directory and end record where
+//!   the local headers lead; streamed DEFLATE entries walked to the end of
+//!   their stream), MP4/MOV with the index last, AVI with an index,
+//!   Matroska (the last element ends where the segment does), PDF (trailer
+//!   pointing back at a cross-reference table). If such a file is
+//!   fragmented, the walk runs from its first fragment into foreign data
+//!   and practically always fails; the exception is foreign data of the
+//!   same format that happens to fit (for PDF: the tail of another PDF at
+//!   the same offsets, as when a new PDF reused the first cluster of a
+//!   deleted one - its cross-reference offsets still point where they
+//!   did).
 //! * **From the header alone:** BMP, WAV, WebP, HEIC, and MP4 with the media
 //!   data last. These end in payload whose length the header states;
 //!   nothing behind the header can contradict it, so a fragmented file of
@@ -88,15 +97,20 @@
 //! [`Measured::end_verified`] says whether the structure *proves* the end:
 //! bytes at the computed end were read and confirmed by the format, so a
 //! file whose clusters are not contiguous would almost certainly have
-//! failed the walk instead of being measured. It is `true` exactly in these
-//! cases:
+//! failed the walk instead of being measured. An end is never verified by
+//! the absence of bytes: when a walker looked for more of the file right
+//! at the end of the data or at `max_len` and found nothing there (a PDF
+//! checking for a further revision, a box walker for a further box), the
+//! file may have gone on - into a bad sector, another file, the next
+//! fragment - and the end is not verified. Within that, it is `true`
+//! exactly in these cases:
 //!
 //! | Kind | `end_verified` |
 //! |---|---|
-//! | JPEG | always: the entropy-coded data was scanned into `EOI` |
+//! | JPEG | when every scan decoded to exactly its MCUs and ended there, at a marker, before `EOI` (baseline, extended and progressive Huffman coding; not arithmetic coding, lossless or hierarchical JPEG, a height set by `DNL`, nor progressive images of more than 2<sup>22</sup> blocks) |
 //! | PNG | always: `IEND` after a chain of chunks whose CRCs all match |
-//! | GIF | always: the trailer after a walk of every block |
-//! | PDF | always: `%%EOF` whose `startxref` leads to a cross-reference section of this file (or a linearized length confirmed by `%%EOF`) |
+//! | GIF | when every image's LZW data decoded to exactly its pixels and its end code, before the trailer |
+//! | PDF | when `%%EOF`, whose `startxref` leads to a cross-reference section of this file (or a linearized length confirmed by `%%EOF`), ends the file - not when the bytes after it announced an update that never completed |
 //! | ZIP | when the end record also agrees with the entry count and directory size the walk found (that is, when `Exact`) |
 //! | 7z | when the end header was read and its CRC matched (that is, when `Exact`) |
 //! | RAR | when the end-of-archive block was found (its header CRC checked) |
@@ -113,9 +127,9 @@
 //! structure is read where the chain leads, but its payload is not: foreign
 //! data inside an `idx1`, a `Cues` element or the last child of `moov` goes
 //! unnoticed. For PDF the trailer between the cross-reference section and
-//! `%%EOF` is not checked. A JPEG continued by another JPEG's data passes
-//! (see "Known gaps"). `tests/end_verified.rs` holds every kind to these
-//! limits with cut, damaged and interrupted files.
+//! `%%EOF` is not checked, nor are the entries of the cross-reference
+//! section. `tests/end_verified.rs` holds every kind to these limits with
+//! cut, damaged and interrupted files.
 //!
 //! # Formats
 //!
@@ -125,13 +139,13 @@
 //!
 //! | Kind, extensions | Signature | End | Confidence | Known gaps |
 //! |---|---|---|---|---|
-//! | [`Jpeg`](FileKind::Jpeg): `jpg` | `FF D8 FF` and a first segment as real encoders write it: APP0 `JFIF`/`JFXX`, APP1 `Exif`/XMP, APP2 ICC/MPF/FlashPix, APP8 SPIFF, APP12 `Ducky`, APP13 `Photoshop 3.0`, APP14 `Adobe`, a printable COM, or a structurally valid DQT, DHT, SOF or DRI (40 bits or more) | Marker segments by their lengths, tables and frame header checked; each scan's entropy-coded data scanned for the next marker (`FF00` stuffing, `RSTn` in order, fill bytes); ends at the first `EOI` at marker level, so an Exif thumbnail inside APP1 never ends the file | Exact | Data behind `EOI` is left out on purpose: further images of an MPO file, motion-photo video, vendor trailers. Not decoded: a fragmented file continued by another JPEG's data passes. Other first segments (APP3-7, 9-11, 15), hierarchical JPEG and JPEG-LS are not sniffed. |
+//! | [`Jpeg`](FileKind::Jpeg): `jpg` | `FF D8 FF` and a first segment as real encoders write it: APP0 `JFIF`/`JFXX`, APP1 `Exif`/XMP, APP2 ICC/MPF/FlashPix, APP8 SPIFF, APP12 `Ducky`, APP13 `Photoshop 3.0`, APP14 `Adobe`, a printable COM, or a structurally valid DQT, DHT, SOF or DRI (40 bits or more) | Marker segments by their lengths, tables and frame header checked; each scan's entropy-coded data scanned for the next marker (`FF00` stuffing, `RSTn` in order, fill bytes); ends at the first `EOI` at marker level, so an Exif thumbnail inside APP1 never ends the file | Exact | Data behind `EOI` is left out on purpose: further images of an MPO file, motion-photo video, vendor trailers. The entropy-coded data is decoded (Huffman, not the picture) to verify the end; files it does not cover are measured, unverified. After a scan was found broken, the search for the next marker gives up at 64 KiB of zeros. Other first segments (APP3-7, 9-11, 15), hierarchical JPEG and JPEG-LS are not sniffed. |
 //! | [`Png`](FileKind::Png): `png` | 8-byte signature, `IHDR` with length 13 and valid fields (128 bits) | Chunk walk through `IEND`, **every CRC verified** (the whole file is read: PNGs are small and this is the one image format that can prove it is intact) | Exact | Apple's `CgBI` variant, MNG and JNG are not sniffed. |
-//! | [`Gif`](FileKind::Gif): `gif` | `GIF87a`/`GIF89a`, non-zero screen size (48 bits) | Block walk: image descriptors, the four extension types, data sub-blocks, trailer `3B`; at least one image | Exact | No checksums, LZW data not decoded. Files with stray bytes between blocks are rejected. A line of text starting with `GIF89a` can pass `sniff` (not `measure`). |
+//! | [`Gif`](FileKind::Gif): `gif` | `GIF87a`/`GIF89a`, non-zero screen size (48 bits) | Block walk: image descriptors, the four extension types, data sub-blocks, trailer `3B`; at least one image | Exact | No checksums; the LZW codes are decoded (as pixel counts) to verify the end. Files with stray bytes between blocks are rejected. A line of text starting with `GIF89a` can pass `sniff` (not `measure`). |
 //! | [`Bmp`](FileKind::Bmp): `bmp` | `BM`, reserved words zero, a known DIB header size, one plane, valid depth and compression, sane dimensions (about 100 bits) | Arithmetic on the header: pixel offset + padded rows (+ V5 embedded profile), compared with the file-size field | Exact when both agree; Probable for RLE data, a missing or smaller size field, or up to 1 KiB of declared padding | Length from the header alone. JPEG/PNG-compressed DIBs are rejected. |
 //! | [`Tiff`](FileKind::Tiff): `tif`, `dng`, `cr2`, `nef`, `arw`, `pef`, `srw`, `orf`, `rw2` | `II*\0`/`MM\0*` and an even directory offset of 8 or more (33 bits), plus a plausible first directory entry when it is inside the first 64 bytes (it is in every camera RAW file); CR2 `CR\x02\0`; ORF `IIRO`/`IIRS`/`MMOR` with the directory at 8; RW2 `IIU\0` and its 16-byte signature | Directory walk: the IFD chain and `SubIFDs` strictly, Exif/GPS/Interoperability IFDs leniently; the furthest byte of any directory, out-of-line value, strip, tile or `JPEGInterchangeFormat` preview. Extension from the header (CR2, ORF, RW2), `DNGVersion`, or Make plus sensor data (NEF, ARW, PEF, SRW) | Probable, always: TIFF has neither an end marker nor a length | See "TIFF-based RAW" below. Padding that nothing refers to is not included (Pillow pads multi-page files). Pointers inside maker notes are not followed. BigTIFF is not supported. |
 //! | [`Pdf`](FileKind::Pdf): `pdf` | `%PDF-1.x` or `%PDF-2.x` (about 60 bits) | Linearized file: the length `/L` from the first object, confirmed by a `%%EOF` ending there. Otherwise a sequential scan for `%%EOF` whose `startxref` leads to a cross-reference table or stream *of this file* (an embedded or neighbouring PDF fails that); continues while an incremental update follows | Exact for a linearized file that was not updated afterwards; otherwise Probable | A wrong `startxref` (some generators, damaged files) means `None`. One end-of-line after the last `%%EOF` is included, further white space is not. Not sniffed when the header is not at offset 0. Non-linearized files beyond the read limit are not measured. |
-//! | [`Zip`](FileKind::Zip): `zip`, `docx`, `xlsx`, `pptx`, `vsdx`, `odt`, `ods`, `odp`, `odg`, `epub`, `jar`, `apk` | `PK\x03\x04`, version needed up to 6.3, reserved flag bits clear, a method from the specification, a name without control characters (about 55 bits) | Local headers one after another (data skipped by the size in the header or its ZIP64 field; entries streamed with a data descriptor are scanned for it), central directory, ZIP64 end record and locator, end record. The directory offset in the end record must equal where the walk found the directory | Exact; Probable if entry count or directory size in the end record disagree | Nothing is inflated, CRCs are not checked. Streamed entries have to be read; an archive with more streamed data than the read limit (1 GiB) is not measured. Spanned archives, encrypted directories, and archives with gaps between entries are rejected. |
+//! | [`Zip`](FileKind::Zip): `zip`, `docx`, `xlsx`, `pptx`, `vsdx`, `odt`, `ods`, `odp`, `odg`, `epub`, `jar`, `apk` | `PK\x03\x04`, version needed up to 6.3, reserved flag bits clear, a method from the specification, a name without control characters (about 55 bits) | Local headers one after another (data skipped by the size in the header or its ZIP64 field; entries streamed with a data descriptor are scanned for it), central directory, ZIP64 end record and locator, end record. The directory offset in the end record must equal where the walk found the directory | Exact; Probable if entry count or directory size in the end record disagree | Nothing is inflated, CRCs are not checked. Streamed entries have to be read: DEFLATE ones are walked block by block to the end of their stream (a stream that breaks off ends the candidate), others are searched for their descriptor; an archive with more streamed data than the read limit (1 GiB) is not measured. Spanned archives, encrypted directories, and archives with gaps between entries are rejected. |
 //! | [`Mp4`](FileKind::Mp4): `mp4`, `mov`, `m4v`, `m4a`, `m4b`, `3gp`, `3g2`, `f4v` | `ftyp` at offset 4 with a size of 16-1024 divisible by 4 and printable brands (about 60 bits). Without `ftyp`: `wide` + `mdat` (96 bits), `moov` starting with an `mvhd` of 108 or 120 bytes (over 90 bits), `mdat` with a 64-bit size (80 bits) or a 32-bit size below 16 MiB (40 bits) | Top-level box walk, 32- and 64-bit sizes, headers only. Needs a `moov` whose children are a consistent chain with `mvhd`, and media (`mdat`). Ends before the first thing that is not a known box; a second `ftyp`, or media after an index that followed media, starts the next file. An unknown box type is accepted only if a known box follows it | Exact; Probable without `ftyp`, for a fragmented file without `mfra` at the end, when an unknown but box-like structure follows, or at a second `moov` | A box that runs "to end of file" (size 0: an interrupted recording) cannot be measured. Sample tables are not compared with the media box. Data appended outside the boxes (Samsung, Insta360 trailers) is not included. |
 //! | [`Heic`](FileKind::Heic): `heic`, `avif` | `ftyp` as above with major brand `heic`, `heix`, `heim`, `heis`, `hevc`, `hevx`, `hevm`, `hevs`, `mif1`, `msf1`, `miaf`, `avif` or `avis` | Same walk; needs `meta` with a handler, and item data (`mdat`, or `idat` inside `meta`) | Exact | Item locations are not compared with the media box. Length from the header alone. HEIF files with other major brands are sniffed as `Mp4` (and measured, with the extension set from the compatible brands). |
 //! | [`Cr3`](FileKind::Cr3): `cr3`, `crm` | `ftyp` as above with major brand `crx ` | Same walk; needs `moov` and `mdat` | Exact | Tested with a reconstruction of the documented layout only: no CR3 encoder exists outside the cameras. |
@@ -215,7 +229,8 @@
 //!   ZIP (with sizes in the local headers) cost a handful of seeks whatever
 //!   their size; Matroska and fragmented MP4 one seek per cluster or
 //!   fragment; TIFF one per directory. JPEG, PNG, GIF, PDF (not linearized),
-//!   MP3 and streamed ZIP entries are read from start to end, once.
+//!   MP3 and streamed ZIP entries are read from start to end, once (JPEG
+//!   and GIF data and DEFLATE streams are decoded on the way).
 //!   [`Limits`] caps both kinds of work.
 //!
 //! # Tests
@@ -237,9 +252,11 @@
 
 mod bmff;
 mod bmp;
+mod deflate;
 mod ext;
 mod gif;
 mod jpeg;
+mod jpeg_entropy;
 mod mkv;
 mod mp3;
 mod pdf;
@@ -599,6 +616,15 @@ fn walk(kind: FileKind, mut src: Src, max_len: u64) -> Result<Measured, MeasureE
     // is positive and within `max_len`, and every byte of the file exists
     // (walkers that hop over payload have not touched the last one).
     let measured = measured.filter(|m| m.len != 0 && m.len <= max_len && src.has_byte(m.len - 1));
+    // An end is verified by bytes that were read, never by the absence of
+    // bytes: a walker that looked behind the end of the data (or
+    // `max_len`) and stopped because nothing was there would have read on
+    // had the data gone on.
+    let beyond = src.looked_beyond_end();
+    let measured = measured.map(|m| Measured {
+        end_verified: m.end_verified && !beyond,
+        ..m
+    });
     // A read that failed or a budget that ran out on the way looks like the
     // end of the data to a walker. Whatever it concluded then - a shorter
     // file, or no file - is not a conclusion about the data.

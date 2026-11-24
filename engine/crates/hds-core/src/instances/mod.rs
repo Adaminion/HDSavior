@@ -855,7 +855,7 @@ impl Layout {
                         &ctx,
                         cs,
                         off,
-                        &inst.candidates,
+                        &inst.records,
                         &files,
                         heads,
                         cancel,

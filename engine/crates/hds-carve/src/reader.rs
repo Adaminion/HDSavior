@@ -131,6 +131,9 @@ pub(crate) struct Src<'a> {
     bytes_left: u64,
     reads_left: u64,
     failure: Option<Failure>,
+    /// A walker asked for bytes starting at or behind the end of the data
+    /// (or `max_len`) and was told there are none.
+    beyond_end: bool,
 }
 
 /// Why a source went dead.
@@ -164,6 +167,7 @@ impl<'a> Src<'a> {
             bytes_left: limits.max_read_bytes,
             reads_left: limits.max_reads,
             failure: None,
+            beyond_end: false,
         }
     }
 
@@ -176,6 +180,24 @@ impl<'a> Src<'a> {
     /// after that point must not be trusted.
     pub(crate) fn failed(&self) -> bool {
         self.failure.is_some()
+    }
+
+    /// True once a walker asked for bytes starting at or behind the end of
+    /// the data (or `max_len`) and got none: a conclusion drawn from their
+    /// absence - "nothing follows, so the file ends here" - depends on
+    /// where the data was cut off, and does not verify an end. (A request
+    /// that got some of its bytes saw what follows the file, if not all of
+    /// it.)
+    pub(crate) fn looked_beyond_end(&self) -> bool {
+        self.beyond_end
+    }
+
+    /// Notes a request for `want` bytes that got `got` (a source that
+    /// failed is reported on its own).
+    fn note_short(&mut self, got: usize, want: usize) {
+        if got == 0 && want > 0 && self.failure.is_none() {
+            self.beyond_end = true;
+        }
     }
 
     /// Takes the reason the source went dead, if it did.
@@ -249,10 +271,12 @@ impl<'a> Src<'a> {
             // Enough is buffered, or the buffer already reaches the end of
             // the data: nothing more to fetch.
             if have >= want || self.start.saturating_add(buffered) >= self.end {
+                self.note_short(have, want);
                 return self.buf.get(rel..).unwrap_or(&[]);
             }
         }
         if self.failed() || off >= self.end {
+            self.note_short(0, want);
             return &[];
         }
         // the refill starts on the grid, at or before `off`
@@ -300,6 +324,7 @@ impl<'a> Src<'a> {
         if self.scanning {
             self.block = self.block.saturating_mul(2).min(self.tuning.scan_max);
         }
+        self.note_short(got.saturating_sub(lead), want);
         self.buf.get(lead..).unwrap_or(&[])
     }
 
@@ -345,8 +370,9 @@ impl<'a> Src<'a> {
     /// occasional look elsewhere in the middle of a sequential scan.
     pub(crate) fn side<const N: usize>(&mut self, off: u64) -> Option<[u8; N]> {
         let mut out = [0u8; N];
-        let end = off.checked_add(N as u64)?;
-        if end > self.end {
+        if off.checked_add(N as u64).is_none_or(|e| e > self.end) {
+            let avail = self.end.saturating_sub(off).min(N as u64) as usize;
+            self.note_short(avail, N);
             return None;
         }
         if off >= self.start {
@@ -357,7 +383,9 @@ impl<'a> Src<'a> {
                 }
             }
         }
-        (self.read_into(off, &mut out) == N).then_some(out)
+        let got = self.read_into(off, &mut out);
+        self.note_short(got, N);
+        (got == N).then_some(out)
     }
 
     /// Up to `N` bytes at `off` without moving the buffer; returns the array
@@ -365,9 +393,11 @@ impl<'a> Src<'a> {
     pub(crate) fn side_peek<const N: usize>(&mut self, off: u64) -> ([u8; N], usize) {
         let mut out = [0u8; N];
         if off >= self.end {
+            self.note_short(0, N);
             return (out, 0);
         }
         let n = (self.end - off).min(N as u64) as usize;
+        self.note_short(n, N);
         if off >= self.start {
             if let Ok(rel) = usize::try_from(off - self.start) {
                 if let Some(s) = rel.checked_add(n).and_then(|e| self.buf.get(rel..e)) {
@@ -382,6 +412,7 @@ impl<'a> Src<'a> {
             Some(dst) => self.read_into(off, dst),
             None => 0,
         };
+        self.note_short(got, n);
         (out, got)
     }
 

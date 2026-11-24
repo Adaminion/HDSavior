@@ -13,7 +13,7 @@
     clippy::cloned_ref_to_slice_refs
 )]
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use hds_io::testing::{FaultySource, MemSource};
@@ -165,6 +165,110 @@ fn c2_reads_stay_inside_the_range_and_what_is_outside_makes_it_incomplete() {
     }
     // Unknown allocation counts as written.
     assert!(s.volumes[0].allocated.contains(3000 * CS));
+}
+
+/// A snapshot of `lab` with the boot sector's total_sectors patched to
+/// `sectors`, with `cancel` set by a watchdog after 5 s.
+fn snap_with_total_sectors(lab: &Lab, sectors: u64) -> (Result<LiveSnapshot, LiveError>, f64) {
+    let mut img = lab.img.clone();
+    img[0x28..0x30].copy_from_slice(&sectors.to_le_bytes());
+    let len = img.len() as u64;
+    let src: Arc<dyn BlockSource> = Arc::new(MemSource::new(img));
+    let ranged = RangedSource::new(src, 0..len).unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let watchdog = {
+        let (cancel, done) = (cancel.clone(), done.clone());
+        std::thread::spawn(move || {
+            let t0 = std::time::Instant::now();
+            while !done.load(Ordering::SeqCst) && t0.elapsed().as_secs() < 5 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            cancel.store(true, Ordering::SeqCst);
+        })
+    };
+    let t0 = std::time::Instant::now();
+    let r = take_snapshot(&ranged, SCAN, &cancel);
+    let secs = t0.elapsed().as_secs_f64();
+    done.store(true, Ordering::SeqCst);
+    watchdog.join().unwrap();
+    (r, secs)
+}
+
+#[test]
+fn c2_a_huge_total_sectors_costs_no_more_than_the_range() {
+    // Review finding: the $Bitmap read walked total_sectors one cluster at
+    // a time past the end of its runs (2^40 sectors took about 40 s, the
+    // largest accepted value days) without polling cancel.
+    let mut lab = Lab::new(16);
+    lab.current_volume(0, 4096, 256, 64, t(1500), &[], &[1000..1100]);
+    for sectors in [1u64 << 40, 1 << 53] {
+        let (r, secs) = snap_with_total_sectors(&lab, sectors);
+        let s = r.unwrap_or_else(|e| panic!("{sectors} sectors: {e} after {secs:.1} s"));
+        assert!(secs < 2.0, "{sectors} sectors took {secs:.1} s");
+        let v = &s.volumes[0];
+        // What the bitmap says inside the range is still used ...
+        assert!(v.allocated.contains_range(1000 * CS..1100 * CS));
+        assert!(!v.allocated.contains(999 * CS) && !v.allocated.contains(2000 * CS));
+        // ... and everything it does not cover counts as written.
+        assert!(v.incomplete && s.incomplete);
+        assert!(v.allocated.contains_range(16 * MIB..64 * MIB));
+    }
+}
+
+#[test]
+fn c2_streams_skip_unread_stretches_in_one_step() {
+    // A stream of 2^60 bytes: one cluster inside the range, a run of 2^40
+    // clusters far outside the source, an unmapped stretch, a sparse run,
+    // a run that starts below the range and enters it, then nothing.
+    let mut lab = Lab::new(16);
+    lab.put(8 * MIB, &[0xAB; 4096]);
+    let src: Arc<dyn BlockSource> = Arc::new(MemSource::new(lab.img.clone()));
+    let ranged = RangedSource::new(src, MIB..12 * MIB).unwrap();
+    let cancel = AtomicBool::new(false);
+    let rd = VolReader {
+        src: &ranged,
+        cancel: &cancel,
+    };
+    let run = |vcn: u64, clusters: u64, lcn: Option<u64>| MftRun { vcn, clusters, lcn };
+    let stream = Stream {
+        runs: vec![
+            run(0, 1, Some(2048)),
+            run(1, 1 << 40, Some(1 << 41)),
+            run(1 << 42, 1 << 40, None),
+            run((1 << 42) + (1 << 40), 2, Some(255)),
+        ],
+        found: true,
+        ..Stream::default()
+    };
+    let len = 1u64 << 60;
+    let mut pieces = Vec::new();
+    let complete = read_stream(&rd, 0, CS, &stream, len, &mut |p| {
+        pieces.push(match p {
+            Piece::Data(b, bad) => (b.len() as u64, Some(b[0]), bad.is_empty()),
+            Piece::Gap { len, sparse } => (len, None, sparse),
+        })
+    })
+    .unwrap();
+    assert!(!complete);
+    let sparse_at = (1u64 << 42) * CS;
+    let last_run = sparse_at + (1 << 40) * CS;
+    assert_eq!(
+        pieces,
+        vec![
+            (CS, Some(0xAB), true),
+            ((1 << 40) * CS, None, false),
+            (sparse_at - ((1 << 40) + 1) * CS, None, false),
+            ((1 << 40) * CS, None, true),
+            (CS, None, false),
+            (CS, Some(0), true),
+            (len - last_run - 2 * CS, None, false),
+        ]
+    );
+    // Cancel is polled inside the loop.
+    cancel.store(true, Ordering::SeqCst);
+    let r = read_stream(&rd, 0, CS, &stream, len, &mut |_| {});
+    assert!(matches!(r, Err(LiveError::Cancelled)));
 }
 
 #[test]

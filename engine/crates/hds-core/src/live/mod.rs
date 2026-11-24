@@ -57,7 +57,7 @@ mod tests;
 use std::fmt;
 use std::io;
 use std::ops::Range;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use hds_io::{
     parse_partition_table, read_unaligned, sniff_boot_sector, FsKind, RangeSet, RangedSource,
@@ -602,14 +602,29 @@ impl Stream {
         self.runs.sort_by_key(|r| r.vcn);
     }
 
+    /// The run that maps `vcn`, if any. Runs are sorted by VCN (see
+    /// [`Stream::sort`]); of overlapping runs (damaged lists) the one that
+    /// starts last at or below `vcn` decides. O(log runs).
+    fn run_at(&self, vcn: u64) -> Option<&MftRun> {
+        let after = self.runs.partition_point(|r| r.vcn <= vcn);
+        let run = self.runs.get(after.checked_sub(1)?)?;
+        run.vcn
+            .checked_add(run.clusters)
+            .is_some_and(|e| vcn < e)
+            .then_some(run)
+    }
+
+    /// The first VCN above `vcn` at which a run starts.
+    fn next_run_start(&self, vcn: u64) -> Option<u64> {
+        let after = self.runs.partition_point(|r| r.vcn <= vcn);
+        self.runs.get(after).map(|r| r.vcn)
+    }
+
     /// Disk offset of byte `pos` of the stream, when mapped.
     fn map(&self, vol_offset: u64, cs: u64, pos: u64) -> Option<u64> {
         let vcn = pos.checked_div(cs)?;
         let within = pos.checked_rem(cs)?;
-        let run = self
-            .runs
-            .iter()
-            .find(|r| r.vcn <= vcn && r.vcn.checked_add(r.clusters).is_some_and(|e| vcn < e))?;
+        let run = self.run_at(vcn)?;
         let lcn = run.lcn?.checked_add(vcn.checked_sub(run.vcn)?)?;
         lcn.checked_mul(cs)?
             .checked_add(within)?
@@ -698,13 +713,32 @@ fn holders_of(entries: AttrListEntries<'_>) -> Vec<u64> {
     out
 }
 
-/// Receives the pieces of a stream: bytes and their unreadable parts.
-type Sink<'a> = dyn FnMut(&[u8], &[Range<u64>]) + 'a;
+/// One piece of a stream handed to a [`Sink`].
+enum Piece<'a> {
+    /// Bytes read from the disk, with the unreadable parts (relative to
+    /// the piece, ascending; zero-filled in `bytes`).
+    Data(&'a [u8], &'a [Range<u64>]),
+    /// `len` bytes that were not read: a sparse run (`sparse`, zeros by
+    /// definition) or a part that is unmapped, damaged or outside the
+    /// session range (unknown). Never materialised, so a stretch of any
+    /// length costs one call.
+    Gap {
+        /// Length in bytes.
+        len: u64,
+        /// A sparse run: its content is zeros. Otherwise unknown.
+        sparse: bool,
+    },
+}
 
-/// Reads a whole stream (at most `len` bytes) and hands each piece to
-/// `sink` with the unreadable parts relative to the piece. Holes and
-/// unmapped clusters read as zeros and are reported unreadable when
-/// `mark_unmapped`. Returns false when some part could not be read.
+/// Receives the pieces of a stream in order.
+type Sink<'a> = dyn FnMut(Piece<'_>) + 'a;
+
+/// Reads a whole stream (at most `len` bytes) and hands it to `sink` in
+/// order: read bytes in pieces of at most [`READ_PIECE`], and every
+/// sparse, unmapped or unreadable stretch as one [`Piece::Gap`]. Returns
+/// false when some part could not be read. The number of iterations is
+/// bounded by `len / READ_PIECE` plus the number of runs, whatever the
+/// stored sizes claim, and `cancel` is polled once per iteration.
 fn read_stream(
     rd: &VolReader<'_>,
     vol_offset: u64,
@@ -715,67 +749,104 @@ fn read_stream(
 ) -> Result<bool, LiveError> {
     if let Some(bytes) = &stream.resident {
         let n = usize::try_from(len).unwrap_or(usize::MAX).min(bytes.len());
-        sink(bytes.get(..n).unwrap_or(&[]), &[]);
+        sink(Piece::Data(bytes.get(..n).unwrap_or(&[]), &[]));
         return Ok(true);
+    }
+    if cs == 0 {
+        return Ok(false);
     }
     let mut complete = !stream.damaged;
     let mut pos = 0u64;
     while pos < len {
-        let piece = len.saturating_sub(pos).min(READ_PIECE);
-        // Map the piece cluster by cluster run: find the contiguous part.
-        let start_disk = stream.map(vol_offset, cs, pos);
-        let mut contiguous = 0u64;
-        if let Some(d0) = start_disk {
-            // Extend while the next bytes map contiguously (whole run).
-            let vcn = pos.checked_div(cs).unwrap_or(0);
-            if let Some(run) = stream
-                .runs
-                .iter()
-                .find(|r| r.vcn <= vcn && r.vcn.checked_add(r.clusters).is_some_and(|e| vcn < e))
-            {
+        if rd.cancel.load(Ordering::Relaxed) {
+            return Err(LiveError::Cancelled);
+        }
+        let left = len.saturating_sub(pos);
+        let vcn = pos.checked_div(cs).unwrap_or(0);
+        let step = match stream.run_at(vcn) {
+            Some(run) => {
+                // The rest of this run, from `pos` on (at least one byte).
                 let run_end = run.vcn.saturating_add(run.clusters).saturating_mul(cs);
-                contiguous = run_end.saturating_sub(pos).min(piece);
-            }
-            if contiguous > 0 {
-                match rd.read(d0, contiguous)? {
-                    Some(b) => {
-                        if !b.bad.is_empty() {
-                            complete = false;
-                        }
-                        sink(&b.data, &b.bad);
+                let avail = run_end.saturating_sub(pos).min(left).max(1);
+                let disk = run.lcn.and_then(|lcn| {
+                    lcn.checked_add(vcn.checked_sub(run.vcn)?)?
+                        .checked_mul(cs)?
+                        .checked_add(pos.checked_rem(cs)?)?
+                        .checked_add(vol_offset)
+                });
+                match (run.lcn, disk) {
+                    (None, _) => {
+                        sink(Piece::Gap {
+                            len: avail,
+                            sparse: true,
+                        });
+                        avail
                     }
-                    None => {
+                    (Some(_), Some(d0)) => {
+                        let range = rd.src.range();
+                        if d0 < range.start || d0 >= range.end {
+                            // Outside the session range (S2): not read.
+                            // Unknown up to where the run enters the
+                            // range, or to its end, in one step.
+                            let out = if d0 < range.start {
+                                avail.min(range.start.saturating_sub(d0))
+                            } else {
+                                avail
+                            };
+                            complete = false;
+                            sink(Piece::Gap {
+                                len: out,
+                                sparse: false,
+                            });
+                            out
+                        } else {
+                            let piece = avail
+                                .min(READ_PIECE)
+                                .min(range.end.saturating_sub(d0))
+                                .max(1);
+                            match rd.read(d0, piece)? {
+                                Some(b) => {
+                                    if !b.bad.is_empty() {
+                                        complete = false;
+                                    }
+                                    sink(Piece::Data(&b.data, &b.bad));
+                                }
+                                None => {
+                                    complete = false;
+                                    sink(Piece::Gap {
+                                        len: piece,
+                                        sparse: false,
+                                    });
+                                }
+                            }
+                            piece
+                        }
+                    }
+                    (Some(_), None) => {
                         complete = false;
-                        let n = usize::try_from(contiguous).unwrap_or(0);
-                        let zeros = vec![0u8; n];
-                        sink(&zeros, std::slice::from_ref(&(0..contiguous)));
+                        sink(Piece::Gap {
+                            len: avail,
+                            sparse: false,
+                        });
+                        avail
                     }
                 }
             }
-        }
-        if contiguous == 0 {
-            // A hole or unmapped: one cluster (or the rest) of zeros.
-            let n = cs
-                .saturating_sub(pos.checked_rem(cs).unwrap_or(0))
-                .min(piece)
-                .max(1);
-            let sparse = start_disk.is_none()
-                && stream.runs.iter().any(|r| {
-                    r.lcn.is_none()
-                        && pos.checked_div(cs).is_some_and(|v| {
-                            r.vcn <= v && r.vcn.checked_add(r.clusters).is_some_and(|e| v < e)
-                        })
-                });
-            let zeros = vec![0u8; usize::try_from(n).unwrap_or(0)];
-            if sparse {
-                sink(&zeros, &[]);
-            } else {
+            None => {
+                // Unmapped up to the next run (or the end).
+                let next = stream
+                    .next_run_start(vcn)
+                    .map_or(len, |v| v.saturating_mul(cs));
+                let gap = next.saturating_sub(pos).min(left).max(1);
                 complete = false;
-                sink(&zeros, std::slice::from_ref(&(0..n)));
+                sink(Piece::Gap {
+                    len: gap,
+                    sparse: false,
+                });
+                gap
             }
-            contiguous = n;
-        }
-        pos = pos.saturating_add(contiguous);
+        };
+        pos = pos.saturating_add(step);
     }
     Ok(complete)
 }
@@ -820,8 +891,15 @@ fn read_system_file(
         Some(AttrList::Stream(s)) => {
             let len = s.sizes.map_or(0, |(real, _)| real).min(MAX_ATTRIBUTE_LIST);
             let mut bytes = Vec::new();
-            complete &= read_stream(rd, vol_offset, cs, &s, len, &mut |b, _| {
-                bytes.extend_from_slice(b)
+            complete &= read_stream(rd, vol_offset, cs, &s, len, &mut |p| match p {
+                Piece::Data(b, _) => bytes.extend_from_slice(b),
+                // At most MAX_ATTRIBUTE_LIST bytes in all.
+                Piece::Gap { len, .. } => bytes.resize(
+                    bytes
+                        .len()
+                        .saturating_add(usize::try_from(len).unwrap_or(0)),
+                    0,
+                ),
             })?;
             holders_of(AttrListEntries::new(&bytes))
         }
@@ -934,12 +1012,21 @@ fn read_volume(
     let mut bitmap: Vec<u8> = Vec::new();
     if mft.bitmap.found {
         let mut fill_bad = Vec::new();
-        let ok = read_stream(rd, start, cs, &mft.bitmap, want, &mut |b, bad| {
-            let base = u64::try_from(bitmap.len()).unwrap_or(u64::MAX);
-            for r in bad {
-                fill_bad.push(base.saturating_add(r.start)..base.saturating_add(r.end));
+        // `want` is at most MAX_MFT_SLOTS / 8 bytes, gaps included.
+        let ok = read_stream(rd, start, cs, &mft.bitmap, want, &mut |p| match p {
+            Piece::Data(b, bad) => {
+                let base = u64::try_from(bitmap.len()).unwrap_or(u64::MAX);
+                for r in bad {
+                    fill_bad.push(base.saturating_add(r.start)..base.saturating_add(r.end));
+                }
+                bitmap.extend_from_slice(b);
             }
-            bitmap.extend_from_slice(b);
+            Piece::Gap { len, sparse } => bitmap.resize(
+                bitmap
+                    .len()
+                    .saturating_add(usize::try_from(len).unwrap_or(0)),
+                if sparse { 0 } else { 0xFF },
+            ),
         })?;
         complete &= ok;
         for r in fill_bad {
@@ -993,8 +1080,21 @@ fn read_volume(
                 let mut alloc = RangeSet::new();
                 let mut run_start: Option<u64> = None;
                 let mut cluster = 0u64;
-                let want = total.div_ceil(8);
-                let ok = read_stream(rd, start, cs, &bmp.data, want, &mut |b, bad| {
+                // Only clusters that start inside the session range can
+                // matter, and the bitmap holds at most its real size: the
+                // read is bounded by both, whatever the boot sector's
+                // total_sectors claims. The rest counts as allocated below.
+                let in_range = rd
+                    .src
+                    .range()
+                    .end
+                    .saturating_sub(start)
+                    .div_ceil(cs.max(1));
+                let mut want = total.min(in_range).div_ceil(8);
+                if let Some((real, _)) = bmp.data.sizes {
+                    want = want.min(real);
+                }
+                let ok = read_stream(rd, start, cs, &bmp.data, want, &mut |p| {
                     let mut conv = BitRuns {
                         alloc: &mut alloc,
                         vol: start,
@@ -1002,9 +1102,17 @@ fn read_volume(
                         total,
                         run_start: &mut run_start,
                     };
-                    conv.feed(cluster, b, bad);
-                    cluster = cluster
-                        .saturating_add(u64::try_from(b.len()).unwrap_or(0).saturating_mul(8));
+                    let bytes = match p {
+                        Piece::Data(b, bad) => {
+                            conv.feed(cluster, b, bad);
+                            u64::try_from(b.len()).unwrap_or(u64::MAX)
+                        }
+                        Piece::Gap { len, sparse } => {
+                            conv.gap(cluster, !sparse);
+                            len
+                        }
+                    };
+                    cluster = cluster.saturating_add(bytes.saturating_mul(8));
                 })?;
                 complete &= ok;
                 let read_clusters = cluster.min(total);
@@ -1076,6 +1184,22 @@ struct BitRuns<'a> {
 }
 
 impl BitRuns<'_> {
+    /// A stretch of the bitmap from cluster `first` on that was not read:
+    /// unknown (`allocated`, counts as written) or sparse (free). The
+    /// caller advances past it; one call whatever its length.
+    fn gap(&mut self, first: u64, allocated: bool) {
+        if first >= self.total {
+            return;
+        }
+        if allocated {
+            if self.run_start.is_none() {
+                *self.run_start = Some(first);
+            }
+        } else if let Some(s) = self.run_start.take() {
+            insert_clusters(self.alloc, self.vol, self.cs, s, first);
+        }
+    }
+
     /// `bytes` describe clusters from `first` on; `bad` (relative byte
     /// ranges, ascending) were unreadable and count as allocated.
     fn feed(&mut self, first: u64, bytes: &[u8], bad: &[Range<u64>]) {

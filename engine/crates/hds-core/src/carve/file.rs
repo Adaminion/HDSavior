@@ -233,9 +233,9 @@ impl CarvedFile {
 
     /// The G1 flags known without reading the file: `overwritten` when its
     /// bytes intersect the overwritten set (C5), `bad_sectors` when they
-    /// intersect the scan's bad ranges. Carving drops candidates that meet
-    /// unreadable sectors, so the second only appears when the bad ranges
-    /// grew after carving. A read (recovery, `read_file`) adds its own
+    /// intersect the scan's bad ranges. Carving drops candidates whose
+    /// bytes meet unreadable sectors, so the second only appears when the
+    /// bad ranges grew after carving. A read (recovery, `read_file`) adds its own
     /// flags, as for every file.
     #[must_use]
     pub fn health_flags(&self, overwritten: &RangeSet, bad_ranges: &RangeSet) -> FlagSet {
@@ -250,23 +250,24 @@ impl CarvedFile {
     }
 
     /// The rating inputs that are not flags: `carved_end_unverified` unless
-    /// the end was verified (I3). A carved file is located by its absolute
-    /// offset and its own structure, not through a geometry, so
-    /// `geometry_not_validated` is never set.
+    /// the end was verified (I3), and `geometry_not_validated` unless the
+    /// `main` instance's geometry is validated (`geometry_validated`, F6:
+    /// carved files are nodes of the `main` instance, and the cluster grid
+    /// and protected files that chose them came from that geometry).
     #[must_use]
-    pub fn rating_context(&self) -> RatingContext {
+    pub fn rating_context(&self, geometry_validated: bool) -> RatingContext {
         RatingContext {
-            geometry_not_validated: false,
+            geometry_not_validated: !geometry_validated,
             carved_end_unverified: !self.end_verified,
         }
     }
 
     /// The G3 rating with `flags` (from [`health_flags`](Self::health_flags)
-    /// and whatever reads added): `good` only with a verified end and no
-    /// damage.
+    /// and whatever reads added): `good` only with a verified end, a
+    /// validated `main` geometry and no damage.
     #[must_use]
-    pub fn rating(&self, flags: FlagSet) -> Rating {
-        rate(flags, self.rating_context())
+    pub fn rating(&self, flags: FlagSet, geometry_validated: bool) -> Rating {
+        rate(flags, self.rating_context(geometry_validated))
     }
 
     /// Where the content is: one run of [`len`](Self::len) bytes at
@@ -286,9 +287,16 @@ impl CarvedFile {
 
     /// The recovery plan entry of this file as catalog node `node`, written
     /// into plan folder `folder` (normally the `<ext>` folder made by
-    /// [`ext_folder`]) with the pre-read `flags`.
+    /// [`ext_folder`]) with the pre-read `flags`; `geometry_validated` as
+    /// for [`rating_context`](Self::rating_context).
     #[must_use]
-    pub fn plan_file(&self, node: u64, folder: Option<u64>, flags: FlagSet) -> PlanFile {
+    pub fn plan_file(
+        &self,
+        node: u64,
+        folder: Option<u64>,
+        flags: FlagSet,
+        geometry_validated: bool,
+    ) -> PlanFile {
         PlanFile {
             node,
             folder,
@@ -298,7 +306,7 @@ impl CarvedFile {
             size: self.len,
             times: Timestamps::default(),
             flags,
-            context: self.rating_context(),
+            context: self.rating_context(geometry_validated),
             in_use: true,
             record_number: None,
             record_offset: None,

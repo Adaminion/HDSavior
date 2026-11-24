@@ -31,6 +31,11 @@
 //! after the final `%%EOF` is included if present, and nothing in the format
 //! proves that no further update followed.
 //!
+//! When an update was announced (an object, `xref` or a comment right after
+//! a `%%EOF`) but no later `%%EOF` completes it before the data ends or goes
+//! quiet, the last complete revision is returned - a readable document - but
+//! its end is not verified: the file went on, and what followed is missing.
+//!
 //! The scan reads the file sequentially. It gives up when a long stretch
 //! carries no PDF keyword at all (the candidate's tail was overwritten).
 
@@ -205,14 +210,15 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
     if !head.starts_with(b"%PDF-") {
         return None;
     }
-    let done = |len, confidence| {
+    // every end ends with `%%EOF` whose `startxref` leads to a
+    // cross-reference section of this file; it is verified unless what
+    // follows announced an update that never completed
+    let done = |len, confidence, end_verified| {
         Some(Measured {
             len,
             confidence,
             ext: "pdf",
-            // every end ends with `%%EOF` whose `startxref` leads to a
-            // cross-reference section of this file
-            end_verified: true,
+            end_verified,
         })
     };
 
@@ -221,7 +227,7 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
     if let Some(l) = linearized_length(&head) {
         if l >= 64 && l <= src.limit() && ends_with_marker(src, l) {
             if !update_follows(src, l) {
-                return done(l, Confidence::Exact);
+                return done(l, Confidence::Exact, true);
             }
             best = Some(l);
             pos = l;
@@ -256,7 +262,7 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
             }
             if let Some(end) = end_at_marker(src, marker) {
                 if !update_follows(src, end) {
-                    return done(end, Confidence::Probable);
+                    return done(end, Confidence::Probable, true);
                 }
                 best = Some(end);
             }
@@ -278,8 +284,10 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
         };
     }
     // The data ended (or went quiet) after a section that announced an
-    // update which never completed: the last complete revision stands.
-    done(best?, Confidence::Probable)
+    // update which never completed: the last complete revision stands, but
+    // the file evidently went on - into a bad sector, another file, or
+    // the next fragment - so this is not where it ends.
+    done(best?, Confidence::Probable, false)
 }
 
 #[cfg(test)]

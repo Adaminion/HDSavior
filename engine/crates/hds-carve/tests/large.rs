@@ -36,14 +36,16 @@ fn check(
 ) {
     let counted = Counting::new(file);
     let got = measure(kind, &counted, u64::MAX);
+    // Alone, nothing follows the file: a walker that confirms the end by
+    // looking behind it finds nothing there, and the end is not verified
+    // (see `end_verified.rs`). The data behind it decides below.
     assert_eq!(
-        got,
-        Some(Measured {
-            len: file.len,
-            confidence: Confidence::Exact,
-            ext,
-            end_verified,
-        }),
+        got.map(|m| (m.len, m.confidence, m.ext)),
+        Some((file.len, Confidence::Exact, ext)),
+        "{what}"
+    );
+    assert!(
+        end_verified || !got.is_some_and(|m| m.end_verified),
         "{what}"
     );
     let (reads, bytes) = (counted.reads.get(), counted.bytes.get());
@@ -64,8 +66,13 @@ fn check(
     };
     longer.gap(5 * GIB);
     assert_eq!(
-        measure(kind, &longer, u64::MAX).map(|m| m.len),
-        Some(file.len),
+        measure(kind, &longer, u64::MAX),
+        Some(Measured {
+            len: file.len,
+            confidence: Confidence::Exact,
+            ext,
+            end_verified,
+        }),
         "{what} + zeros"
     );
     // not complete: nothing, or (RAR 4 without its end block) an uncertain

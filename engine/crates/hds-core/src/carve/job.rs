@@ -181,6 +181,9 @@ pub struct Carver {
     protected_files: RangeSet,
     live_allocated: RangeSet,
     progress_interval: Duration,
+    /// Bytes the ZIP retries of one run may read together: the size of the
+    /// scanned part of the range (see [`Carver::run`]).
+    retry_budget: u64,
 }
 
 impl Carver {
@@ -217,6 +220,7 @@ impl Carver {
         Carver {
             kinds,
             geometry,
+            retry_budget: done.covered_len(range.clone()),
             range,
             candidates: hits,
             protected_files,
@@ -265,9 +269,21 @@ impl Carver {
     /// Polls `cancel` before every candidate and between the retries of a
     /// failing read.
     ///
+    /// The ZIP retry of I3 reads up to the candidate's bound, which after a
+    /// format is usually far away. Every candidate that needs it - a ZIP
+    /// whose streamed entries hold more than the read limit, or one whose
+    /// descriptor is never found because the archive is fragmented - could
+    /// read the rest of the disk, so the retries of one run share a budget
+    /// of one pass over the scanned part of the range: a retry reads at
+    /// most what is left of it, and none is made once less than the
+    /// default limit is left (the candidate counts as not measurable).
+    /// Streamed DEFLATE entries, nearly all there are, are walked to their
+    /// end by `hds_carve` and fail early on foreign data; the budget is
+    /// for the rest.
+    ///
     /// [`new`]: Carver::new
     pub fn run(
-        self,
+        mut self,
         source: &RangedSource,
         observer: &mut dyn CarveObserver,
         cancel: &AtomicBool,
@@ -295,7 +311,8 @@ impl Carver {
 
         let mut last_progress: Option<Instant> = None;
         let mut carved_until = 0_u64;
-        for hit in &self.candidates {
+        let candidates = std::mem::take(&mut self.candidates);
+        for hit in &candidates {
             if cancel.load(Ordering::Relaxed) {
                 summary.status = CarveStatus::Cancelled;
                 break;
@@ -354,11 +371,15 @@ impl Carver {
     /// Reads come in blocks, and a block can reach past the end of the
     /// file into an unreadable sector that the file does not need. When a
     /// read fails on unreadable sectors, the candidate is measured again
-    /// with its bound moved to the start of the failed read: a file that
-    /// ends before is measured as if the sectors were the next file; one
-    /// that needs them is given up (`unreadable`).
+    /// with its bound moved to the first of them: a file that ends before
+    /// is measured as if the sectors were the next file; one that needs
+    /// them is given up (`unreadable`). A walker that looked for more of
+    /// the file at the bound and found the data ending there (a PDF that
+    /// announced another revision) does not report its end as verified
+    /// (`hds_carve`), so a file that may have gone on into the unreadable
+    /// sectors is never rated `good`.
     fn measure(
-        &self,
+        &mut self,
         source: &RangedSource,
         kind: FileKind,
         offset: u64,
@@ -372,20 +393,30 @@ impl Carver {
             let reader = Watched {
                 inner: CarveReader::new(source, offset, max_len, cancel),
                 failed: Cell::new(None),
+                bytes: Cell::new(0),
             };
-            match try_measure(kind, &reader, max_len, &limits) {
+            let result = try_measure(kind, &reader, max_len, &limits);
+            if zip_retried {
+                self.retry_budget = self.retry_budget.saturating_sub(reader.bytes.get());
+            }
+            match result {
                 Ok(measured) => {
                     return match CarvedFile::from_measured(offset, kind, &measured) {
                         Some(file) if file.len() <= max_len => Outcome::File(file),
                         _ => Outcome::NotMeasurable,
                     };
                 }
-                Err(MeasureError::LimitReached) if kind == FileKind::Zip && !zip_retried => {
+                Err(MeasureError::LimitReached)
+                    if kind == FileKind::Zip
+                        && !zip_retried
+                        && self.retry_budget > Limits::DEFAULT.max_read_bytes =>
+                {
                     // I3: a ZIP that hits the read limit (streamed entries
                     // must be read to find their data descriptors) is tried
-                    // once more with the limit raised to its bound
+                    // once more with the limit raised to its bound - within
+                    // what is left of the run's retry budget
                     zip_retried = true;
-                    limits = raised_limits(max_len);
+                    limits = raised_limits(max_len, self.retry_budget);
                 }
                 Err(MeasureError::LimitReached | MeasureError::NotMeasurable) => {
                     return if met_bad_sectors {
@@ -422,17 +453,26 @@ impl Carver {
 const MAX_ATTEMPTS: u32 = 6;
 
 /// A [`CarveReader`] that remembers its first failed read (offset and
-/// length, relative to the candidate).
+/// length, relative to the candidate) and counts the bytes it delivered.
 struct Watched<'a> {
     inner: CarveReader<'a>,
     failed: Cell<Option<(u64, usize)>>,
+    bytes: Cell<u64>,
 }
 
 impl ReadAt for Watched<'_> {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         let result = self.inner.read_at(offset, buf);
-        if result.is_err() && self.failed.get().is_none() {
-            self.failed.set(Some((offset, buf.len())));
+        match &result {
+            Ok(n) => self.bytes.set(
+                self.bytes
+                    .get()
+                    .saturating_add(u64::try_from(*n).unwrap_or(u64::MAX)),
+            ),
+            Err(_) if self.failed.get().is_none() => {
+                self.failed.set(Some((offset, buf.len())));
+            }
+            Err(_) => {}
         }
         result
     }
@@ -473,12 +513,16 @@ fn first_unreadable(
     None
 }
 
-/// The limits of the ZIP retry: as many bytes as the bound allows, and
-/// reads to match (the smallest block the measurer reads is 16 KiB).
-fn raised_limits(max_len: u64) -> Limits {
+/// The limits of the ZIP retry: as many bytes as the bound allows, but no
+/// more than `budget`, and reads to match (the smallest block the measurer
+/// reads is 16 KiB).
+fn raised_limits(max_len: u64, budget: u64) -> Limits {
+    let bytes = max_len
+        .max(Limits::DEFAULT.max_read_bytes)
+        .min(budget.max(Limits::DEFAULT.max_read_bytes));
     Limits {
-        max_read_bytes: max_len.max(Limits::DEFAULT.max_read_bytes),
-        max_reads: (max_len / (16 << 10))
+        max_read_bytes: bytes,
+        max_reads: (bytes / (16 << 10))
             .saturating_add(1)
             .max(Limits::DEFAULT.max_reads),
     }

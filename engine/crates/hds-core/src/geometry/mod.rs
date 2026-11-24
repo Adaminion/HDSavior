@@ -44,7 +44,7 @@ mod heads;
 mod tests;
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 use std::sync::OnceLock;
@@ -75,6 +75,13 @@ pub const STRUCT_DIRS: u64 = 3;
 pub const STRUCT_MFT: u64 = 16;
 /// F5: `end_by_files` is the value of this rank.
 pub const END_RANK: usize = 4;
+/// At most this many candidates of an instance are kept
+/// ([`crate::instances::Instance::candidates`], the protocol's
+/// `geometry_candidates`): the best by F3's ranking, which include every
+/// checked one. A crafted disk can produce millions of candidate offsets
+/// (boot sectors, signature anchors); F7 gathers the evidence of any other
+/// pair itself.
+pub const MAX_CANDIDATES: usize = 16;
 
 /// Where a cluster size came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -231,6 +238,10 @@ pub(crate) struct GeoContext<'a> {
     blocks_by_owner: Vec<(u64, usize)>,
     /// Carve hit offsets per kind code, ascending (built on first use).
     carve: OnceLock<Vec<Vec<u64>>>,
+    /// F5: per (cluster size, volume offset) the largest size in bytes of
+    /// a boot hit that agrees with it, as a primary (at the offset) or as
+    /// a backup (size bytes behind it).
+    boot_sizes: BTreeMap<(u32, u64), u64>,
 }
 
 impl<'a> GeoContext<'a> {
@@ -249,6 +260,18 @@ impl<'a> GeoContext<'a> {
             .filter_map(|(i, b)| b.owner.map(|o| (o.number(), i)))
             .collect();
         blocks_by_owner.sort_unstable();
+        let mut boot_sizes: BTreeMap<(u32, u64), u64> = BTreeMap::new();
+        for bh in store.boot_hits() {
+            let size = bh
+                .boot
+                .total_sectors
+                .saturating_mul(u64::from(bh.boot.bytes_per_sector));
+            let readings = [Some(bh.disk_offset), bh.disk_offset.checked_sub(size)];
+            for at in readings.into_iter().flatten() {
+                let e = boot_sizes.entry((bh.boot.cluster_size, at)).or_insert(0);
+                *e = (*e).max(size);
+            }
+        }
         GeoContext {
             store,
             live,
@@ -258,7 +281,14 @@ impl<'a> GeoContext<'a> {
             starts,
             blocks_by_owner,
             carve: OnceLock::new(),
+            boot_sizes,
         }
+    }
+
+    /// The largest size (bytes) of a boot hit with cluster size `cs` that
+    /// agrees with volume offset `off` (F5).
+    fn boot_size_at(&self, cs: u32, off: u64) -> Option<u64> {
+        self.boot_sizes.get(&(cs, off)).copied()
     }
 
     fn carve_by_kind(&self) -> &Vec<Vec<u64>> {
@@ -543,6 +573,11 @@ impl MftMap {
     }
 }
 
+/// F3's ranking of candidates: distinct voting directories, signature
+/// votes, a boot reading consistent with its hidden sectors, the source
+/// order, agreeing MFT records (each descending except the source order).
+type RankKey = (Reverse<u64>, Reverse<u64>, Reverse<bool>, usize, Reverse<u64>);
+
 /// One offset candidate under construction.
 #[derive(Debug, Clone, Default)]
 struct Cand {
@@ -567,6 +602,17 @@ impl Cand {
             .iter()
             .position(|&s| self.has(s))
             .unwrap_or(SOURCE_ORDER.len())
+    }
+
+    /// F3's ranking key (smaller is better; the offset breaks ties).
+    fn rank_key(&self) -> RankKey {
+        (
+            Reverse(self.dirs),
+            Reverse(self.sig),
+            Reverse(self.boot_pref),
+            self.source_rank(),
+            Reverse(self.mft_agree),
+        )
     }
 
     fn reported_source(&self) -> OffsetSource {
@@ -621,8 +667,11 @@ pub(crate) fn content_check(
         let Some(end) = at.checked_add(cs64) else {
             continue;
         };
-        let bad = at < ctx.range.start || at.saturating_add(512) > ctx.range.end || ctx.live.overwritten().intersects(at..end);
-        usable.push((if bad { u64::MAX } else { at }, f));
+        if at < ctx.range.start || end > ctx.range.end || ctx.live.overwritten().intersects(at..end)
+        {
+            continue;
+        }
+        usable.push((at, f));
     }
     let n = usable.len();
     let take = n.min(CHECK_FILES);
@@ -635,7 +684,6 @@ pub(crate) fn content_check(
         let Some(&(at, f)) = usable.get(k) else {
             continue;
         };
-        if at == u64::MAX { continue; }
         let Some(Head::Bytes(head)) = heads.get(at, cancel)? else {
             continue;
         };
@@ -659,19 +707,29 @@ pub(crate) fn content_check(
     Ok((checked, matched))
 }
 
-/// F1-F6 for one instance. `members` are its records (number, id) by
-/// number; `lowest` its lowest record offset.
-pub(crate) fn compute(
+/// How [`gather`] collects signature anchors.
+#[derive(Debug, Clone, Copy)]
+enum SigMode {
+    /// Keep the best `n` anchor offsets by the F3 ranking: only those can
+    /// be among the checked candidates (signature anchors exist only
+    /// without index votes, so a candidate with signature votes ranks
+    /// above every candidate without).
+    Top(usize),
+    /// Count the votes for this one offset only (F7).
+    At(u64),
+}
+
+/// F2 for one instance under cluster size `cs`: every offset candidate
+/// with its evidence (MFT map, index votes, boot sectors, starts, and the
+/// signature anchors `sig` asks for).
+fn gather(
     ctx: &GeoContext<'_>,
     members: &[(u32, RecordId)],
     inst_files: &InstanceFiles,
-    lowest: u64,
-    heads: &mut Heads,
-    cancel: &AtomicBool,
-) -> Result<GeoResult, HeadError> {
+    cs: u32,
+    sig: SigMode,
+) -> BTreeMap<u64, Cand> {
     let store = ctx.store;
-    let hist = f1_histogram(store, members.iter().map(|&(_, id)| id));
-    let (cs, cluster_source) = cluster_size(ctx, &hist, lowest);
     let cs64 = u64::from(cs);
     let mut cands: BTreeMap<u64, Cand> = BTreeMap::new();
     fn add(
@@ -815,7 +873,35 @@ pub(crate) fn compute(
 
     // Signature anchors, only without index votes.
     if votes.is_empty() {
-        for (off, n) in signature_votes(ctx, inst_files, cs64) {
+        let anchors = anchor_files(ctx, inst_files, cs64);
+        let mut found: Vec<(u64, u64)> = Vec::new();
+        match sig {
+            SigMode::At(off) => {
+                let n = anchor_votes_at(ctx, &anchors, off);
+                if n >= ANCHOR_VOTES {
+                    found.push((off, n));
+                }
+            }
+            SigMode::Top(keep) => {
+                // The `keep` best by the F3 ranking key, in a bounded
+                // max-heap (the worst kept one on top).
+                let mut best: BinaryHeap<(RankKey, u64, u64)> = BinaryHeap::new();
+                merge_anchor_votes(ctx, &anchors, &mut |off, n| {
+                    if ctx.valid_offset(i128::from(off)).is_none() {
+                        return;
+                    }
+                    let mut c = cands.get(&off).cloned().unwrap_or_default();
+                    c.sources |= OffsetSource::Signature.bit();
+                    c.sig = c.sig.max(n);
+                    best.push((c.rank_key(), off, n));
+                    if best.len() > keep {
+                        best.pop();
+                    }
+                });
+                found.extend(best.into_iter().map(|(_, off, n)| (off, n)));
+            }
+        }
+        for (off, n) in found {
             if let Some(o) = add(&mut cands, ctx, i128::from(off), OffsetSource::Signature) {
                 if let Some(c) = cands.get_mut(&o) {
                     c.sig = c.sig.max(n);
@@ -823,24 +909,35 @@ pub(crate) fn compute(
             }
         }
     }
+    cands
+}
+
+/// F1-F6 for one instance. `members` are its records (number, id) by
+/// number; `lowest` its lowest record offset. The result keeps the chosen
+/// geometry and the best [`MAX_CANDIDATES`] candidates in F3's ranking
+/// order (F5 is computed for those only).
+pub(crate) fn compute(
+    ctx: &GeoContext<'_>,
+    members: &[(u32, RecordId)],
+    inst_files: &InstanceFiles,
+    lowest: u64,
+    heads: &mut Heads,
+    cancel: &AtomicBool,
+) -> Result<GeoResult, HeadError> {
+    let hist = f1_histogram(ctx.store, members.iter().map(|&(_, id)| id));
+    let (cs, cluster_source) = cluster_size(ctx, &hist, lowest);
+    let mut cands = gather(
+        ctx,
+        members,
+        inst_files,
+        cs,
+        SigMode::Top(CHECK_CANDIDATES),
+    );
 
     // F3 on the best candidates.
-    let mut ranked: Vec<(_, u64)> = cands
-        .iter()
-        .map(|(&o, c)| {
-            (
-                (
-                    Reverse(c.dirs),
-                    Reverse(c.sig),
-                    Reverse(c.boot_pref),
-                    c.source_rank(),
-                    Reverse(c.mft_agree),
-                ),
-                o,
-            )
-        })
-        .collect();
+    let mut ranked: Vec<(RankKey, u64)> = cands.iter().map(|(&o, c)| (c.rank_key(), o)).collect();
     ranked.sort_unstable();
+    ranked.truncate(MAX_CANDIDATES.max(CHECK_CANDIDATES));
     let order: Vec<u64> = ranked.into_iter().map(|(_, o)| o).collect();
     for &off in order.iter().take(CHECK_CANDIDATES) {
         let (checked, matched) = content_check(ctx, cs, off, inst_files, heads, cancel)?;
@@ -905,19 +1002,23 @@ pub(crate) fn compute(
     let chosen = make(chosen_off, cands.get(&chosen_off).unwrap_or(&default_cand));
     let candidates = order
         .iter()
+        .take(MAX_CANDIDATES)
         .filter_map(|o| cands.get(o).map(|c| make(*o, c)))
         .collect();
     Ok(GeoResult { chosen, candidates })
 }
 
-/// F2 signature anchors: up to 64 in-use files with a known signature and
-/// a first cluster, spread over the record numbers; each carve hit of a
-/// matching kind votes for `hit - first cluster x cs`; offsets with at
-/// least 3 votes (files). Offsets are counted with a k-way merge of the
-/// per-file vote streams, so memory stays bounded by the number of files.
-fn signature_votes(ctx: &GeoContext<'_>, inst_files: &InstanceFiles, cs: u64) -> Vec<(u64, u64)> {
+/// The files of F2's signature anchors: up to [`ANCHOR_FILES`] in-use
+/// files with a known signature and a first cluster, spread over the
+/// record numbers, as (first cluster x `cs`, the kinds their extension
+/// promises).
+fn anchor_files(
+    ctx: &GeoContext<'_>,
+    inst_files: &InstanceFiles,
+    cs: u64,
+) -> Vec<(u64, &'static [FileKind])> {
     let store = ctx.store;
-    let mut files: Vec<(u64, Vec<FileKind>)> = Vec::new();
+    let mut files: Vec<(u64, &'static [FileKind])> = Vec::new();
     for (gi, g) in inst_files.groups.groups.iter().enumerate() {
         let Some(f) = inst_files.bits.get(gi) else {
             continue;
@@ -933,76 +1034,114 @@ fn signature_votes(ctx: &GeoContext<'_>, inst_files: &InstanceFiles, cs: u64) ->
         if kinds.is_empty() {
             continue;
         }
-        files.push((l, kinds.to_vec()));
+        files.push((l, kinds));
     }
     let n = files.len();
     let take = n.min(ANCHOR_FILES);
-    let hits = ctx.carve_by_kind();
-    // One sorted stream of candidate offsets per sampled file.
-    let mut streams: Vec<Vec<u64>> = Vec::with_capacity(take);
+    let mut out = Vec::with_capacity(take);
     for i in 0..take {
         let k = i
             .checked_mul(n)
             .and_then(|x| x.checked_div(take))
             .unwrap_or(0);
-        let Some((l, kinds)) = files.get(k) else {
+        let Some(&(l, kinds)) = files.get(k) else {
             continue;
         };
         let Some(shift) = l.checked_mul(cs) else {
             continue;
         };
-        let mut s: Vec<u64> = Vec::new();
-        for &kind in kinds {
-            let Some(list) = hits.get(usize::from(carve_kind_code(kind))) else {
-                continue;
-            };
-            let from = list.partition_point(|&d| d < shift);
-            s.extend(
-                list.get(from..)
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(|&d| d.saturating_sub(shift)),
-            );
-        }
-        s.sort_unstable();
-        s.dedup();
-        streams.push(s);
-    }
-    // k-way merge counting how many streams hold each offset.
-    let mut heap = std::collections::BinaryHeap::new();
-    for (si, s) in streams.iter().enumerate() {
-        if let Some(&v) = s.first() {
-            heap.push(Reverse((v, si, 0usize)));
-        }
-    }
-    let mut out = Vec::new();
-    let mut cur: Option<(u64, u64)> = None;
-    while let Some(Reverse((v, si, pos))) = heap.pop() {
-        match &mut cur {
-            Some((cv, cn)) if *cv == v => *cn = cn.saturating_add(1),
-            _ => {
-                if let Some((cv, cn)) = cur {
-                    if cn >= ANCHOR_VOTES {
-                        out.push((cv, cn));
-                    }
-                }
-                cur = Some((v, 1));
-            }
-        }
-        let next = pos.saturating_add(1);
-        if let Some(&nv) = streams.get(si).and_then(|s| s.get(next)) {
-            heap.push(Reverse((nv, si, next)));
-        }
-    }
-    if let Some((cv, cn)) = cur {
-        if cn >= ANCHOR_VOTES {
-            out.push((cv, cn));
-        }
+        out.push((shift, kinds));
     }
     out
 }
 
-/// F5 for `g` given the instance's file ends (descending).
+/// F2 signature anchors: every offset `hit - shift` that at least
+/// [`ANCHOR_VOTES`] anchor files vote for, in ascending order, with its
+/// number of files, handed to `found`.
+///
+/// A k-way merge by cursors over the per-kind sorted hit lists, shifted on
+/// the fly: memory is one heap entry per (file, kind), whatever the number
+/// of carve hits; time is O(files x hits x log(files x kinds)).
+fn merge_anchor_votes(
+    ctx: &GeoContext<'_>,
+    anchors: &[(u64, &'static [FileKind])],
+    found: &mut dyn FnMut(u64, u64),
+) {
+    let hits = ctx.carve_by_kind();
+    let list_of = |kind: FileKind| -> &[u64] {
+        hits.get(usize::from(carve_kind_code(kind)))
+            .map_or(&[][..], |l| l.as_slice())
+    };
+    // Entries: (offset, file, kind slot, position in that kind's list).
+    let mut heap: BinaryHeap<Reverse<(u64, usize, usize, usize)>> = BinaryHeap::new();
+    for (fi, &(shift, kinds)) in anchors.iter().enumerate() {
+        for (ki, &kind) in kinds.iter().enumerate() {
+            let list = list_of(kind);
+            let from = list.partition_point(|&d| d < shift);
+            if let Some(&d) = list.get(from) {
+                heap.push(Reverse((d.saturating_sub(shift), fi, ki, from)));
+            }
+        }
+    }
+    // The offset being counted, its number of distinct files, and the
+    // last file counted for it (entries of one file are adjacent).
+    let mut cur: Option<(u64, u64, usize)> = None;
+    while let Some(Reverse((v, fi, ki, pos))) = heap.pop() {
+        match &mut cur {
+            Some((cv, cn, last)) if *cv == v => {
+                if *last != fi {
+                    *cn = cn.saturating_add(1);
+                    *last = fi;
+                }
+            }
+            _ => {
+                if let Some((cv, cn, _)) = cur {
+                    if cn >= ANCHOR_VOTES {
+                        found(cv, cn);
+                    }
+                }
+                cur = Some((v, 1, fi));
+            }
+        }
+        let Some(&(shift, kinds)) = anchors.get(fi) else {
+            continue;
+        };
+        let Some(&kind) = kinds.get(ki) else { continue };
+        let next = pos.saturating_add(1);
+        if let Some(&d) = list_of(kind).get(next) {
+            heap.push(Reverse((d.saturating_sub(shift), fi, ki, next)));
+        }
+    }
+    if let Some((cv, cn, _)) = cur {
+        if cn >= ANCHOR_VOTES {
+            found(cv, cn);
+        }
+    }
+}
+
+/// The number of anchor files that vote for `off` (a hit of one of their
+/// kinds at `off + shift`). O(files x kinds x log hits).
+fn anchor_votes_at(ctx: &GeoContext<'_>, anchors: &[(u64, &'static [FileKind])], off: u64) -> u64 {
+    let hits = ctx.carve_by_kind();
+    let mut n = 0u64;
+    for &(shift, kinds) in anchors {
+        let Some(at) = off.checked_add(shift) else {
+            continue;
+        };
+        let votes = kinds.iter().any(|&kind| {
+            hits.get(usize::from(carve_kind_code(kind)))
+                .is_some_and(|l| l.binary_search(&at).is_ok())
+        });
+        if votes {
+            n = n.saturating_add(1);
+        }
+    }
+    n
+}
+
+/// F5 for `g` given the instance's file ends (descending). O(log boot
+/// hits): the boot hits that agree with a geometry are looked up in
+/// [`GeoContext`]'s index.
 pub(crate) fn volume_size(ctx: &GeoContext<'_>, ends: &[u64], g: &mut Geometry) {
     let ebf = if ends.len() >= END_RANK {
         ends.get(END_RANK.saturating_sub(1)).copied().unwrap_or(0)
@@ -1011,25 +1150,12 @@ pub(crate) fn volume_size(ctx: &GeoContext<'_>, ends: &[u64], g: &mut Geometry) 
     };
     let end_of_all = ends.first().copied().unwrap_or(0);
     let cs = u64::from(g.cluster_size);
-    let mut tc: Option<u64> = None;
-    for bh in ctx.store.boot_hits() {
-        if bh.boot.cluster_size != g.cluster_size {
-            continue;
-        }
-        let size = bh
-            .boot
-            .total_sectors
-            .saturating_mul(u64::from(bh.boot.bytes_per_sector));
-        let agrees = bh.disk_offset == g.volume_offset
-            || bh.disk_offset.checked_sub(size) == Some(g.volume_offset);
-        if !agrees {
-            continue;
-        }
-        let t = size.checked_div(cs).unwrap_or(0);
-        if ebf <= t {
-            tc = Some(tc.map_or(t, |x| x.max(t)));
-        }
-    }
+    // The largest size of an agreeing boot hit decides: of the hits with
+    // `end_by_files <= size / cs`, the largest is that one if any is.
+    let tc = ctx
+        .boot_size_at(g.cluster_size, g.volume_offset)
+        .and_then(|size| size.checked_div(cs))
+        .filter(|&t| ebf <= t);
     let tc = tc.unwrap_or_else(|| {
         let by_range = ctx
             .range
@@ -1051,20 +1177,26 @@ pub(crate) fn volume_size(ctx: &GeoContext<'_>, ends: &[u64], g: &mut Geometry) 
     g.lost_volume = lo..hi;
 }
 
-/// F7: a geometry set by the user, with the evidence the candidates had
-/// for that pair and a fresh F3 check.
+/// F7: a geometry set by the user. Its evidence is gathered for exactly
+/// that pair (F2 under its cluster size, signature votes counted for that
+/// offset), with a fresh F3 check.
 pub(crate) fn manual(
     ctx: &GeoContext<'_>,
     cluster_size: u32,
     volume_offset: u64,
-    candidates: &[Geometry],
+    members: &[(u32, RecordId)],
     inst_files: &InstanceFiles,
     heads: &mut Heads,
     cancel: &AtomicBool,
 ) -> Result<Geometry, HeadError> {
-    let same = candidates
-        .iter()
-        .find(|c| c.cluster_size == cluster_size && c.volume_offset == volume_offset);
+    let cands = gather(
+        ctx,
+        members,
+        inst_files,
+        cluster_size,
+        SigMode::At(volume_offset),
+    );
+    let same = cands.get(&volume_offset);
     let (checked, matched) =
         content_check(ctx, cluster_size, volume_offset, inst_files, heads, cancel)?;
     let mut g = Geometry {
@@ -1072,10 +1204,10 @@ pub(crate) fn manual(
         volume_offset,
         cluster_source: ClusterSource::Manual,
         offset_source: OffsetSource::Manual,
-        index_dirs: same.map_or(0, |c| c.index_dirs),
-        index_blocks: same.map_or(0, |c| c.index_blocks),
+        index_dirs: same.map_or(0, |c| c.dirs),
+        index_blocks: same.map_or(0, |c| c.blocks),
         mft_agree: same.map_or(0, |c| c.mft_agree),
-        signature_votes: same.map_or(0, |c| c.signature_votes),
+        signature_votes: same.map_or(0, |c| c.sig),
         signature_checked: checked,
         signature_ok: matched,
         validated: false,

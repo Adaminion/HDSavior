@@ -16,14 +16,18 @@
 //!    of a protected file, the next live-allocated range and the end of the
 //!    session range; a candidate inside a file already carved by this run
 //!    is skipped (I2 c). A ZIP candidate that runs into the read limit is
-//!    measured once more with the limit raised to its bound. Every read goes
-//!    through [`hds_recover::CarveReader`]: resilient, inside the session
-//!    range, cancellable. A read that meets unreadable sectors moves the
-//!    bound in front of them and the candidate is measured again: a file
-//!    that ends before them is carved, one that needs them is dropped
-//!    (`unreadable`); a lost device ends the job (`source_lost`, S7). As at
-//!    any bound, a format that is complete at more than one place (MP3, a
-//!    PDF revision) can come back shorter; never reaching into them.
+//!    measured once more with the limit raised to its bound; the retries of
+//!    a run share a budget of one pass over the scanned part of the range
+//!    (see [`Carver::run`]). Every read goes through
+//!    [`hds_recover::CarveReader`]: resilient, inside the session range,
+//!    cancellable. A read that meets unreadable sectors moves the bound in
+//!    front of them and the candidate is measured again: a file that ends
+//!    before them is carved, one that needs them is dropped (`unreadable`);
+//!    a lost device ends the job (`source_lost`, S7). As at any bound, a
+//!    format that is complete at more than one place (MP3, a PDF revision)
+//!    can come back shorter, never reaching into them - and then without a
+//!    verified end, when the walker saw that the file went on or looked for
+//!    more of it right at the bound (`hds_carve`, "Verified ends").
 //! 3. **Results (I3, I5).** The job returns a [`CarveRun`]: the kinds it
 //!    replaces and the [`CarvedFile`]s it found (all of them, or those found
 //!    before a cancel or a lost device). [`CarvedSet::apply`] replaces the
@@ -34,9 +38,12 @@
 //! A carved file is a node `[Carved files]/<ext>/f<sector, 10 digits>.<ext>`
 //! of the `main` instance; it is recovered like any file with one run
 //! ([`CarvedFile::plan_file`]). Its rating is `good` only when the format's
-//! structure verified its end ([`hds_carve::Measured::end_verified`]); I4
-//! (a carved file inside a deleted file makes that file `overwritten`) uses
-//! [`CarvedSet::covered`].
+//! structure verified its end ([`hds_carve::Measured::end_verified`]) and
+//! the `main` geometry is validated (F6). I4 (a carved file inside a
+//! deleted file makes that file `overwritten`) is
+//! [`CarvedSet::overwrites_deleted`], which leaves out the deleted file's
+//! own content: deleted files are not protected from carving, so an intact
+//! one is carved at its own place.
 //!
 //! # What the caller passes
 //!

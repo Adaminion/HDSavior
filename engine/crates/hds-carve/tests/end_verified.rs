@@ -14,7 +14,17 @@ mod common;
 use common::{samples, special, Rng, Sample};
 use hds_carve::{measure, sniff, Confidence, FileKind, Measured};
 
+/// Measures `data` as a carver finds it: followed by free space (zeros),
+/// so that a walker that looks behind the end sees what is there.
 fn run(kind: FileKind, data: &[u8]) -> Option<Measured> {
+    let mut disk = data.to_vec();
+    disk.resize(data.len() + 4096, 0);
+    measure(kind, &disk, disk.len() as u64)
+}
+
+/// Measures `data` with nothing behind it: the data (or `max_len`) ends
+/// where the file does.
+fn alone(kind: FileKind, data: &[u8]) -> Option<Measured> {
     measure(kind, &data, data.len() as u64)
 }
 
@@ -198,7 +208,9 @@ fn a_cut_file_never_has_a_verified_end() {
         let mut cuts: Vec<usize> = vec![1, 2, n / 4, n / 2, n * 3 / 4, n - 2, n - 1];
         cuts.extend((512..n).step_by(512));
         for cut in cuts {
-            let Some(m) = run(s.kind, &s.data[..cut]) else {
+            // (nothing behind the cut: padding could recreate the bytes
+            // that were cut off)
+            let Some(m) = alone(s.kind, &s.data[..cut]) else {
                 continue;
             };
             if !m.end_verified {
@@ -400,4 +412,68 @@ fn layouts_the_encoders_do_not_write() {
         (short.len(), Confidence::Exact)
     );
     assert!(!m.end_verified);
+}
+
+#[test]
+fn an_end_found_where_the_data_runs_out_is_not_verified() {
+    // A walker that looks at what follows the file to decide whether it
+    // goes on (a PDF update, a further box or RIFF chunk) finds nothing
+    // when the data, or `max_len`, ends right there: whether the file went
+    // on is then unknown. On a disk that is a bad sector, the next file's
+    // first cluster, or the end of the range.
+    for s in verified_samples() {
+        let m = alone(s.kind, &s.data).unwrap();
+        assert_eq!(m.len as usize, s.data.len(), "{}", s.name);
+        let looks_behind = matches!(s.kind, FileKind::Pdf | FileKind::Mp4 | FileKind::Avi);
+        assert_eq!(m.end_verified, !looks_behind, "{}", s.name);
+    }
+
+    // A PDF with incremental updates is complete after every revision.
+    // Cut right behind an earlier revision (the next cluster unreadable,
+    // or overwritten), that revision is all there is - not verified.
+    let pdf = samples()
+        .into_iter()
+        .find(|s| s.name == "pdf_incremental_update.pdf")
+        .unwrap()
+        .data;
+    let ends: Vec<usize> = (0..pdf.len() - 5)
+        .filter(|&i| pdf[i..].starts_with(b"%%EOF"))
+        .map(|i| i + 5 + usize::from(pdf[i + 5] == b'\n'))
+        .collect();
+    assert!(ends.len() >= 3, "{ends:?}");
+    for &end in &ends[..ends.len() - 1] {
+        let m = alone(FileKind::Pdf, &pdf[..end]).unwrap();
+        assert_eq!(
+            (m.len as usize, m.end_verified),
+            (end, false),
+            "cut at {end}"
+        );
+        // with free space behind it, the same revision is a verified end
+        // (a document that was never updated looks just like it)
+        let m = run(FileKind::Pdf, &pdf[..end]).unwrap();
+        assert_eq!(
+            (m.len as usize, m.end_verified),
+            (end, true),
+            "{end} + zeros"
+        );
+    }
+    // Cut inside an update - its objects there, its `%%EOF` missing - the
+    // last complete revision is measured, and it is not verified however
+    // the data goes on: the file announced that it continues.
+    for cut in (ends[0] + 40..pdf.len() - 8).step_by(97) {
+        if ends.contains(&cut) {
+            continue;
+        }
+        let complete = *ends.iter().rfind(|&&e| e <= cut).unwrap();
+        for m in [
+            alone(FileKind::Pdf, &pdf[..cut]),
+            run(FileKind::Pdf, &pdf[..cut]),
+        ] {
+            let m = m.unwrap();
+            assert_eq!(m.len as usize, complete, "cut at {cut}");
+            if cut > complete + 2 {
+                assert!(!m.end_verified, "cut at {cut}: {m:?}");
+            }
+        }
+    }
 }

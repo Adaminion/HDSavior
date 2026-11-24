@@ -465,3 +465,85 @@ fn overrides_round_trip_and_hostile_payloads() {
     o.set_kind(30, None);
     assert!(o.is_empty());
 }
+
+fn rv_peak_kb() -> u64 {
+    let s = std::fs::read_to_string("/proc/self/status").unwrap();
+    s.lines().find(|l| l.starts_with("VmHWM")).unwrap().split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
+/// Reviewer: signature anchors materialise one stream of all matching
+/// carve hits per sampled file (64 x hits).
+#[test]
+#[ignore]
+fn rv_signature_anchor_memory() {
+    let mib: u64 = std::env::var("RV_MIB").ok().and_then(|v| v.parse().ok()).unwrap_or(256);
+    let step: u64 = std::env::var("RV_STEP").ok().and_then(|v| v.parse().ok()).unwrap_or(512);
+    let mut lab = Lab::new(mib as usize);
+    let head = png_head();
+    let mut o = 16 * MIB;
+    while o + 512 <= mib * MIB {
+        lab.put(o, &head);
+        o += step;
+    }
+    for i in 0..100u32 {
+        lab.rec(4 * MIB, &file(30 + i, 1, ROOT, &format!("p{i}.png"), t(100), Some((4096 + u64::from(i) * 7, 1))));
+    }
+    let source = lab.source();
+    drop(lab);
+    let range = 0..source.size();
+    let ranged = hds_io::RangedSource::new(source.clone(), range.clone()).unwrap();
+    let options = crate::scan::ScanOptions::default();
+    let meta = crate::session::SessionMeta::new(crate::session::SourceIdentity::from(&source.info()), range, options).unwrap();
+    let mut session = crate::session::Session::new(meta);
+    let cancel = AtomicBool::new(false);
+    crate::scan::scan(&ranged, &options, &mut session, &mut crate::scan::NoObserver, &cancel);
+    println!("carve hits {}", session.store().carve_hits().count());
+    let live = crate::live::LiveState { scan_time: Some(SCAN), snapshot: None };
+    let mut heads = Heads::new();
+    heads.attach(Some(ranged.clone()));
+    std::fs::write("/proc/self/clear_refs", "5").unwrap();
+    let before = rv_peak_kb();
+    let t0 = std::time::Instant::now();
+    let input = crate::instances::AnalysisInput::new(session.store(), session.meta(), &live);
+    let layout = crate::instances::analyze(&input, &mut heads, &Overrides::new(), &cancel).unwrap();
+    let ncand: usize = layout.instances().iter().map(|i| i.candidates.len()).sum();
+    println!("analysis {:.2}s, peak before {} MiB after {} MiB, candidates {}", t0.elapsed().as_secs_f64(), before / 1024, rv_peak_kb() / 1024, ncand);
+}
+
+/// Reviewer: many boot hits make F2/F5 quadratic (every candidate's F5
+/// scans every boot hit).
+#[test]
+#[ignore]
+fn rv_many_boot_hits() {
+    let n: u64 = std::env::var("RV_BOOTS").ok().and_then(|v| v.parse().ok()).unwrap_or(20000);
+    let mib = (16 + n * 2048 / MIB + 2) as usize;
+    let mut lab = Lab::new(mib);
+    for k in 0..n {
+        let off = 16 * MIB + k * 2048;
+        lab.put(off, &boot_sector(512, 8, 16383 + k, 4, 8, -10, 1, (off / 512) as u32));
+    }
+    resident_files(&mut lab, 4 * MIB, 30..60);
+    let t0 = std::time::Instant::now();
+    let run = lab.run(None);
+    let ncand: usize = run.layout.instances().iter().map(|i| i.candidates.len()).sum();
+    println!("boot hits {} scan+analysis {:.2}s candidates {}", run.store().boot_hits().len(), t0.elapsed().as_secs_f64(), ncand);
+}
+
+/// Reviewer: D4(b) in step 4 reads heads for every (validated instance,
+/// instance) pair, also for one-record instances that can never reach 3
+/// checked files.
+#[test]
+#[ignore]
+fn rv_tiny_fragments_cost_head_reads() {
+    let n: u64 = std::env::var("RV_TINY").ok().and_then(|v| v.parse().ok()).unwrap_or(5000);
+    let mut lab = Lab::new(64);
+    signatures(&mut lab, 25, 12 * MIB);
+    for k in 0..n {
+        let num = 100_000 + k as u32 * 7;
+        lab.rec_at(20 * MIB + k * 3 * 1024, &file(num, 1, ROOT, "x.jpg", t(100), Some((3000 + k, 1))));
+    }
+    let t0 = std::time::Instant::now();
+    let run = lab.run(None);
+    let validated = run.layout.instances().iter().filter(|i| i.own_geometry.as_ref().is_some_and(|g| g.validated)).count();
+    println!("tiny {} instances {} validated {} head reads {} stored {} {:.2}s", n, run.layout.instances().len(), validated, run.heads.reads(), run.heads.len(), t0.elapsed().as_secs_f64());
+}

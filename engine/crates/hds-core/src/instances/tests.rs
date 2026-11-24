@@ -652,7 +652,10 @@ fn hostile_many_tiny_fragments_stay_fast() {
     for k in 0..20_000u64 {
         let n = 100 + rng.below(1 << 20) as u32;
         let parent = fref(100 + rng.below(1 << 20), 1);
-        lab.rec_at(k * 3 * 1024, &file(n, 1, parent, "f.jpg", t(k % 900), Some((k, 1))));
+        lab.rec_at(
+            k * 3 * 1024,
+            &file(n, 1, parent, "f.jpg", t(k % 900), Some((k, 1))),
+        );
     }
     let started = std::time::Instant::now();
     let run = lab.run(None);
@@ -865,4 +868,63 @@ mod synth {
     pub fn peak_rss_mib() -> u64 {
         status_kib("VmHWM:") / 1024
     }
+}
+
+/// Reviewer: many record-0 holders whose $MFT runs cover the whole disk:
+/// each placement scans every record inside its runs (holders x records).
+#[test]
+#[ignore]
+fn rv_many_mft_holders() {
+    let holders: u64 = std::env::var("RV_HOLDERS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
+    let recs: u32 = std::env::var("RV_RECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30000);
+    let mib = (8 + u64::from(recs) * 1024 / MIB + holders * 3 * 1024 / MIB + 4) as usize;
+    let mut lab = Lab::new(mib);
+    for n in 30..30 + recs {
+        lab.rec(4 * MIB + holders * 3 * 1024, &file(n, 1, ROOT, "f.txt", t(100), None));
+    }
+    let base = 2 * MIB;
+    for k in 0..holders {
+        let r0 = Rec::new(0)
+            .si([t(1); 4], 6)
+            .name(ROOT, "$MFT", 3, 6)
+            .data_extent(0, (1 << 30) - 1, (1 << 42, 1 << 42, 1 << 42), &runlist(&[(Some(0), 1 << 30)]), 0);
+        lab.rec_at(base + k * 3 * 1024, &r0);
+    }
+    let t0 = std::time::Instant::now();
+    let run = lab.run(None);
+    println!("records {} instances {} scan+analysis {:.2}s", run.store().record_count(), run.layout.instances().len(), t0.elapsed().as_secs_f64());
+}
+
+/// Reviewer: an override is keyed by the instance's lowest record offset;
+/// records found later at a lower offset (a resumed scan) change the key
+/// and the stored choice no longer applies.
+#[test]
+fn rv_override_key_changes_when_records_are_added() {
+    let mut lab = Lab::new(16);
+    // B2: directories 30..49 at 5 MiB (old times).
+    let o2 = 5 * MIB - 30 * 1024;
+    for n in 30..50 {
+        lab.rec(o2, &dir(n, 1, ROOT, &format!("d{n}"), t(10)));
+    }
+    // B1: files 300..329 at 1 MiB naming those directories.
+    let o1 = MIB - 300 * 1024;
+    for n in 300..330 {
+        lab.rec(o1, &file(n, 1, fref(u64::from(30 + n % 20), 1), "b.txt", t(10), None));
+    }
+    // A: newer files 30..79 at 8 MiB (sequence 2: they never resolve B1's references).
+    let oa = 8 * MIB - 30 * 1024;
+    for n in 30..80 {
+        lab.rec(oa, &file(n, 2, ROOT, "a.txt", t(1000), None));
+    }
+    // Stopped scan: only [4 MiB, 16 MiB) read so far. The user picks B.
+    let partial = lab.run(Some(4 * MIB..16 * MIB));
+    let b = partial.layout.instance(partial.inst(5 * MIB).unwrap()).unwrap().clone();
+    let mut ov = Overrides::new();
+    ov.set_kind(b.key, Some(KindChoice::Main));
+    let partial2 = lab.run_with(Some(4 * MIB..16 * MIB), &ov);
+    assert_eq!(partial2.kind(5 * MIB), Some(InstanceKind::Main));
+    // Resumed scan finds B1 at 1 MiB: same instance, but the choice is gone.
+    let full = lab.run_with(None, &ov);
+    assert_eq!(full.inst(MIB), full.inst(5 * MIB), "B1 and B2 are one instance");
+    assert_eq!(full.kind(5 * MIB), Some(InstanceKind::Main), "the user's choice of main was lost");
 }

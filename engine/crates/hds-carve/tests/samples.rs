@@ -39,6 +39,8 @@ fn expected_end_verified(s: &Sample) -> bool {
         FileKind::Bmp | FileKind::Tiff | FileKind::Mp3 => false,
         // libheif and Pillow write `meta` first and the item data last
         FileKind::Heic => false,
+        // arithmetic coding is not decoded, so its scans cannot be checked
+        FileKind::Jpeg => s.name != "jpeg_arithmetic.jpg",
         // only one WAV sample has a chunk behind its `data` chunk
         FileKind::Wav => s.name == "wav_python_list_after_data.wav",
         // without Cues and Tags mkvmerge ends the file in its last Cluster
@@ -124,7 +126,19 @@ fn sniff_with_short_heads_is_conservative() {
 #[test]
 fn measure_file_alone() {
     for s in samples() {
-        check(&s, "alone", &s.data);
+        // Alone, nothing follows the file. Walkers that confirm an end by
+        // looking at what follows it (a PDF update, a further box or RIFF
+        // chunk) find nothing there and do not call the end verified
+        // (`end_verified.rs`); everything else is as on a disk.
+        let got = measure(s.kind, &s.data, s.data.len() as u64);
+        let looks_behind = matches!(s.kind, FileKind::Pdf | FileKind::Mp4 | FileKind::Avi);
+        let expected = Measured {
+            len: s.data.len() as u64,
+            confidence: expected_confidence(&s),
+            ext: leak(expected_ext(&s)),
+            end_verified: expected_end_verified(&s) && !looks_behind,
+        };
+        assert_eq!(got, Some(expected), "{} alone", s.name);
         // a generous max_len changes nothing: the data simply ends
         let got = measure(s.kind, &s.data, u64::MAX).map(|m| m.len);
         assert_eq!(

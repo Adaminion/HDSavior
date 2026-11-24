@@ -369,116 +369,113 @@ fn fragmented_files_are_never_good() {
     // (or after its first half): the first part lies on the grid, the rest
     // eight clusters further on, and in between lies something else -
     // random data, zeros, or a cluster of another sample. What is carved at
-    // the first part is never `good` unless it is the whole file; the second
-    // part has no signature and is not found at all.
+    // the first part is never `good` unless it is the whole file's own
+    // complete part; the second part has no signature and is not found at
+    // all. Several seeds: the outcome must not depend on the data.
     let g = geometry(4096, 0);
     let c = g.cluster_size() as usize;
     let all = samples();
-    let mut rng = Rng::new(0xF4A6);
     let mut carved_unverified: BTreeMap<FileKind, usize> = BTreeMap::new();
     let mut not_carved: BTreeMap<FileKind, usize> = BTreeMap::new();
-    let mut through_the_gap: BTreeMap<(FileKind, &str), usize> = BTreeMap::new();
-    for (round, filler) in ["random", "zeros", "foreign"].iter().enumerate() {
-        let mut disk = Disk::new(32 * MIB as usize);
-        let mut placed = Vec::new();
-        let mut at = MIB as usize;
-        for (i, s) in all.iter().enumerate() {
-            let n = s.data.len();
-            if n <= c {
-                continue;
-            }
-            let cut = if i % 2 == 0 {
-                c
-            } else {
-                (n / 2).div_ceil(c) * c
-            };
-            if cut >= n {
-                continue;
-            }
-            let gap = 8 * c;
-            disk.put(at as u64, &s.data[..cut]);
-            let between: Vec<u8> = match round {
-                0 => rng.bytes(gap),
-                1 => vec![0; gap],
-                _ => {
-                    let other = &all[(i * 7 + 3) % all.len()].data;
-                    let mut v = other[other.len().min(c)..].to_vec();
-                    v.resize(gap, 0x20);
-                    v
-                }
-            };
-            disk.put((at + cut) as u64, &between);
-            disk.put((at + cut + gap) as u64, &s.data[cut..]);
-            placed.push((at as u64, s.clone(), cut));
-            at += (cut + gap + (n - cut)).div_ceil(c) * c + c;
-        }
-        assert!(at < 32 * MIB as usize);
-        let source = disk.source();
-        let session = scan_source(&source, 0..source.size());
-        let (run, _) = carve(
-            &source,
-            &session,
-            input(&session, KindSet::all(), g, none(), none(), none()),
-        );
-        let by_offset: BTreeMap<u64, CarvedFile> =
-            run.files.iter().map(|f| (f.offset(), *f)).collect();
-        for (at, s, cut) in &placed {
-            let Some(f) = by_offset.get(at) else {
-                *not_carved.entry(s.kind).or_default() += 1;
-                continue;
-            };
-            // whatever was carved, its end is not verified - unless it is a
-            // complete part of the file inside the first fragment (the
-            // first revision of a PDF)
-            if f.end_verified() {
-                if matches!(s.kind, FileKind::Jpeg | FileKind::Gif)
-                    && f.len() == (s.data.len() + 8 * c) as u64
-                {
-                    // The known gap of the two formats without checksums:
-                    // zeros and text are legal JPEG entropy-coded data, and
-                    // bytes that happen to chain as GIF sub-blocks are GIF
-                    // data; the walk runs on through them into the rest of
-                    // the file and to its end marker. Nothing short of
-                    // decoding the picture tells. Random data does not pass.
-                    assert_ne!(*filler, "random", "{}", s.name);
-                    *through_the_gap.entry((s.kind, *filler)).or_default() += 1;
+    for seed in [0xF4A6, 12, 13, 0x5EED_0003] {
+        let mut rng = Rng::new(seed);
+        for (round, filler) in ["random", "zeros", "foreign"].iter().enumerate() {
+            let mut disk = Disk::new(32 * MIB as usize);
+            let mut placed = Vec::new();
+            let mut at = MIB as usize;
+            for (i, s) in all.iter().enumerate() {
+                let n = s.data.len();
+                if n <= c {
                     continue;
                 }
-                assert!(
-                    f.end() <= at + *cut as u64,
-                    "{filler}: {} carved as {f:?}",
-                    s.name
-                );
-            } else {
-                *carved_unverified.entry(s.kind).or_default() += 1;
+                let cut = if i % 2 == 0 {
+                    c
+                } else {
+                    (n / 2).div_ceil(c) * c
+                };
+                if cut >= n {
+                    continue;
+                }
+                let gap = 8 * c;
+                disk.put(at as u64, &s.data[..cut]);
+                let between: Vec<u8> = match round {
+                    0 => rng.bytes(gap),
+                    1 => vec![0; gap],
+                    _ => {
+                        // the tail of a sample of another kind. (A PDF
+                        // continued by the tail of another PDF at the same
+                        // offsets - a deleted PDF whose first cluster a new
+                        // one reused - passes: the cross-reference offsets
+                        // of the old one still point where they did. A
+                        // known limit, see the crate documentation of
+                        // hds_carve.)
+                        let mut k = (i * 7 + 3 + seed as usize) % all.len();
+                        while all[k].kind == s.kind {
+                            k = (k + 1) % all.len();
+                        }
+                        let other = &all[k].data;
+                        let mut v = other[other.len().min(c)..].to_vec();
+                        v.resize(gap, 0x20);
+                        v
+                    }
+                };
+                disk.put((at + cut) as u64, &between);
+                disk.put((at + cut + gap) as u64, &s.data[cut..]);
+                placed.push((at as u64, s.clone(), cut));
+                at += (cut + gap + (n - cut)).div_ceil(c) * c + c;
             }
-            // nothing is carved where the second fragments lie
-        }
-        for f in &run.files {
-            assert!(
-                placed.iter().any(|(a, _, _)| *a == f.offset()),
-                "{filler}: {f:?}"
+            assert!(at < 32 * MIB as usize);
+            let source = disk.source();
+            let session = scan_source(&source, 0..source.size());
+            let (run, _) = carve(
+                &source,
+                &session,
+                input(&session, KindSet::all(), g, none(), none(), none()),
             );
+            let by_offset: BTreeMap<u64, CarvedFile> =
+                run.files.iter().map(|f| (f.offset(), *f)).collect();
+            for (at, s, cut) in &placed {
+                let Some(f) = by_offset.get(at) else {
+                    *not_carved.entry(s.kind).or_default() += 1;
+                    continue;
+                };
+                // whatever was carved, its end is not verified - unless it
+                // is a complete part of the file inside the first fragment
+                // (the first revision of a PDF). JPEG and GIF, which have
+                // no checksums, are decoded: running on through the gap to
+                // the file's own end marker does not verify it.
+                if f.end_verified() {
+                    assert!(
+                        f.end() <= at + *cut as u64,
+                        "seed {seed:#x}, {filler}: {} carved as {f:?}",
+                        s.name
+                    );
+                } else {
+                    *carved_unverified.entry(s.kind).or_default() += 1;
+                }
+                // nothing is carved where the second fragments lie
+            }
+            for f in &run.files {
+                assert!(
+                    placed.iter().any(|(a, _, _)| *a == f.offset()),
+                    "seed {seed:#x}, {filler}: {f:?}"
+                );
+            }
         }
     }
     println!("fragmented, not carved: {not_carved:?}");
     println!("fragmented, carved with an unverified end: {carved_unverified:?}");
-    println!("fragmented, read through the gap to the end marker: {through_the_gap:?}");
     // the formats that end in header arithmetic (or are complete after any
-    // frame) are carved, rated uncertain; those that can only end with a
-    // verified end are not carved at all
-    for kind in [FileKind::Bmp, FileKind::Wav, FileKind::Mp3] {
+    // frame) are carved, rated uncertain, and so are JPEG and GIF files
+    // whose data does not decode; those that can only end with a verified
+    // end are not carved at all
+    for kind in [FileKind::Bmp, FileKind::Wav, FileKind::Mp3, FileKind::Jpeg] {
         assert!(
             carved_unverified.get(&kind).copied().unwrap_or(0) > 0,
             "{kind:?}"
         );
     }
-    for kind in [
-        FileKind::Png,
-        FileKind::Gif,
-        FileKind::Zip,
-        FileKind::SevenZip,
-    ] {
+    for kind in [FileKind::Png, FileKind::Zip, FileKind::SevenZip] {
         assert!(not_carved.get(&kind).copied().unwrap_or(0) > 0, "{kind:?}");
         assert_eq!(carved_unverified.get(&kind), None, "{kind:?}");
     }
@@ -711,6 +708,174 @@ fn unreadable_candidates_and_a_lost_device() {
     assert!(!run.files.is_empty() && run.files.len() < complete.files.len());
     assert_eq!(run.files, complete.files[..run.files.len()]);
     assert_eq!(summary.found, run.files.len() as u64);
+}
+
+#[test]
+fn a_file_cut_short_by_an_unreadable_sector_is_not_good() {
+    // A PDF with two incremental updates (`%%EOF` at 2163, 2726 and 6384)
+    // and an unreadable sector inside its last revision. The job measures
+    // it again in front of the sector and gets the second revision - a
+    // readable document, but the file announced that it goes on: its end
+    // is not verified and it is not rated good. A JPEG with an unreadable
+    // sector right behind its end is still carved whole and good.
+    let g = geometry(4096, 0);
+    let pdf = sample("pdf_incremental_update.pdf");
+    let jpg = sample("jpeg_jfif_exif_xmp.jpg");
+    let mut disk = Disk::new(MIB as usize);
+    let pdf_at = 64 * 4096;
+    let jpg_at = 128 * 4096;
+    disk.put(pdf_at, &pdf.data);
+    disk.put(jpg_at, &jpg.data);
+    let mem: Arc<dyn BlockSource> = disk.source();
+    let faulty = Arc::new(FaultySource::new(mem.clone()));
+    let source: Arc<dyn BlockSource> = faulty.clone();
+    let session = scan_source(&source, 0..source.size());
+    let pdf_bad = pdf_at + 4096..pdf_at + 4608;
+    let jpg_bad = (jpg_at + jpg.data.len() as u64).next_multiple_of(512);
+    faulty.bad_sectors(pdf_bad.clone());
+    faulty.bad_sectors(jpg_bad..jpg_bad + 512);
+    let (run, summary) = carve(
+        &source,
+        &session,
+        input(&session, KindSet::all(), g, none(), none(), none()),
+    );
+    assert_eq!(summary.status, CarveStatus::Completed);
+    assert_eq!(summary.unreadable, 0);
+    let f = run.files.iter().find(|f| f.offset() == pdf_at).unwrap();
+    assert_eq!((f.len(), f.end_verified()), (2727, false));
+    let bad = ranges(&[pdf_bad]);
+    assert_eq!(
+        f.rating(f.health_flags(&none(), &bad), true),
+        hds_recover::Rating::Uncertain
+    );
+    let j = run.files.iter().find(|f| f.offset() == jpg_at).unwrap();
+    assert_eq!((j.len(), j.end_verified()), (jpg.data.len() as u64, true));
+    assert_eq!(
+        j.rating(j.health_flags(&none(), &none()), true),
+        hds_recover::Rating::Good
+    );
+}
+
+/// Incompressible data with the local header of a streamed bzip2 entry
+/// (bit 3, sizes 0) every `every` bytes: candidates whose descriptor is
+/// never found, so each runs into the read limit.
+struct StreamedNoise {
+    size: u64,
+    every: u64,
+    read: std::sync::atomic::AtomicU64,
+}
+
+impl StreamedNoise {
+    fn header() -> Vec<u8> {
+        let mut h = vec![
+            0x50, 0x4B, 0x03, 0x04, 46, 0, 0x08, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 5, 0, 0, 0,
+        ];
+        h.extend_from_slice(b"a.bz2");
+        h
+    }
+
+    fn word(i: u64) -> u64 {
+        let mut x = i.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
+        x ^= x >> 31;
+        x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x ^ (x >> 29)
+    }
+}
+
+impl BlockSource for StreamedNoise {
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn sector_size(&self) -> u32 {
+        512
+    }
+    fn physical_sector_size(&self) -> u32 {
+        512
+    }
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.read.fetch_add(buf.len() as u64, Ordering::Relaxed);
+        for (k, c) in buf.chunks_mut(8).enumerate() {
+            let w = Self::word(offset / 8 + k as u64).to_le_bytes();
+            c.copy_from_slice(&w[..c.len()]);
+        }
+        let h = Self::header();
+        let end = offset + buf.len() as u64;
+        let mut at = offset / self.every * self.every;
+        while at < end {
+            for (j, &b) in h.iter().enumerate() {
+                let p = at + j as u64;
+                if (offset..end).contains(&p) {
+                    buf[(p - offset) as usize] = b;
+                }
+            }
+            at += self.every;
+        }
+        Ok(())
+    }
+    fn info(&self) -> SourceInfo {
+        SourceInfo {
+            kind: SourceKind::Image,
+            path: "streamed-noise".into(),
+            size: self.size,
+            sector_size: 512,
+            physical_sector_size: 512,
+            model: None,
+            serial: None,
+            disk_number: None,
+        }
+    }
+    fn is_alive(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn zip_retries_share_one_pass_over_the_disk() {
+    // I3's retry of a ZIP that hit the read limit reads up to the bound,
+    // which after a format is usually the end of the range. Four streamed
+    // entries of a method that has to be searched for its descriptor, on
+    // 2 GiB of noise: every first attempt reads the default 1 GiB, and the
+    // retries together read at most the scanned size once more (without
+    // the shared budget they would read 2 + 1.75 + 1.5 + 1.25 GiB).
+    const GIB: u64 = 1 << 30;
+    let size = 2 * GIB;
+    let every = 256 * MIB;
+    let noise = Arc::new(StreamedNoise {
+        size,
+        every,
+        read: std::sync::atomic::AtomicU64::new(0),
+    });
+    let src: Arc<dyn BlockSource> = noise.clone();
+    let hits: Vec<CarveHit> = (0..4)
+        .map(|i| CarveHit::new(i * every, FileKind::Zip).unwrap())
+        .collect();
+    let input = CarveInput {
+        kinds: KindSet::all(),
+        geometry: geometry(4096, 0),
+        hits,
+        done: ranges(&[0..size]),
+        protected_files: none(),
+        overwritten: none(),
+        live_allocated: none(),
+    };
+    let carver = Carver::new(input, 0..size);
+    assert_eq!(carver.candidates(), 4);
+    let (run, summary) = carver.run(
+        &RangedSource::new(src, 0..size).unwrap(),
+        &mut NoCarveObserver,
+        &AtomicBool::new(false),
+    );
+    let read = noise.read.load(Ordering::Relaxed);
+    println!("4 streamed candidates on 2 GiB: {read} bytes read");
+    assert!(run.files.is_empty());
+    assert_eq!(summary.not_measurable, 4);
+    // first attempts 4 GiB, the retries 2 GiB, some read-ahead
+    assert!(read <= 6 * GIB + 64 * MIB, "{read} bytes read");
+    assert!(
+        read >= 6 * GIB - 64 * MIB,
+        "{read} bytes read: the first retry ran"
+    );
 }
 
 #[test]

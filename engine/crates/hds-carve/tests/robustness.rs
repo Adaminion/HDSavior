@@ -717,12 +717,12 @@ fn read_errors_are_not_ends() {
     }
     let mut rng = Rng::new(0xB0B0_0004);
     for s in all_files() {
-        let len = s.data.len() as u64;
-        let full = measure(s.kind, &s.data, len);
         // behind the file there are 64 KiB more, then the bad area begins
         // somewhere: inside the file, or behind it
         let mut padded = s.data.clone();
         padded.resize(s.data.len() + 65_536, 0);
+        // what a healthy disk gives
+        let full = measure(s.kind, &padded, padded.len() as u64);
         for _ in 0..12 {
             let bad = rng.below(padded.len() as u64);
             let reader = Failing { data: &padded, bad };
