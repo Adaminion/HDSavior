@@ -1,0 +1,8 @@
+[package]
+name = "hds-testkit"
+description = "Synthetic NTFS image builder for tests (independent of hds-ntfs)."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

@@ -1,0 +1,12 @@
+[package]
+name = "hds-engine"
+description = "HDSavior engine: command-line tool and JSON-lines server."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "hdsavior-engine"
+path = "src/main.rs"
+
+[dependencies]

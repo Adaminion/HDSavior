@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+hds-ntfs = { path = "crates/hds-ntfs" }
+hds-io = { path = "crates/hds-io" }
+hds-carve = { path = "crates/hds-carve" }
+hds-core = { path = "crates/hds-core" }
+hds-testkit = { path = "crates/hds-testkit" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+debug = 1
+
+# Parsers and the scanner are hot loops; keep tests reasonably fast.
+[profile.dev]
+opt-level = 1
+
+[profile.test]
+opt-level = 1

@@ -1,0 +1,8 @@
+[package]
+name = "hds-io"
+description = "Read-only block sources, disk enumeration, partition tables and the destination guard."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
