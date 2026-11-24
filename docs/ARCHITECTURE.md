@@ -521,23 +521,39 @@ shows (PROTOCOL `close_session`).
    bit-identical; at its original path when all its ancestors survived,
    otherwise under a lost or index-named folder; nothing reported `ok`
    differs from the manifest; nothing outside the session range is read.
-4. Windows CI (GitHub Actions, every push): build and unit-test on
-   `windows-latest`; then the round trip on a **real Windows-formatted
-   virtual disk** of at least 16 GiB through `\\.\PhysicalDriveN` (populate,
-   `format /Q`, scan, recover, compare), asserting the facts that could not
-   be verified without Windows (MFT placement, records 0–255 gone, record 256
-   intact, every slot below the new `$MFT`'s initialized size rewritten,
-   resident attribute lists produced by real NTFS, destination guard on a
-   volume of that disk, junction, symlink, dangling file symlink and mounted
-   folder inside the destination, timestamp edge values, the MFT-change time
-   after a move and a `robocopy` between volumes (measured: copies keep the
-   source's MFT-change time, which is why ALGORITHMS uses the *record time*
-   with the `$FILE_NAME` times), the slot a new file gets
-   after low slots were freed); then `flutter build windows`, bundling and
-   artifact upload.
+4. Windows CI (GitHub Actions, every push and pull request): build and
+   unit-test on `windows-latest`, then three steps on virtual disks that
+   Windows itself creates and formats:
+   - `scripts/windows/ci-io-probe.ps1`: raw reads through
+     `\\.\PhysicalDriveN` and the destination guard (a volume of the source
+     disk, junction, symlink, dangling file symlink, mounted folder, SUBST
+     drive, a VHD whose host disk is the source, `\\localhost` shares), and
+     the output primitives on NTFS, exFAT and FAT32;
+   - `scripts/windows/ci-roundtrip.ps1`, the **round trip**: on a 1 GiB fixed
+     VHD (no TRIM), Windows formats NTFS; 300 uncounted files take the low
+     MFT records as on any disk in use (a quick format rewrites records
+     0–255); then about 380 counted files: nested folders, resident and
+     non-resident files, four files grown in turns so that one has many
+     extents, ZIP files (so the geometry is validated by signatures), and a
+     non-ASCII name. Windows quick-formats the volume, `mountvol /p`
+     dismounts it, and the whole disk is hashed per MiB twice, 5 s apart.
+     `hdsavior-engine scan` and `recover --all` run through
+     `\\.\PhysicalDriveN` to a second virtual disk. Asserted: the source
+     disk is byte-identical afterwards; at least 95 % of the counted files
+     (all of them in practice) come back byte-identical under their old
+     folder path, the fragmented and the non-ASCII file always; nothing
+     with wrong content is reported `ok`;
+   - `scripts/windows/format-facts.ps1` (informational): MFT placement,
+     TRIM, record survival, timestamps after copies and moves, slot reuse,
+     measured on volumes Windows formats; the results are in
+     docs/notes/quick-format-behaviour.md.
+
+   A separate job runs `flutter build windows`, bundles the engine and
+   uploads the artifact.
 5. Flutter: widget tests against a fake engine that replays the recorded
-   protocol transcript; an integration test driving the real engine on a
-   fixture image (Linux).
+   protocol transcript; integration tests driving the real engine on the
+   `basic` fixture (Linux CI sets `HDSAVIOR_ENGINE` and
+   `HDSAVIOR_TEST_IMAGE`).
 
 ## 8. Known limitations
 

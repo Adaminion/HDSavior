@@ -427,7 +427,7 @@ Three tests also drive the real engine binary (scan, browse, recover and
 reload a session through the app's state layer, and compare the protocol
 with the fake engine); they are skipped unless both `HDSAVIOR_ENGINE` (path of
 `hdsavior-engine`) and `HDSAVIOR_TEST_IMAGE` (a fixture image such as
-`basic.img`) are set. CI does not set them.
+`basic.img`) are set. The Linux CI job sets both.
 
 ### CI
 
@@ -436,11 +436,16 @@ code (changes to Markdown files and `docs/` alone do not start it):
 
 - **Linux:** builds the fixtures, then `cargo fmt`, `cargo clippy` and
   `cargo test` with `HDS_FIXTURES`, the testkit tests, and
-  `flutter analyze` / `flutter test`.
+  `flutter analyze` / `flutter test` (including the real-engine tests on
+  `basic.img`).
 - **Windows:** clippy and tests on Windows, then
   `scripts/windows/ci-io-probe.ps1`, which creates real virtual disks with
   `diskpart` and checks raw reads and the destination guard (partition,
-  other disk, mounted folder, junction, symlink, `SUBST` drive).
+  other disk, mounted folder, junction, symlink, `SUBST` drive); then
+  `scripts/windows/ci-roundtrip.ps1`, which has Windows quick-format a
+  populated volume, rescues it with `hdsavior-engine scan` and
+  `recover --all` through `\\.\PhysicalDriveN`, checks every file's
+  SHA-256 and that the source disk is byte-identical afterwards.
 - **Windows app:** builds the engine and `flutter build windows --release`,
   checks that the engine is bundled and the manifest requires administrator
   rights, and uploads the bundle as `hdsavior-windows-preview`.
@@ -488,11 +493,11 @@ Known issues in the current code:
 - A disk recorded in a session without a serial number cannot be recognised
   again when the session is reopened without it attached, so destinations
   are judged `unknown_disk` (consent needed) in that state.
-- Windows CI checks raw reads and the destination guard on real virtual
-  disks and measures the quick-format facts, but it does not yet run a full
-  scan-and-recover round trip on a Windows-formatted disk, as
-  [ARCHITECTURE §7](docs/ARCHITECTURE.md#7-testing) describes. Recovery
-  correctness is tested on Linux-built fixtures and synthetic images.
+- Windows CI rescues a volume that Windows itself quick-formatted (a 1 GiB
+  virtual disk, see [ARCHITECTURE §7](docs/ARCHITECTURE.md#7-testing)), but
+  not yet larger disks, 4Kn sectors, dynamic disks or real USB hardware.
+  The app's Windows-only behaviour (UAC start, drive listing, UNC
+  destinations) has no automated test beyond the build.
 - No installer or signed release exists yet.
 
 ## Project layout
