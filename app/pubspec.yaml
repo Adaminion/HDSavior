@@ -1,0 +1,30 @@
+name: hdsavior
+description: "HDSavior: rescue files from an NTFS disk that was quick-formatted by accident."
+publish_to: 'none'
+
+# On Windows the build name becomes the product and file version of the
+# executable (see windows/runner/Runner.rc).
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.14.0
+  flutter: ">=3.47.0"
+
+# Dependencies are kept to the minimum on purpose (see README.md,
+# "Dependencies"): the Material library and the official file-picker plugin.
+# Application state uses ChangeNotifier/ValueNotifier from the SDK.
+dependencies:
+  flutter:
+    sdk: flutter
+  material_ui: ^1.11.1
+  file_selector: ^1.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  # Only to replace the dialogs' platform implementation in a test.
+  file_selector_platform_interface: ^2.7.0
+
+flutter:
+  uses-material-design: true

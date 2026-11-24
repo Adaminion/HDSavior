@@ -1,0 +1,247 @@
+The JSON examples of docs/PROTOCOL.md, copied verbatim.
+
+Each example starts with a line "### <name>" and runs to the next such line.
+The text is exactly what the document shows, placeholders included
+(Instance, [Geometry, ...], "disk"|"image", { ... }, Row + {...}, objects
+that list member names only). test/engine/protocol_examples.dart turns them
+into concrete JSON; protocol_examples_test.dart checks that this file and the
+document have not drifted apart and that every example parses.
+
+When the document changes, that test fails and prints the examples that
+differ: copy the new text here and adjust the models and expectations.
+
+### transport.request
+{"id": 7, "cmd": "list_children", "args": {"node": 12, "epoch": 3}}
+
+### transport.response_ok
+{"id": 7, "ok": true, "result": { ... }}
+
+### transport.response_error
+{"id": 7, "ok": false, "error": {"code": "not_found", "message": "node 12 does not exist", "data": null}}
+
+### transport.event
+{"event": "scan_progress", "data": { ... }}
+
+### SourceInfo
+{"kind": "disk", "path": "\\\\.\\PhysicalDrive1", "size": 4000787030016,
+ "sector_size": 512, "physical_sector_size": 4096,
+ "model": "WDC WD40EZRZ-00GXCB0", "serial": "WD-WCC7K0000000", "disk_number": 1}
+
+### Partition
+{"index": 1, "offset": 1048576, "size": 4000785104896,
+ "type": "Basic data", "type_id": "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7", "fs": "ntfs",
+ "ntfs": {"cluster_size": 4096, "total_sectors": 7814033407, "serial": "A1B2C3D4E5F60718"},
+ "letters": ["E:"], "label": "New Volume"}
+
+### Disk.extra
+{"number": 1, "bus": "USB", "removable": false, "is_system": false,
+ "media": "hdd", "trim": false, "flags": [],
+ "table": "gpt", "partitions": [Partition, ...]}
+
+### Geometry
+{"cluster_size": 4096, "volume_offset": 1048576,
+ "cluster_source": "attr", "offset_source": "index",
+ "index_dirs": 310, "index_blocks": 412,
+ "signature_checked": 200, "signature_ok": 197,
+ "validated": true, "total_clusters": 976754175}
+
+### Instance
+{"id": 0, "kind": "main", "manual": false, "label": "", "root": 0,
+ "records": 812401, "files": 790001, "dirs": 22300, "deleted_files": 5120,
+ "lost_dirs": 14, "bytes": 3210987654321,
+ "time_from": 1420070400000, "time_to": 1763942400000,
+ "embedded_in": null,
+ "geometry": Geometry, "geometry_candidates": [Geometry, ...],
+ "virtual": {"lost": 3, "orphans": 4, "carved": null}}
+
+### CatalogInfo
+{"epoch": 3, "instances": [Instance, ...], "nodes": 812345,
+ "live_records": 41, "post_format_records": 6,
+ "live_volumes": [{"offset": 1048576, "size": 4000785104896, "format_time": 1763900000000, "snapshot_time": 1763990000000}],
+ "range": {"start": 1048576, "end": 4000786153472},
+ "protected": [{"start": 1048576, "end": 4000786153472, "reason": "session_range"}],
+ "scanned_bytes": 4000785104896, "scan_complete": true, "bad_bytes": 0,
+ "out_of_range_files": 0, "out_of_range_bytes": 0,
+ "carve_hits": 48213, "carved": 0,
+ "source_attached": true, "warnings": [Warning, ...]}
+
+### Row
+{"id": 4711, "parent": 17, "name": "IMG_0042.JPG", "kind": "file", "ext": "jpg",
+ "size": 3456789, "modified": 1714566896000, "created": 1714566896000,
+ "deleted": false, "rating": "good", "flags": ["signature_ok"],
+ "files": 0, "deleted_files": 0, "deleted_size": 0, "has_children": false}
+
+### Filter
+{"query": "img_", "exts": ["jpg", "png"], "min_size": null, "max_size": null, "ratings": ["good", "uncertain"]}
+
+### scan_start.args
+{"start": 0, "end": null, "session_path": null, "resume": false,
+ "collect_carve_hits": true, "allow_same_disk": false, "allow_unknown_disk": false}
+
+### scan_progress
+{"phase": "mft_probe", "bytes_done": 1073741824, "bytes_total": 4000785104896,
+ "position": 4294967296, "speed_bps": 157286400, "eta_seconds": 25430,
+ "elapsed_seconds": 7, "records": 120344, "files": 118002, "dirs": 2342,
+ "index_blocks": 904, "carve_hits": 31, "bad_bytes": 0, "warnings": []}
+
+### scan_done
+{"status": "completed", "error": null, "session_path": "...", "catalog": CatalogInfo}
+
+### session_load.result
+{"source": SourceInfo, "source_attached": true, "source_error": null,
+ "catalog": CatalogInfo}
+
+### list_children.args
+{"epoch": 3, "node": 0, "offset": 0, "limit": 200, "sort": "name", "desc": false,
+ "dirs_only": false, "show_deleted": false, "exts": null, "ratings": null}
+
+### node_info.result
+{"row": Row,
+ "ancestors": [{"id": 0, "name": ""}, {"id": 17, "name": "Photos"}],
+ "path": "Photos/IMG_0042.JPG", "instance": 0,
+ "accessed": 1714566896000,
+ "other_names": [],
+ "record": {"number": 91234, "seq": 3, "disk_offset": 3314748416, "extension_records": 0},
+ "data": {"resident": false, "real_size": 3456789, "initialized_size": 3456789,
+          "allocated_size": 3457024, "runs": 1, "first_lcn": 812345,
+          "first_offset": 3328413696},
+ "flag_details": [{"flag": "signature_ok", "text": "The file starts with a valid JPEG header."}]}
+
+### search.args
+{"epoch": 3, "under": 0, "filter": Filter, "show_deleted": false,
+ "sort": "name", "desc": false, "offset": 0, "limit": 200}
+
+### selection_summary.args
+{"epoch": 3, "include": [17, 99], "exclude": [4711], "filter": null,
+ "include_deleted": false, "skip_damaged": false}
+
+### selection_summary.result
+{"files": 5320, "bytes": 18234567890, "dirs": 12,
+ "good": 5300, "uncertain": 12, "damaged": 5, "unsupported": 3}
+
+### check_destination.result
+{"verdict": "ok", "reason": null, "message": "", "free_bytes": 500000000000,
+ "enough_space": true, "fs": "NTFS", "max_file_bytes": null, "disk_numbers": [0],
+ "lost_files": 0, "lost_bytes": 0}
+
+### recover_start.args
+{"epoch": 3, "include": [17, 99], "exclude": [4711], "filter": null, "dest": "D:\\Rescued",
+ "include_deleted": false, "skip_damaged": false,
+ "allow_same_disk": false, "allow_unknown_disk": false, "on_exists": "rename"}
+
+### recover_progress
+{"files_done": 120, "files_total": 5320, "bytes_done": 734003200,
+ "bytes_total": 18234567890, "current": "Photos/IMG_0042.JPG",
+ "speed_bps": 104857600, "eta_seconds": 167, "elapsed_seconds": 7,
+ "ok": 118, "warnings": 2, "failed": 0, "skipped": 0}
+
+### recover_done
+{"status": "completed", "error": null, "files_total": 5320,
+ "ok": 5298, "warnings": 17, "failed": 2, "skipped": 3, "bytes_written": 18230000000,
+ "dest": "D:\\Rescued", "report_path": "D:\\Rescued\\HDSavior-report-20261124-031500.csv"}
+
+### image_start.args
+{"start": 0, "end": null, "dest": "D:\\disk1.img", "resume": false,
+ "allow_same_disk": false, "allow_unknown_disk": false}
+
+### Warning
+{"code": "source_reads_zero", "message": "..."}
+
+### hello.result
+{"engine_version": "0.1.0", "protocol": 1, "os": "windows", "elevated": true, "raw_disk_support": true, "carve_kinds": ["jpeg", "png", ...]}
+
+### list_disks.result
+{"disks": [Disk, ...]}
+
+### open_source.args
+{"kind": "disk"|"image", "path": "...", "sector_size": null}
+
+### open_source.result
+{"source": SourceInfo, "table": "gpt", "partitions": [Partition, ...], "warnings": [Warning, ...]}
+
+### close_source.result
+{}
+
+### scan_start.result
+{"job": "scan", "bytes_total": 4000785104896}
+
+### job_cancel.result
+{}
+
+### job_cancel.result.no_job
+{}
+
+### session_save.args
+{"path": "...", "allow_same_disk": false, "allow_unknown_disk": false}
+
+### session_save.result
+{"path": "...", "bytes": 12345678}
+
+### session_load.args
+{"path": "...", "source": null}
+
+### session_load.args.source
+{"kind", "path"}
+
+### session_attach_source.args
+{"kind": "disk"|"image", "path": "...", "force": false}
+
+### session_attach_source.result
+{"source": SourceInfo, "catalog": CatalogInfo}
+
+### geometry_set.args
+{"instance": 0, "cluster_size": 4096, "volume_offset": 1048576}
+
+### instance_set.args
+{"instance": 2, "kind": "main"}
+
+### list_children.result
+{"total": 5321, "rows": [Row, ...]}
+
+### node_info.args
+{"epoch": 3, "node": 4711}
+
+### search.result
+{"total": 1234, "rows": [Row + {"path": "Photos/IMG_0042.JPG", "ancestor_ids": [0, 17]}, ...]}
+
+### check_destination.args
+{"path": "D:\\Rescued", "purpose": "recover", "need_bytes": null}
+
+### recover_start.result
+{"job": "recover", "files": 5320, "bytes": 18234567890}
+
+### carve_start.args
+{"kinds": null}
+
+### carve_start.result
+{"job": "carve", "candidates": 48213}
+
+### carve_progress
+{"candidates_done": 100, "candidates_total": 48213, "found": 61, "bytes_found": 310000000, "eta_seconds": 900}
+
+### carve_done
+{"status": "completed", "error": null, "found": 913, "bytes_found": 4100000000, "catalog": CatalogInfo}
+
+### image_start.result
+{"job": "image", "bytes": 4000787030016}
+
+### image_progress
+{"bytes_done", "bytes_total", "speed_bps", "eta_seconds", "elapsed_seconds", "bad_bytes"}
+
+### image_done
+{"status", "error", "bytes_written", "bad_bytes", "path", "bad_map_path"}
+
+### read_file.args
+{"epoch": 3, "node": 4711, "offset": 0, "length": 65536}
+
+### read_file.result
+{"data_b64": "...", "size": 3456789, "eof": false, "kind": "jpeg"}
+
+### shutdown.result
+{}
+
+### task_progress
+{"task": "session_load"|"geometry_set", "fraction": 0.42}
+
+### log
+{"level": "info"|"warn"|"error", "message": "..."}

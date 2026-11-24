@@ -1,0 +1,22 @@
+# Static analysis for the HDSavior app. `flutter analyze` must stay clean.
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    # The engine protocol is JSON: forbid implicit casts and inferred
+    # `dynamic`, so every conversion from the wire is written out and checked.
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  exclude:
+    - build/**
+    - windows/**
+
+linter:
+  rules:
+    always_declare_return_types: true
+    avoid_dynamic_calls: true
+    directives_ordering: true
+    prefer_final_locals: true
+    prefer_single_quotes: true
+    unawaited_futures: true
