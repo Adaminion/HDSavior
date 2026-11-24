@@ -358,9 +358,23 @@ fn out_steps(base: &Path, steps: &mut Steps) -> Result<(), String> {
         format!("{outcome:?}"),
     );
     let expected = |ft| hds_io::out::filetime_to_system_time(ft);
+    // FAT32 and exFAT keep modification times in coarser units (measured on
+    // the CI disks: rounded up to 2 seconds); NTFS keeps them exactly.
+    let fat_family = limits.fs_name.as_deref().is_some_and(|name| {
+        name.eq_ignore_ascii_case("FAT32") || name.eq_ignore_ascii_case("exFAT")
+    });
+    let modified_matches = |actual: Option<std::time::SystemTime>, ft: u64| {
+        let round_up = |unit: u64| ft.div_ceil(unit) * unit;
+        let accepted: &[u64] = if fat_family {
+            &[ft, round_up(100_000), round_up(20_000_000)]
+        } else {
+            &[ft]
+        };
+        actual.is_some() && accepted.iter().any(|&a| actual == expected(a))
+    };
     steps.check(
         "modification time is applied",
-        meta.modified().ok() == expected(times.modified),
+        modified_matches(meta.modified().ok(), times.modified),
         format!("{:?}", meta.modified()),
     );
     if cfg!(windows) {
@@ -582,7 +596,7 @@ fn out_steps(base: &Path, steps: &mut Steps) -> Result<(), String> {
     steps.check(
         "directory times are applied",
         report.modified == TimeOutcome::Applied
-            && dir_meta.modified().ok() == expected(times.modified),
+            && modified_matches(dir_meta.modified().ok(), times.modified),
         format!(
             "{report:?}; expected {:?}, by handle {:?}, by parent listing {:?}",
             expected(times.modified),
