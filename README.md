@@ -495,7 +495,8 @@ Known issues in the current code:
   are judged `unknown_disk` (consent needed) in that state.
 - Windows CI rescues a volume that Windows itself quick-formatted (a 1 GiB
   virtual disk, see [ARCHITECTURE §7](docs/ARCHITECTURE.md#7-testing)), but
-  not yet larger disks, 4Kn sectors, dynamic disks or real USB hardware.
+  not yet larger disks, 4Kn sectors, dynamic disks or real USB hardware;
+  [docs/hardware-test.md](docs/hardware-test.md) is a checklist for that.
   The app's Windows-only behaviour (UAC start, drive listing, UNC
   destinations) has no automated test beyond the build.
 - No installer or signed release exists yet.
@@ -535,6 +536,8 @@ scripts/windows/         CI probes for real virtual disks and quick-format facts
   [NTFS on disk](docs/notes/ntfs-on-disk.md),
   [quick-format behaviour](docs/notes/quick-format-behaviour.md),
   [Windows raw I/O](docs/notes/windows-raw-io.md).
+- [docs/hardware-test.md](docs/hardware-test.md): a step-by-step rescue test
+  on real hardware, with a helper script that proves the source is untouched.
 - [app/README.md](app/README.md): the app's screens, build details, fake
   engine and tests.
 - [scripts/linux/README.md](scripts/linux/README.md): how the fixtures are
