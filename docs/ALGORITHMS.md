@@ -152,7 +152,9 @@ regular file that is not a reparse point, and never with a truncating open
 (S6). When a catalog is built and the session file's own location turns out
 to lie inside a lost-volume range (S2), the engine stops writing to that file
 and raises the warning `session_file_at_risk`; further changes need
-`session_save` to another place.
+`session_save` to another place. A checkpoint that fails raises
+`session_file_not_saved` until a later write succeeds; a loaded session whose
+file had ignored bytes or no scanned data carries `session_incomplete`.
 
 **B4. Identity.** A source matches a session when its size covers the session
 range and at least 90 % of up to 64 stored records (spread over the range, not
@@ -734,7 +736,8 @@ no exemption.
 
 **I5. Lifetime.** `carve_start` replaces the carved nodes of the kinds it is
 given; results found before a cancel are kept; carved nodes are stored in the
-session and discarded by `geometry_set` on the main instance, by
+session and discarded by a `geometry_set` that changes the main instance's
+layout, cluster size or volume offset, by
 `instance_set` and by any `scan_start`. Carved files are recovered like any file with one run.
 
 ## J. Imaging

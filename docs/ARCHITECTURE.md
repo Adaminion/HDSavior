@@ -70,7 +70,14 @@ Hard requirements. A reviewer must be able to verify each by reading the code.
   physical-disk extents (through VHD backing files, recursively) before
   anything is created. An overlap is refused; there is no override. The
   guard runs again at every job start, because the ranges grow when a
-  catalog is built or a geometry changes.
+  catalog is built or a geometry changes. Without an attached source (a
+  session that is open but whose disk or image is not attached), the guard
+  checks against the session's recorded source: the image file, or the
+  connected disk with the recorded serial and model. Only when that source
+  cannot be found is a location of unknown disk. On Linux, a file system
+  stored in the source image (through a loop device, a partition or
+  device-mapper stack, or a FUSE mount) overlaps the source; below the
+  output root the engine never enters a mount point.
 - **S3 — Same physical disk needs explicit consent.** A location on the
   source disk outside the protected ranges is refused unless the caller
   passes `allow_same_disk`; before a catalog exists nobody knows how far the
@@ -80,7 +87,9 @@ Hard requirements. A reviewer must be able to verify each by reading the code.
   system volume need no consent (S2 still applies to them).
 - **S4 — Image-file sources** are opened read-only with share mode *read*, so
   the kernel refuses any writer, truncation or deletion while they are the
-  source.
+  source. The engine's own in-use files (the session file it is
+  writing) are held the same way inside the engine: no output may delete,
+  overwrite or reopen one for writing.
 - **S5 — No silent corruption.** A file is reported OK only if every byte came
   from a successfully read sector at a location justified by its runlist, its
   record was unchanged since the scan, and nothing indicates that the
