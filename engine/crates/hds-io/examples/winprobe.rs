@@ -30,7 +30,7 @@ use hds_io::testing::MemSource;
 use hds_io::{
     annotate_partitions, destination_check, list_disks, open_source, parse_partition_table,
     read_resilient, sanitize_component, source_warnings, AlignedBuf, BlockSource, ComponentLimit,
-    Purpose, ReadOutcome, SourceKind, SourceLocation, Verdict,
+    Protected, Purpose, ReadOutcome, SourceKind, SourceLocation, Verdict,
 };
 
 const USAGE: &str = "usage:
@@ -219,7 +219,13 @@ fn dest(
 ) -> Result<bool, String> {
     // Only the location of the source matters to the guard.
     let source = MemSource::new(vec![0u8; 512]).at_location(SourceLocation::Disk { number: disk });
-    let check = destination_check(Path::new(path), purpose, &source, range, Some(1));
+    let check = destination_check(
+        Path::new(path),
+        purpose,
+        &source,
+        &[Protected::session(range)],
+        Some(1),
+    );
     println!("{}", json(&check));
     Ok(expect.is_none_or(|wanted| wanted == check.verdict))
 }

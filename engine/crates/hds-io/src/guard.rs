@@ -64,10 +64,10 @@ impl Purpose {
 pub enum Verdict {
     /// The location is not on the source.
     Ok,
-    /// The location lies inside the session range (or is the source image
+    /// The location lies inside a protected range (or is the source image
     /// itself): always refused.
     OverlapsSource,
-    /// The location is on the source disk outside the session range: needs
+    /// The location is on the source disk outside the protected ranges: needs
     /// `allow_same_disk`.
     SameDisk,
     /// The physical location could not be established (no extents, Storage
@@ -83,11 +83,53 @@ pub enum Verdict {
     InvalidPath,
 }
 
+/// Why a byte range of the source must never be written (S2).
+/// Wire form: snake case (`"session_range"`, ...).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtectedReason {
+    /// The range the session reads (for imaging: the imaged range).
+    SessionRange,
+    /// The extent of a lost file system the catalog knows (ALGORITHMS F5).
+    LostVolume,
+    /// The location is the image file that is the source.
+    SourceImage,
+}
+
+/// A byte range of the source that must never be written, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Protected {
+    /// Absolute byte range on the source.
+    pub range: Range<u64>,
+    /// Why it is protected; reported back when a destination hits it.
+    pub reason: ProtectedReason,
+}
+
+impl Protected {
+    /// The session range (or, before a session exists, the whole source).
+    pub fn session(range: Range<u64>) -> Self {
+        Protected {
+            range,
+            reason: ProtectedReason::SessionRange,
+        }
+    }
+
+    /// The extent of a lost file system.
+    pub fn lost_volume(range: Range<u64>) -> Self {
+        Protected {
+            range,
+            reason: ProtectedReason::LostVolume,
+        }
+    }
+}
+
 /// Result of [`destination_check`]: the `check_destination` result of the protocol.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DestinationCheck {
     /// The verdict.
     pub verdict: Verdict,
+    /// For [`Verdict::OverlapsSource`]: which protection was hit.
+    pub reason: Option<ProtectedReason>,
     /// Plain-language explanation; empty for [`Verdict::Ok`].
     pub message: String,
     /// Bytes available to the caller at the location, if known.
@@ -103,6 +145,12 @@ pub struct DestinationCheck {
     /// Physical disks the location is stored on (including the disks that
     /// hold the backing files of virtual disks); empty when unknown.
     pub disk_numbers: Vec<u32>,
+    /// The parts of the source disk the location's volumes occupy, as
+    /// absolute byte ranges (empty for image sources and when unknown). Not
+    /// part of the wire form: the engine uses it to say which catalog files
+    /// lie there.
+    #[serde(skip)]
+    pub source_extents: Vec<Range<u64>>,
 }
 
 impl DestinationCheck {
@@ -199,11 +247,13 @@ fn refused(verdict: Verdict, message: String) -> DestinationCheck {
     DestinationCheck {
         verdict,
         message,
+        reason: None,
         free_bytes: None,
         enough_space: None,
         fs: None,
         max_file_bytes: None,
         disk_numbers: Vec::new(),
+        source_extents: Vec::new(),
     }
 }
 
@@ -218,8 +268,10 @@ fn refused(verdict: Verdict, message: String) -> DestinationCheck {
 /// * `source` - the source being rescued; its
 ///   [`location`](BlockSource::location) is what the destination is compared
 ///   with.
-/// * `session_range` - the absolute byte range of the source that must stay
-///   untouched (the whole source when no session exists yet).
+/// * `protected` - the absolute byte ranges of the source that must stay
+///   untouched: the session range first (the whole source when no session
+///   exists yet), then the lost-volume ranges of the catalog. The first
+///   range in list order that the location hits is reported as `reason`.
 /// * `need_bytes` - space the caller is going to need, for `enough_space`.
 ///
 /// Verdicts for a disk source are described at [`Verdict`]. For an image
@@ -236,7 +288,7 @@ pub fn destination_check(
     path: &Path,
     purpose: Purpose,
     source: &dyn BlockSource,
-    session_range: Range<u64>,
+    protected: &[Protected],
     need_bytes: Option<u64>,
 ) -> DestinationCheck {
     let resolved = match sys::resolve(path, purpose) {
@@ -262,74 +314,129 @@ pub fn destination_check(
             )
         }
     };
-    let (verdict, message) = decide(&resolved, source.location(), &session_range, purpose);
+    let location = source.location();
+    let (verdict, message, reason) = decide(&resolved, location, protected, purpose);
     let mut disk_numbers: Vec<u32> = match &resolved.placement {
         Placement::Extents(extents) => extents.iter().map(|e| e.disk).collect(),
         _ => Vec::new(),
     };
     disk_numbers.sort_unstable();
     disk_numbers.dedup();
+    let source_extents = match (&resolved.placement, location) {
+        (Placement::Extents(extents), SourceLocation::Disk { number }) => extents
+            .iter()
+            .filter(|e| e.disk == number)
+            .map(|e| e.start..e.start.saturating_add(e.len))
+            .collect(),
+        _ => Vec::new(),
+    };
     DestinationCheck {
         verdict,
+        reason,
         message,
         free_bytes: resolved.free_bytes,
         enough_space: need_bytes.and_then(|need| resolved.free_bytes.map(|free| free >= need)),
         fs: resolved.fs_name,
         max_file_bytes: resolved.max_file_bytes,
         disk_numbers,
+        source_extents,
     }
+}
+
+/// The first protected range, in list order, that an extent on the source
+/// disk intersects. A zero-length extent inside a range counts.
+fn first_hit(
+    extents: &[Extent],
+    source_disk: u32,
+    protected: &[Protected],
+) -> Option<ProtectedReason> {
+    protected
+        .iter()
+        .find(|p| {
+            p.range.start < p.range.end
+                && extents.iter().filter(|e| e.disk == source_disk).any(|e| {
+                    let end = e.start.saturating_add(e.len);
+                    e.start < p.range.end && p.range.start < end
+                })
+        })
+        .map(|p| p.reason)
 }
 
 fn decide(
     resolved: &Resolved,
     location: SourceLocation,
-    session_range: &Range<u64>,
+    protected: &[Protected],
     purpose: Purpose,
-) -> (Verdict, String) {
+) -> (Verdict, String, Option<ProtectedReason>) {
     const UNKNOWN_TAIL: &str =
         "HDSavior cannot find out where this location is stored. If it is on the disk being rescued, data will be overwritten";
     match location {
-        SourceLocation::Detached => (Verdict::Ok, String::new()),
+        SourceLocation::Detached => (Verdict::Ok, String::new(), None),
         SourceLocation::File { id } => {
             if resolved.leaf_id == Some(id) {
                 (
                     Verdict::OverlapsSource,
                     "This is the disk image that is being rescued. Choose another file."
                         .to_string(),
+                    Some(ProtectedReason::SourceImage),
                 )
             } else {
-                (Verdict::Ok, String::new())
+                (Verdict::Ok, String::new(), None)
             }
         }
         SourceLocation::Unknown => (
             Verdict::UnknownDisk,
             format!("The source does not report where it is stored. {UNKNOWN_TAIL}."),
+            None,
         ),
         SourceLocation::Disk { number } => match &resolved.placement {
-            Placement::Network => (Verdict::Ok, String::new()),
-            Placement::Unknown(why) => (Verdict::UnknownDisk, format!("{UNKNOWN_TAIL} ({why}).")),
+            Placement::Network => (Verdict::Ok, String::new(), None),
+            Placement::Unknown(why) => (
+                Verdict::UnknownDisk,
+                format!("{UNKNOWN_TAIL} ({why})."),
+                None,
+            ),
             Placement::Extents(extents) => {
-                match classify_extents(extents, number, std::slice::from_ref(session_range)) {
-                    Verdict::OverlapsSource => (
-                        Verdict::OverlapsSource,
-                        format!(
-                            "This location lies inside the area of disk {number} that is being rescued. Writing there \
-                             would overwrite the data that is still to be read. Choose a location on another disk."
+                let ranges: Vec<Range<u64>> = protected.iter().map(|p| p.range.clone()).collect();
+                match classify_extents(extents, number, &ranges) {
+                    Verdict::OverlapsSource => match first_hit(extents, number, protected) {
+                        Some(ProtectedReason::LostVolume) => (
+                            Verdict::OverlapsSource,
+                            format!(
+                                "This location lies inside the lost volume on disk {number}: the lost file system \
+                                 reached into this part of the disk, and files that can still be rescued are stored \
+                                 here. Writing there would destroy them. Choose a location on another disk."
+                            ),
+                            Some(ProtectedReason::LostVolume),
                         ),
-                    ),
+                        reason => (
+                            Verdict::OverlapsSource,
+                            format!(
+                                "This location lies inside the area of disk {number} that is being rescued. Writing \
+                                 there would overwrite the data that is still to be read. Choose a location on \
+                                 another disk."
+                            ),
+                            reason.or(Some(ProtectedReason::SessionRange)),
+                        ),
+                    },
                     Verdict::SameDisk if purpose == Purpose::Session && resolved.on_system_volume => {
-                        (Verdict::Ok, String::new())
+                        (Verdict::Ok, String::new(), None)
                     }
                     Verdict::SameDisk => (
                         Verdict::SameDisk,
                         format!(
-                            "This location is on the disk that is being rescued (disk {number}), outside the scanned \
-                             range. The lost volume may have been larger than the scanned partition; a location on \
-                             another disk is safer."
+                            "This location is on the disk that is being rescued (disk {number}), outside the area \
+                             known to hold lost data. The lost volume may have been larger than what has been \
+                             scanned; a location on another disk is safer."
                         ),
+                        None,
                     ),
-                    Verdict::Ok => (Verdict::Ok, String::new()),
-                    _ => (Verdict::UnknownDisk, format!("{UNKNOWN_TAIL} (the volume reports no disk extents).")),
+                    Verdict::Ok => (Verdict::Ok, String::new(), None),
+                    _ => (
+                        Verdict::UnknownDisk,
+                        format!("{UNKNOWN_TAIL} (the volume reports no disk extents)."),
+                        None,
+                    ),
                 }
             }
         },

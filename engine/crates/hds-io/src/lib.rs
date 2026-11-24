@@ -54,7 +54,10 @@ pub use disks::{
     WARN_MOUNTED_VOLUME, WARN_PAGE_FILE_ON_SOURCE, WARN_SYSTEM_DISK, WARN_TRIM_SUPPORTED,
 };
 pub use elevation::is_elevated;
-pub use guard::{classify_extents, destination_check, DestinationCheck, Extent, Purpose, Verdict};
+pub use guard::{
+    classify_extents, destination_check, DestinationCheck, Extent, Protected, ProtectedReason,
+    Purpose, Verdict,
+};
 pub use image::ImageFile;
 pub use partition::{
     parse_partition_table, sniff_boot_sector, FsKind, NtfsSummary, PartitionInfo, PartitionTable,

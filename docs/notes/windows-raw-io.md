@@ -843,6 +843,13 @@ the protected ranges" is harmless, "could not find out" is not.
 
 ### 7.5 What S2 has to protect
 
+> The contract resolved this as follows (ARCHITECTURE S2, ALGORITHMS F5, H7):
+> reads never leave the session range, so recovery cannot read its own
+> output; and the destination guard protects the session range plus the
+> extent of every lost file system with validated geometry, so a partition
+> that still holds files of the lost volume is refused as a destination. The
+> experiment below is why.
+
 The scanned range is not the region being rescued. After a re-partitioning the old volume can
 extend into other partitions of the same disk, and recovery reads `volume_offset + lcn ×
 cluster_size` wherever that is. Experiment [L]: an old volume [1 MiB, 256 MiB) with 50 files of
@@ -1024,8 +1031,8 @@ pub enum Verdict {
 }
 
 /// `dest`: every extent of the destination volume AND of every volume that hosts it (VHD chain).
-/// `protected`: byte ranges [start, end) on the source disk that recovery may still read:
-/// the scan range, the extent of every old volume the geometry implies, every run of a catalog file.
+/// `protected`: byte ranges [start, end) on the source disk that must never be written:
+/// the session range and the extent of every lost file system with validated geometry.
 pub fn classify(dest: &[Extent], source_disk: u32, protected: &[(u64, u64)]) -> Verdict {
     if dest.is_empty() {
         return Verdict::Unknown; // an empty answer is not "no overlap"

@@ -127,7 +127,8 @@ fn resolved(placement: Placement) -> Resolved {
 fn verdicts_for_a_disk_source() {
     let disk = SourceLocation::Disk { number: 1 };
     let range = MIB..128 * MIB;
-    let verdict = |r: &Resolved, purpose| decide(r, disk, &range, purpose).0;
+    let verdict =
+        |r: &Resolved, purpose| decide(r, disk, &[Protected::session(range.clone())], purpose).0;
 
     let other_disk = resolved(Placement::Extents(vec![extent(0, MIB, 500 * MIB)]));
     let same_disk = resolved(Placement::Extents(vec![extent(1, 128 * MIB, 64 * MIB)]));
@@ -161,16 +162,40 @@ fn verdicts_for_a_disk_source() {
         assert_eq!(verdict(&vhd_in_range, purpose), Verdict::OverlapsSource);
     }
     // Messages explain; "ok" has none.
-    assert_eq!(decide(&other_disk, disk, &range, Purpose::Recover).1, "");
-    assert!(decide(&inside, disk, &range, Purpose::Recover)
-        .1
-        .contains("disk 1"));
-    assert!(decide(&same_disk, disk, &range, Purpose::Recover)
-        .1
-        .contains("outside the scanned range"));
-    assert!(decide(&unknown, disk, &range, Purpose::Recover)
-        .1
-        .contains("Storage Spaces"));
+    assert_eq!(
+        decide(
+            &other_disk,
+            disk,
+            &[Protected::session(range.clone())],
+            Purpose::Recover
+        )
+        .1,
+        ""
+    );
+    assert!(decide(
+        &inside,
+        disk,
+        &[Protected::session(range.clone())],
+        Purpose::Recover
+    )
+    .1
+    .contains("disk 1"));
+    assert!(decide(
+        &same_disk,
+        disk,
+        &[Protected::session(range.clone())],
+        Purpose::Recover
+    )
+    .1
+    .contains("outside the area known to hold lost data"));
+    assert!(decide(
+        &unknown,
+        disk,
+        &[Protected::session(range.clone())],
+        Purpose::Recover
+    )
+    .1
+    .contains("Storage Spaces"));
 }
 
 #[test]
@@ -180,12 +205,24 @@ fn only_session_files_on_the_system_volume_are_exempt_from_same_disk_consent() {
     let mut on_system = resolved(Placement::Extents(vec![extent(0, MIB, 400 * MIB)]));
     on_system.on_system_volume = true;
     assert_eq!(
-        decide(&on_system, disk, &range, Purpose::Session).0,
+        decide(
+            &on_system,
+            disk,
+            &[Protected::session(range.clone())],
+            Purpose::Session
+        )
+        .0,
         Verdict::Ok
     );
     for purpose in [Purpose::Recover, Purpose::Image, Purpose::AppData] {
         assert_eq!(
-            decide(&on_system, disk, &range, purpose).0,
+            decide(
+                &on_system,
+                disk,
+                &[Protected::session(range.clone())],
+                purpose
+            )
+            .0,
             Verdict::SameDisk,
             "{purpose:?}"
         );
@@ -194,19 +231,37 @@ fn only_session_files_on_the_system_volume_are_exempt_from_same_disk_consent() {
     let mut overlapping = resolved(Placement::Extents(vec![extent(0, MIB, 600 * MIB)]));
     overlapping.on_system_volume = true;
     assert_eq!(
-        decide(&overlapping, disk, &range, Purpose::Session).0,
+        decide(
+            &overlapping,
+            disk,
+            &[Protected::session(range.clone())],
+            Purpose::Session
+        )
+        .0,
         Verdict::OverlapsSource
     );
     let mut unknown = resolved(Placement::Unknown("no extents".to_string()));
     unknown.on_system_volume = true;
     assert_eq!(
-        decide(&unknown, disk, &range, Purpose::Session).0,
+        decide(
+            &unknown,
+            disk,
+            &[Protected::session(range.clone())],
+            Purpose::Session
+        )
+        .0,
         Verdict::UnknownDisk
     );
     // Not the system volume: consent is needed for a session file as well.
     let elsewhere = resolved(Placement::Extents(vec![extent(0, MIB, 400 * MIB)]));
     assert_eq!(
-        decide(&elsewhere, disk, &range, Purpose::Session).0,
+        decide(
+            &elsewhere,
+            disk,
+            &[Protected::session(range.clone())],
+            Purpose::Session
+        )
+        .0,
         Verdict::SameDisk
     );
 }
@@ -221,19 +276,31 @@ fn verdicts_for_other_kinds_of_source() {
         decide(
             &anywhere,
             SourceLocation::Detached,
-            &range,
+            &[Protected::session(range.clone())],
             Purpose::Recover
         )
         .0,
         Verdict::Ok
     );
     assert_eq!(
-        decide(&unknown, SourceLocation::Detached, &range, Purpose::Recover).0,
+        decide(
+            &unknown,
+            SourceLocation::Detached,
+            &[Protected::session(range.clone())],
+            Purpose::Recover
+        )
+        .0,
         Verdict::Ok
     );
     // A source that does not say where it lives protects nothing: never "ok".
     assert_eq!(
-        decide(&anywhere, SourceLocation::Unknown, &range, Purpose::Recover).0,
+        decide(
+            &anywhere,
+            SourceLocation::Unknown,
+            &[Protected::session(range.clone())],
+            Purpose::Recover
+        )
+        .0,
         Verdict::UnknownDisk
     );
     // An image: only the file itself is off limits.
@@ -243,17 +310,35 @@ fn verdicts_for_other_kinds_of_source() {
     };
     let image = SourceLocation::File { id };
     assert_eq!(
-        decide(&anywhere, image, &range, Purpose::Recover).0,
+        decide(
+            &anywhere,
+            image,
+            &[Protected::session(range.clone())],
+            Purpose::Recover
+        )
+        .0,
         Verdict::Ok
     );
     assert_eq!(
-        decide(&unknown, image, &range, Purpose::Image).0,
+        decide(
+            &unknown,
+            image,
+            &[Protected::session(range.clone())],
+            Purpose::Image
+        )
+        .0,
         Verdict::Ok
     );
     let mut the_image_itself = resolved(Placement::Unknown("?".to_string()));
     the_image_itself.leaf_id = Some(id);
     assert_eq!(
-        decide(&the_image_itself, image, &range, Purpose::Image).0,
+        decide(
+            &the_image_itself,
+            image,
+            &[Protected::session(range.clone())],
+            Purpose::Image
+        )
+        .0,
         Verdict::OverlapsSource
     );
     let mut another_file = resolved(Placement::Unknown("?".to_string()));
@@ -262,7 +347,13 @@ fn verdicts_for_other_kinds_of_source() {
         index: 100,
     });
     assert_eq!(
-        decide(&another_file, image, &range, Purpose::Image).0,
+        decide(
+            &another_file,
+            image,
+            &[Protected::session(range.clone())],
+            Purpose::Image
+        )
+        .0,
         Verdict::Ok
     );
 }
@@ -271,19 +362,28 @@ fn verdicts_for_other_kinds_of_source() {
 fn result_objects_match_the_protocol() {
     let check = DestinationCheck {
         verdict: Verdict::Ok,
+        reason: None,
         message: String::new(),
         free_bytes: Some(500_000_000_000),
         enough_space: Some(true),
         fs: Some("NTFS".to_string()),
         max_file_bytes: None,
         disk_numbers: vec![0],
+        source_extents: Vec::new(),
     };
-    // The example of PROTOCOL.md, check_destination.
+    // The example of PROTOCOL.md, check_destination (the members the guard supplies).
     let expected: serde_json::Value = serde_json::from_str(
-        r#"{"verdict": "ok", "message": "", "free_bytes": 500000000000, "enough_space": true,
-            "fs": "NTFS", "max_file_bytes": null, "disk_numbers": [0]}"#,
+        r#"{"verdict": "ok", "reason": null, "message": "", "free_bytes": 500000000000,
+            "enough_space": true, "fs": "NTFS", "max_file_bytes": null, "disk_numbers": [0]}"#,
     )
     .unwrap();
+    for (reason, text) in [
+        (ProtectedReason::SessionRange, "session_range"),
+        (ProtectedReason::LostVolume, "lost_volume"),
+        (ProtectedReason::SourceImage, "source_image"),
+    ] {
+        assert_eq!(serde_json::to_value(reason).unwrap(), text);
+    }
     assert_eq!(serde_json::to_value(&check).unwrap(), expected);
     assert_eq!(
         serde_json::from_value::<DestinationCheck>(expected).unwrap(),
@@ -358,7 +458,13 @@ fn the_source_image_itself_is_refused_under_every_name() {
     let (path, image) = image_in(&tmp, "source.img");
     let range = 0..image.size();
     for purpose in [Purpose::Image, Purpose::Session] {
-        let check = destination_check(&path, purpose, &image, range.clone(), None);
+        let check = destination_check(
+            &path,
+            purpose,
+            &image,
+            &[Protected::session(range.clone())],
+            None,
+        );
         assert_eq!(
             check.verdict,
             Verdict::OverlapsSource,
@@ -371,7 +477,14 @@ fn the_source_image_itself_is_refused_under_every_name() {
     let dotted = tmp.path().join(".").join("source.img");
     #[cfg(unix)]
     assert_eq!(
-        destination_check(&dotted, Purpose::Image, &image, range.clone(), None).verdict,
+        destination_check(
+            &dotted,
+            Purpose::Image,
+            &image,
+            &[Protected::session(range.clone())],
+            None
+        )
+        .verdict,
         Verdict::OverlapsSource
     );
     #[cfg(windows)]
@@ -380,7 +493,14 @@ fn the_source_image_itself_is_refused_under_every_name() {
     let hard = tmp.join("hardlink.img");
     if std::fs::hard_link(&path, &hard).is_ok() {
         assert_eq!(
-            destination_check(&hard, Purpose::Image, &image, range.clone(), None).verdict,
+            destination_check(
+                &hard,
+                Purpose::Image,
+                &image,
+                &[Protected::session(range.clone())],
+                None
+            )
+            .verdict,
             Verdict::OverlapsSource
         );
     }
@@ -388,7 +508,14 @@ fn the_source_image_itself_is_refused_under_every_name() {
     let soft = tmp.join("softlink.img");
     if make_file_link(&path, &soft) {
         assert_eq!(
-            destination_check(&soft, Purpose::Image, &image, range.clone(), None).verdict,
+            destination_check(
+                &soft,
+                Purpose::Image,
+                &image,
+                &[Protected::session(range.clone())],
+                None
+            )
+            .verdict,
             Verdict::OverlapsSource
         );
     }
@@ -396,7 +523,14 @@ fn the_source_image_itself_is_refused_under_every_name() {
     if make_dir_link(tmp.path(), &dir_link) {
         let through = dir_link.join("source.img");
         assert_eq!(
-            destination_check(&through, Purpose::Image, &image, range.clone(), None).verdict,
+            destination_check(
+                &through,
+                Purpose::Image,
+                &image,
+                &[Protected::session(range.clone())],
+                None
+            )
+            .verdict,
             Verdict::OverlapsSource
         );
     }
@@ -404,7 +538,14 @@ fn the_source_image_itself_is_refused_under_every_name() {
     let shared: Arc<dyn BlockSource> = Arc::new(image);
     let ranged = crate::RangedSource::new(shared, 0..512).unwrap();
     assert_eq!(
-        destination_check(&path, Purpose::Image, &ranged, 0..512, None).verdict,
+        destination_check(
+            &path,
+            Purpose::Image,
+            &ranged,
+            &[Protected::session(0..512)],
+            None
+        )
+        .verdict,
         Verdict::OverlapsSource
     );
 }
@@ -420,7 +561,13 @@ fn other_locations_are_fine_for_an_image_source_and_report_space() {
         tmp.join("Rescued"),
         tmp.join("a").join("b").join("c"),
     ] {
-        let check = destination_check(&dest, Purpose::Recover, &image, range.clone(), Some(1));
+        let check = destination_check(
+            &dest,
+            Purpose::Recover,
+            &image,
+            &[Protected::session(range.clone())],
+            Some(1),
+        );
         assert_eq!(
             check.verdict,
             Verdict::Ok,
@@ -441,7 +588,7 @@ fn other_locations_are_fine_for_an_image_source_and_report_space() {
         &tmp.join("Rescued"),
         Purpose::Recover,
         &image,
-        range.clone(),
+        &[Protected::session(range.clone())],
         Some(u64::MAX),
     );
     assert_eq!(
@@ -452,7 +599,7 @@ fn other_locations_are_fine_for_an_image_source_and_report_space() {
         &tmp.join("Rescued"),
         Purpose::Recover,
         &image,
-        range.clone(),
+        &[Protected::session(range.clone())],
         None,
     );
     assert_eq!(check.enough_space, None);
@@ -462,7 +609,7 @@ fn other_locations_are_fine_for_an_image_source_and_report_space() {
             &tmp.join("copy.img"),
             Purpose::Image,
             &image,
-            range.clone(),
+            &[Protected::session(range.clone())],
             None
         )
         .verdict,
@@ -474,14 +621,21 @@ fn other_locations_are_fine_for_an_image_source_and_report_space() {
             &tmp.join("other.img"),
             Purpose::Image,
             &image,
-            range.clone(),
+            &[Protected::session(range.clone())],
             None
         )
         .verdict,
         Verdict::Ok
     );
     assert_eq!(
-        destination_check(&tmp.join("s.hdsc"), Purpose::Session, &image, range, None).verdict,
+        destination_check(
+            &tmp.join("s.hdsc"),
+            Purpose::Session,
+            &image,
+            &[Protected::session(range)],
+            None
+        )
+        .verdict,
         Verdict::Ok
     );
 }
@@ -492,7 +646,14 @@ fn paths_that_cannot_be_used_are_told_apart() {
     let (image_path, image) = image_in(&tmp, "source.img");
     let range = 0..image.size();
     let verdict = |path: &Path, purpose| {
-        destination_check(path, purpose, &image, range.clone(), None).verdict
+        destination_check(
+            path,
+            purpose,
+            &image,
+            &[Protected::session(range.clone())],
+            None,
+        )
+        .verdict
     };
 
     // Not absolute.
@@ -501,7 +662,7 @@ fn paths_that_cannot_be_used_are_told_apart() {
             Path::new(relative),
             Purpose::Recover,
             &image,
-            range.clone(),
+            &[Protected::session(range.clone())],
             Some(5),
         );
         assert_eq!(check.verdict, Verdict::InvalidPath, "{relative:?}");
@@ -556,7 +717,13 @@ fn paths_that_cannot_be_used_are_told_apart() {
 fn unix_cannot_place_a_disk_source_and_says_so() {
     let tmp = TempDir::new("guard-unix-disk");
     let disk = MemSource::new(vec![0; 4096]).at_location(SourceLocation::Disk { number: 1 });
-    let check = destination_check(&tmp.join("out"), Purpose::Recover, &disk, 0..4096, None);
+    let check = destination_check(
+        &tmp.join("out"),
+        Purpose::Recover,
+        &disk,
+        &[Protected::session(0..4096)],
+        None,
+    );
     assert_eq!(check.verdict, Verdict::UnknownDisk);
     assert!(check.message.contains("cannot find out"));
     assert!(check.free_bytes.is_some(), "space is reported all the same");
@@ -564,12 +731,26 @@ fn unix_cannot_place_a_disk_source_and_says_so() {
     // A source that lives nowhere, and one that does not say.
     let detached = MemSource::new(vec![0; 4096]);
     assert_eq!(
-        destination_check(&tmp.join("out"), Purpose::Recover, &detached, 0..4096, None).verdict,
+        destination_check(
+            &tmp.join("out"),
+            Purpose::Recover,
+            &detached,
+            &[Protected::session(0..4096)],
+            None
+        )
+        .verdict,
         Verdict::Ok
     );
     let unknown = MemSource::new(vec![0; 4096]).at_location(SourceLocation::Unknown);
     assert_eq!(
-        destination_check(&tmp.join("out"), Purpose::Recover, &unknown, 0..4096, None).verdict,
+        destination_check(
+            &tmp.join("out"),
+            Purpose::Recover,
+            &unknown,
+            &[Protected::session(0..4096)],
+            None
+        )
+        .verdict,
         Verdict::UnknownDisk
     );
     // A location on a file system that is mounted read-only, if this machine has one.
@@ -585,7 +766,13 @@ fn unix_cannot_place_a_disk_source_and_says_so() {
         });
     if let Some(mount_point) = read_only_mount {
         let dest = Path::new(&mount_point).join("hds-io-test");
-        let check = destination_check(&dest, Purpose::Recover, &detached, 0..4096, None);
+        let check = destination_check(
+            &dest,
+            Purpose::Recover,
+            &detached,
+            &[Protected::session(0..4096)],
+            None,
+        );
         assert_eq!(
             check.verdict,
             Verdict::NotWritable,
@@ -594,7 +781,13 @@ fn unix_cannot_place_a_disk_source_and_says_so() {
         );
     }
     // The file-system name is reported where it is known.
-    let check = destination_check(tmp.path(), Purpose::Recover, &detached, 0..4096, None);
+    let check = destination_check(
+        tmp.path(),
+        Purpose::Recover,
+        &detached,
+        &[Protected::session(0..4096)],
+        None,
+    );
     if let Some(fs) = &check.fs {
         assert!(!fs.is_empty());
     }
@@ -615,7 +808,7 @@ fn a_disk_source_is_compared_with_the_disks_of_the_destination() {
         &dest,
         Purpose::Recover,
         &disk_source(9_999),
-        0..4096,
+        &[Protected::session(0..4096)],
         Some(1),
     );
     assert!(!tmp.join("Rescued").exists(), "the check creates nothing");
@@ -639,7 +832,7 @@ fn a_disk_source_is_compared_with_the_disks_of_the_destination() {
             &dest,
             Purpose::Recover,
             &disk_source(disk),
-            0..u64::MAX,
+            &[Protected::session(0..u64::MAX)],
             None,
         );
         assert_eq!(inside.verdict, Verdict::OverlapsSource, "{inside:?}");
@@ -649,8 +842,13 @@ fn a_disk_source_is_compared_with_the_disks_of_the_destination() {
         );
         assert!(inside.message.contains(&format!("disk {disk}")));
         // Only the first sector is (where the partition table is, not the volume).
-        let elsewhere =
-            destination_check(&dest, Purpose::Recover, &disk_source(disk), 0..512, None);
+        let elsewhere = destination_check(
+            &dest,
+            Purpose::Recover,
+            &disk_source(disk),
+            &[Protected::session(0..512)],
+            None,
+        );
         assert_eq!(elsewhere.verdict, Verdict::SameDisk, "{elsewhere:?}");
         assert!(elsewhere.is_allowed(true, false) && !elsewhere.is_allowed(false, true));
         assert_eq!(elsewhere.disk_numbers, check.disk_numbers);
@@ -663,7 +861,7 @@ fn a_disk_source_is_compared_with_the_disks_of_the_destination() {
             &session_path,
             Purpose::Session,
             &disk_source(disk),
-            0..512,
+            &[Protected::session(0..512)],
             None,
         );
         let expected = if resolved.on_system_volume {
@@ -681,7 +879,14 @@ fn windows_paths_must_be_absolute_drive_or_unc_paths() {
     let tmp = TempDir::new("guard-win-paths");
     let source = MemSource::new(vec![0; 4096]);
     let verdict = |path: &str| {
-        destination_check(Path::new(path), Purpose::Recover, &source, 0..4096, None).verdict
+        destination_check(
+            Path::new(path),
+            Purpose::Recover,
+            &source,
+            &[Protected::session(0..4096)],
+            None,
+        )
+        .verdict
     };
     for bad in [
         "C:relative",
@@ -729,7 +934,13 @@ fn a_share_of_this_machine_is_never_simply_ok() {
         r"\\127.0.0.1\C$\hds-io-test",
         r"\\.\C$\x",
     ] {
-        let check = destination_check(Path::new(path), Purpose::Recover, &disk, 0..4096, None);
+        let check = destination_check(
+            Path::new(path),
+            Purpose::Recover,
+            &disk,
+            &[Protected::session(0..4096)],
+            None,
+        );
         // Reachable: unknown (it leads back to a local volume). Not reachable: not found.
         assert!(
             matches!(
@@ -742,4 +953,73 @@ fn a_share_of_this_machine_is_never_simply_ok() {
             "{path}: {check:?}"
         );
     }
+}
+
+#[test]
+fn the_first_protected_range_that_is_hit_names_the_reason() {
+    let disk = SourceLocation::Disk { number: 3 };
+    let at = |start: u64, len: u64| {
+        resolved(Placement::Extents(vec![Extent {
+            disk: 3,
+            start,
+            len,
+        }]))
+    };
+    // The session range is the first partition; the lost volume reaches into the second.
+    let protected = [
+        Protected::session(1_000..5_000),
+        Protected::lost_volume(1_000..9_000),
+    ];
+    // Inside both: the session range, listed first, is named.
+    let (verdict, message, reason) = decide(&at(2_000, 100), disk, &protected, Purpose::Recover);
+    assert_eq!(verdict, Verdict::OverlapsSource);
+    assert_eq!(reason, Some(ProtectedReason::SessionRange));
+    assert!(message.contains("being rescued"), "{message}");
+    // Only inside the lost volume: refused all the same, with its own reason and text.
+    let (verdict, message, reason) = decide(&at(6_000, 100), disk, &protected, Purpose::Recover);
+    assert_eq!(verdict, Verdict::OverlapsSource);
+    assert_eq!(reason, Some(ProtectedReason::LostVolume));
+    assert!(message.contains("lost volume"), "{message}");
+    // The session exemption on the system volume never applies to an overlap.
+    let mut system = at(6_000, 100);
+    system.on_system_volume = true;
+    assert_eq!(
+        decide(&system, disk, &protected, Purpose::Session).0,
+        Verdict::OverlapsSource
+    );
+    // Behind every protected range: same disk, consent, no reason.
+    let (verdict, _, reason) = decide(&at(9_000, 100), disk, &protected, Purpose::Recover);
+    assert_eq!(verdict, Verdict::SameDisk);
+    assert_eq!(reason, None);
+    // An empty or inverted protected range protects nothing.
+    #[allow(clippy::reversed_empty_ranges)]
+    let hollow = [
+        Protected::lost_volume(7_000..7_000),
+        Protected::lost_volume(9..3),
+    ];
+    assert_eq!(
+        decide(&at(6_000, 2_000), disk, &hollow, Purpose::Recover).0,
+        Verdict::SameDisk
+    );
+    // No protected range at all still means consent on the source disk.
+    assert_eq!(
+        decide(&at(0, 10), disk, &[], Purpose::Recover).0,
+        Verdict::SameDisk
+    );
+    // The image source reports its own reason.
+    let image = SourceLocation::File {
+        id: FileId {
+            volume: 7,
+            index: 99,
+        },
+    };
+    let mut itself = resolved(Placement::Unknown("?".to_string()));
+    itself.leaf_id = Some(FileId {
+        volume: 7,
+        index: 99,
+    });
+    assert_eq!(
+        decide(&itself, image, &protected, Purpose::Image).2,
+        Some(ProtectedReason::SourceImage)
+    );
 }

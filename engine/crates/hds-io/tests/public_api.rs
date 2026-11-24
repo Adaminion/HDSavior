@@ -13,8 +13,8 @@ use hds_io::testing::{FaultySource, MemSource};
 use hds_io::{
     destination_check, fallback_component, open_source, parse_partition_table, read_resilient,
     read_unaligned, sanitize_component, source_warnings, AlignedBuf, BlockSource, ComponentLimit,
-    FsKind, Purpose, RangeSet, RangedSource, ReadOutcome, SourceKind, SourceLocation, TableKind,
-    Verdict,
+    FsKind, Protected, Purpose, RangeSet, RangedSource, ReadOutcome, SourceKind, SourceLocation,
+    TableKind, Verdict,
 };
 
 #[path = "../src/test_util.rs"]
@@ -87,13 +87,19 @@ fn scan_and_recover_flow_on_an_image() {
         &dest,
         Purpose::Recover,
         &session,
-        session.range(),
+        &[Protected::session(session.range())],
         Some(1 << 20),
     );
     assert_eq!(check.verdict, Verdict::Ok, "{}", check.message);
     assert!(check.is_allowed(false, false));
     assert_eq!(check.enough_space, Some(true));
-    let itself = destination_check(&image_path, Purpose::Image, &session, session.range(), None);
+    let itself = destination_check(
+        &image_path,
+        Purpose::Image,
+        &session,
+        &[Protected::session(session.range())],
+        None,
+    );
     assert_eq!(itself.verdict, Verdict::OverlapsSource);
 
     // Recovery: the root, a folder per rescued directory, a part file per file.
@@ -102,7 +108,7 @@ fn scan_and_recover_flow_on_an_image() {
         root.path(),
         Purpose::Recover,
         &session,
-        session.range(),
+        &[Protected::session(session.range())],
         None,
     );
     assert_eq!(

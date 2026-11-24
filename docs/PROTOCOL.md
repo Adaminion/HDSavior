@@ -58,7 +58,7 @@ Node ids are valid for one catalog **epoch**. `CatalogInfo.epoch` changes
 whenever the node set is rebuilt (every `scan_done`, `session_load`). Any
 `scan_start` ends the current epoch at once. Inside an epoch an id is never
 reused: `geometry_set` and `carve_start` keep the epoch, ids of discarded
-carved nodes answer `not_found`. Every command that takes node ids requires
+carved nodes answer `not_found`. `instance_set` starts a new epoch. Every command that takes node ids requires
 `epoch` and answers `stale_catalog` when it differs.
 
 ### Error codes
@@ -80,7 +80,7 @@ without source (browse only) · **J** carve, recover or image running.
 | command | errors by state |
 |---|---|
 | `hello`, `list_disks`, `job_cancel`, `shutdown` | always answered |
-| `open_source`, `close_source`, `session_load`, `session_attach_source`, `geometry_set`, `session_save` | `busy` in S and J |
+| `open_source`, `close_source`, `session_load`, `session_attach_source`, `geometry_set`, `instance_set`, `session_save` | `busy` in S and J |
 | `scan_start` | N, B `no_source` · resume without session `no_session` · S, J `busy` · bad range `bad_request` · refused session path `destination_refused` |
 | `catalog_info`, `list_children`, `node_info`, `search`, `selection_summary` | N, O, S `no_catalog` · wrong epoch `stale_catalog` · unknown id `not_found` · answered in J |
 | `check_destination` | N, B `no_source` · otherwise answered, also in S and J |
@@ -136,13 +136,22 @@ currently mounted there (empty / `null` if none; always so for images).
 device discards the data. `flags`: subset of `virtual`, `spaces`, `dynamic`,
 `no_media`. `table`: `"mbr"`, `"gpt"`, `"none"`.
 
+The disk list is made without reading a single sector (a failing disk must
+not stall it), so its `partitions` are the volumes Windows exposes on that
+disk: `index` is Windows' partition number, `fs` is the mounted file system
+(`null` for a raw volume), `type` and `type_id` are empty, `ntfs` is `null`,
+and partitions without a volume are missing. The complete table, sniffed from
+the disk itself, is the result of `open_source`.
+
 ### Warning
 
 `{"code": "source_reads_zero", "message": "..."}`. Codes: `trim_supported`,
 `mounted_volume`, `page_file_on_source`, `system_disk`, `app_on_source`,
 `source_reads_zero`, `carve_hits_capped`, `live_volume_incomplete`,
 `writes_not_detectable`, `scan_incomplete`, `out_of_range_files`,
-`identity_differs`.
+`identity_differs`, `mixed_generations` (records of an older file system
+could not be separated cleanly), `session_file_at_risk` (the session file
+lies inside the lost volume; save the session elsewhere).
 
 ### Geometry
 
@@ -164,7 +173,7 @@ offset on the source of that volume's cluster 0.
 One file system found by the scan.
 
 ```json
-{"id": 0, "kind": "main", "label": "", "root": 0,
+{"id": 0, "kind": "main", "manual": false, "label": "", "root": 0,
  "records": 812401, "files": 790001, "dirs": 22300, "deleted_files": 5120,
  "lost_dirs": 14, "bytes": 3210987654321,
  "time_from": 1420070400000, "time_to": 1763942400000,
@@ -175,7 +184,8 @@ One file system found by the scan.
 
 `kind`: `"main"`, `"older"` (a file system from before the previous format),
 `"other"` (another volume), `"embedded"` (inside a disk-image file; browse
-only), `"strays"`. `label` is the display name of its root (`""` for main).
+only), `"strays"`. `manual` is `true` when the user set the kind
+(`instance_set`). `label` is the display name of its root (`""` for main).
 `embedded_in` is the display path of the containing file. `files`, `dirs`,
 `bytes` count non-deleted items. Instance roots are separate trees: no
 instance root is a child of another.
@@ -187,6 +197,7 @@ instance root is a child of another.
  "live_records": 41, "post_format_records": 6,
  "live_volumes": [{"offset": 1048576, "size": 4000785104896, "format_time": 1763900000000, "snapshot_time": 1763990000000}],
  "range": {"start": 1048576, "end": 4000786153472},
+ "protected": [{"start": 1048576, "end": 4000786153472, "reason": "session_range"}],
  "scanned_bytes": 4000785104896, "scan_complete": true, "bad_bytes": 0,
  "out_of_range_files": 0, "out_of_range_bytes": 0,
  "carve_hits": 48213, "carved": 0,
@@ -194,9 +205,13 @@ instance root is a child of another.
 ```
 
 `instances[0]` is the main instance. `nodes` counts all nodes of all roots.
-`live_records` belong to the current file system and are not shown.
-`out_of_range_files` are files with data outside the session range (scan the
-whole disk to reach them).
+`live_records` belong to the current file system and are not shown;
+`post_format_records` are files that were created and deleted again on the
+current file system — not shown either, but what they occupied counts as
+overwritten. `protected` lists the ranges no destination may touch (S2):
+the session range, then one `"lost_volume"` entry per lost file system with
+validated geometry. `out_of_range_files` are files with data outside the
+session range (scan the whole disk to reach them).
 
 ### Row
 
@@ -360,8 +375,20 @@ args `{"instance": 0, "cluster_size": 4096, "volume_offset": 1048576}` →
 
 `cluster_size`: a power of two from 512 to 2 MiB. `volume_offset`: a multiple
 of 512 inside the source. A pair equal to one of the candidates selects that
-candidate. Health is recomputed; the tree and the epoch stay; carved nodes are
-discarded when the main instance changes.
+candidate. Health and the protected ranges are recomputed; the tree and the
+epoch stay; carved nodes are discarded when the main instance changes.
+
+### instance_set
+
+args `{"instance": 2, "kind": "main"}` (`kind`: `"main"`, `"other"`, `"auto"`) →
+`CatalogInfo` (new epoch)
+
+Overrules the engine's verdict about one file system. `kind` `"main"` makes
+that instance the main one (the previous main becomes `"other"`); `"other"`
+turns an `"embedded"` or `"older"` instance into a volume of its own, so that
+its files are read with its own geometry and can be recovered; `"auto"`
+withdraws the override. `strays` cannot be changed (`bad_request`). The
+choice is stored in the session. Carved nodes are discarded.
 
 ### list_children
 
@@ -451,17 +478,27 @@ args `{"path": "D:\\Rescued", "purpose": "recover", "need_bytes": null}`
 →
 
 ```json
-{"verdict": "ok", "message": "", "free_bytes": 500000000000, "enough_space": true,
- "fs": "NTFS", "max_file_bytes": null, "disk_numbers": [0]}
+{"verdict": "ok", "reason": null, "message": "", "free_bytes": 500000000000,
+ "enough_space": true, "fs": "NTFS", "max_file_bytes": null, "disk_numbers": [0],
+ "lost_files": 0, "lost_bytes": 0}
 ```
 
 `verdict`: `"ok"`; `"overlaps_source"` (always refused); `"same_disk"` (needs
 `allow_same_disk`); `"unknown_disk"` (needs `allow_unknown_disk`);
 `"not_found"`, `"not_writable"`, `"invalid_path"` (not an absolute drive or
-UNC path). `message` explains the verdict in plain language. `enough_space`
-is `null` without `need_bytes`. `max_file_bytes`: the file system's maximum
-file size if it is a practical limit (FAT32: 4294967295), else `null`.
-Creates nothing.
+UNC path). `reason`, for `"overlaps_source"`: `"session_range"` (inside the
+scanned or imaged range), `"lost_volume"` (inside a lost file system that
+reaches beyond the scanned range — scanning the whole disk reaches those
+files, and the destination has to be on another disk) or `"source_image"`
+(the image file that is the source); otherwise `null`. `lost_files` /
+`lost_bytes`: catalog files, and their bytes, stored in the part of the
+source disk that the location's volume occupies (0 without a catalog).
+`message` explains the verdict in plain language. `enough_space` is `null`
+without `need_bytes`. `max_file_bytes`: the file system's maximum file size
+if it is a practical limit (FAT32: 4294967295), else `null`. Creates nothing.
+
+The answer depends on the catalog: ask again after `scan_done`,
+`session_load`, `session_attach_source`, `geometry_set` and `instance_set`.
 
 ### recover_start
 

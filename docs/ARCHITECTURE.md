@@ -57,20 +57,27 @@ Hard requirements. A reviewer must be able to verify each by reading the code.
   `IOCTL_STORAGE_GET_DEVICE_NUMBER`, `IOCTL_STORAGE_CHECK_VERIFY2`,
   `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`. No lock, dismount, offline or
   attribute change, ever. The `BlockSource` trait has no write method.
-- **S2 — The session range is read-only territory.** (a) Every read made on
+- **S2 — The rescued area is read-only territory.** (a) Every read made on
   behalf of a session stays inside its session range; a run that maps outside
   is `out_of_bounds`, yields zeros and can never be reported OK. (b) Nothing
-  the product writes may land inside it: recovery output, image files,
-  session files, reports, temporary files, and the UI's own data. Every
-  output location is resolved **by handle** to its volume and physical-disk
-  extents (through VHD backing files, recursively) before anything is
-  created. An overlap is refused; there is no override.
+  the product writes may land inside the *protected ranges*: recovery output,
+  image files, session files, reports, temporary files, and the UI's own
+  data. The protected ranges are the session range (for imaging: the imaged
+  range) and, as soon as a catalog exists, the *lost-volume ranges* — the
+  extent of every lost file system whose geometry is validated (ALGORITHMS
+  F5), which after a re-partitioning reaches into other partitions of the
+  disk. Every output location is resolved **by handle** to its volume and
+  physical-disk extents (through VHD backing files, recursively) before
+  anything is created. An overlap is refused; there is no override. The
+  guard runs again at every job start, because the ranges grow when a
+  catalog is built or a geometry changes.
 - **S3 — Same physical disk needs explicit consent.** A location on the
-  source disk outside the session range is refused unless the caller passes
-  `allow_same_disk` (the old volume may have been larger than the scanned
-  partition). A location whose disk cannot be determined is refused unless
-  the caller passes `allow_unknown_disk`; the two consents are separate.
-  Exception: session files on the Windows system volume need no consent.
+  source disk outside the protected ranges is refused unless the caller
+  passes `allow_same_disk`; before a catalog exists nobody knows how far the
+  lost volume reached, and the message says so. A location whose disk cannot
+  be determined is refused unless the caller passes `allow_unknown_disk`;
+  the two consents are separate. Exception: session files on the Windows
+  system volume need no consent (S2 still applies to them).
 - **S4 — Image-file sources** are opened read-only with share mode *read*, so
   the kernel refuses any writer, truncation or deletion while they are the
   source.
@@ -81,7 +88,10 @@ Hard requirements. A reviewer must be able to verify each by reading the code.
 - **S6 — Output never follows links and never replaces.** Output paths are
   built from the canonical final path of the destination root. Below it the
   engine never enters or writes through a reparse point, creates files only
-  with create-new semantics, and renames only without replacing. All
+  with create-new semantics, and renames only without replacing. The two
+  flows that reopen a file of their own (appending to a session file,
+  resuming an image) open it without following links, accept only a regular
+  file that is not a reparse point, and never truncate on open. All
   file-system writes of the engine go through `hds_io::out`.
 - **S7 — A vanished device is not a bad sector.** When the source stops
   answering, the job ends with `source_lost`; nothing is recorded as scanned
@@ -258,15 +268,19 @@ pub trait BlockSource: Send + Sync {
   (primary header with CRC, backup header as fallback) honouring the sector
   size. Each partition gets `fs` sniffed from its first sector (`ntfs`, `fat`,
   `exfat`, `refs`, `bitlocker`, `other`).
-- `destination_check(path, purpose, source, session_range, need_bytes)` —
-  S2/S3. The path must be an absolute drive or UNC path. Resolution is by
-  handle: open the deepest existing ancestor with access 0, take its final
-  path with a volume GUID, open the volume, read all disk extents; for
-  virtual disks resolve the host volumes recursively. Creates nothing.
-  Verdicts: `ok`, `overlaps_source`, `same_disk`, `unknown_disk` (extents
-  unavailable, Storage Spaces, a UNC path to this machine), `not_found`,
-  `not_writable`, `invalid_path`; plus free space, file-system name and its
-  maximum file size.
+- `destination_check(path, purpose, source, protected, need_bytes)` —
+  S2/S3. `protected` is a list of absolute byte ranges of the source (the
+  caller passes the session range first, then the lost-volume ranges). The
+  path must be an absolute drive or UNC path. Resolution is by handle: open
+  the deepest existing ancestor with access 0, take its final path with a
+  volume GUID, open the volume, read all disk extents; for virtual disks
+  resolve the host volumes recursively. Creates nothing. Verdicts: `ok`,
+  `overlaps_source` (with the index of the first protected range that was
+  hit), `same_disk`, `unknown_disk` (extents unavailable, Storage Spaces, a
+  UNC path to this machine), `not_found`, `not_writable`, `invalid_path`;
+  plus free space, file-system name, its maximum file size, and the
+  destination's extents on the source disk, so that `hds-core` can say how
+  many catalog files lie there.
 - `hds_io::out` (S6) — the only code that writes files: canonical root,
   one-level directory creation that refuses reparse points, create-new part
   files, rename without replace, timestamp setting, leftover cleanup.
@@ -361,7 +375,10 @@ Dart fake engine replays it, so both sides stay in step.
    table (name, size, modified, status); search and filters (deleted,
    damaged, type); a geometry chip with its evidence and a manual override;
    "Find more files by signature" (carving); details and preview pane;
-   selection summary and "Recover…".
+   selection summary and "Recover…". When files lie outside the scanned
+   range the page offers "Scan the whole disk". Per file system the user can
+   overrule the engine's verdict ("this is the one I want", "treat as a
+   separate volume").
 4. **Recover** — destination (picker or typed path, including UNC: mapped
    drive letters are invisible to an elevated program), validated by the
    engine with the reason for any refusal; options; progress; summary with
@@ -369,8 +386,9 @@ Dart fake engine replays it, so both sides stay in step.
 5. **Image** — range, destination, progress.
 
 The UI holds no file data: it pages through the engine. It never writes into
-the session range either (S2): it asks `check_destination` with purpose
-`app_data` for its own directories when a source is opened.
+the protected ranges either (S2): it asks `check_destination` with purpose
+`app_data` for its own directories when a source is opened and again
+whenever a catalog arrives or a geometry changes.
 
 ## 7. Testing
 
@@ -392,7 +410,26 @@ the session range either (S2): it asks `check_destination` with purpose
    (carving and lost folders), cluster-change, partitions at offsets (MBR,
    MBR at sector 63, GPT), post-write, small and big clusters, 4 KiB
    records, two generations on one partition, an NTFS image file stored on
-   the volume, and an old volume larger than the scanned partition.
+   the volume, and an old volume larger than the scanned partition (scanned
+   twice: as a partition — the out-of-range files are counted, nothing
+   outside the range is read, the other partition is refused as a
+   destination — and as a whole disk — the files come back bit-identical).
+   Instance separation has its own set, each with the expected outcome:
+   one file system with a "delete the oldest folder, copy a new one" history
+   and one with the oldest files renamed last (one instance, nothing older);
+   the same histories inside the newer of two generations; a newer
+   generation of about 20 records; an older tail that is larger than the
+   newer generation (the newer one is `main`); files created and deleted
+   after the accident; an image file with more records than its host; a
+   small image file (under 256 records) on a volume with a fragmented
+   `$MFT`; two volumes with folders at equal record numbers above 255; a
+   stale file of an older partition layout that covers the formatted
+   volume's `$MFT`, scanned as a whole disk; a re-partitioned disk whose old
+   volume is intact at another offset (its tree is shown, not hidden as
+   current); copies of MFT blocks inside a file (strays, not a second
+   tree); a volume with no index blocks and no known file types. The
+   re-format always starts in a later whole second than the last write to
+   the old volume.
    Properties: every file whose record and content survived is recovered
    bit-identical; at its original path when all its ancestors survived,
    otherwise under a lost or index-named folder; nothing reported `ok`
@@ -402,9 +439,12 @@ the session range either (S2): it asks `check_destination` with purpose
    virtual disk** of at least 16 GiB through `\\.\PhysicalDriveN` (populate,
    `format /Q`, scan, recover, compare), asserting the facts that could not
    be verified without Windows (MFT placement, records 0–255 gone, record 256
-   intact, resident attribute lists produced by real NTFS, destination guard
-   on a volume of that disk, junction and symlink inside the destination,
-   timestamp edge values); then `flutter build windows`, bundling and
+   intact, every slot below the new `$MFT`'s initialized size rewritten,
+   resident attribute lists produced by real NTFS, destination guard on a
+   volume of that disk, junction, symlink, dangling file symlink and mounted
+   folder inside the destination, timestamp edge values, the MFT-change time
+   after a move and a `robocopy` between volumes, the slot a new file gets
+   after low slots were freed); then `flutter build windows`, bundling and
    artifact upload.
 5. Flutter: widget tests against a fake engine that replays the recorded
    protocol transcript; an integration test driving the real engine on a
@@ -424,7 +464,17 @@ the session range either (S2): it asks `check_destination` with purpose
   header alone; such files are rated `uncertain`.
 - Leftovers of a file system from *before* the previous format are shown in
   their own tree and rated at most `uncertain`: many of their clusters have
-  been reused.
+  been reused. They are separated only where the records prove a second file
+  system; leftovers nothing contradicts stay in the main tree (the modified
+  date tells them apart).
+- If the lost file system held fewer files than a new MFT has slots (about
+  220 on current Windows), none of its records survive; whatever the tree
+  then shows belongs to an older file system, and only carving reaches the
+  lost files.
+- Files written and deleted again after the accidental format leave no trace
+  once their record has been reused; what they overwrote can look intact.
+  Files of a type the engine can check are caught by the signature check;
+  others are reported `ok_unverified`.
 - Volumes formatted by Windows NT4/2000 store no record number in the
   record; such files are arranged in a tree only where their position among
   numbered records reveals it.
