@@ -20,8 +20,9 @@
 //!   its instance's geometry in effect. It runs as one sweep over the
 //!   extents sorted by start, so its cost is `O(E log E)` for `E` extents
 //!   whatever the overlaps: every file is marked at most once per flag.
-//! * The record time of G2 is the MFT-change time (the store keeps no
-//!   `$FILE_NAME` times).
+//! * The record time of G2 is the record time of the file's base record
+//!   (its `$STANDARD_INFORMATION` MFT-change time and the `$FILE_NAME`
+//!   times stored in that record).
 //! * `signature_ok` / `signature_mismatch` at build time come from heads
 //!   stored by geometry validation (F3) at the file's first data byte.
 
@@ -264,7 +265,7 @@ impl Health {
                 *k = (
                     kind_win(ci.kind),
                     u8::from(!node.deleted()),
-                    rec.and_then(|r| r.mft_changed()).unwrap_or(0),
+                    rec.and_then(|r| r.record_time()).unwrap_or(0),
                     rec.map_or(0, |r| r.lsn()),
                 );
             }

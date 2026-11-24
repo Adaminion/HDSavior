@@ -181,7 +181,7 @@ impl<'a> LostNames<'a> {
         let Some(v) = self.store.index_entry(e) else {
             return false;
         };
-        let time = v.mft_changed;
+        let time = v.time;
         let offset = v.source.offset;
         let belongs = match v.source.kind {
             EntrySourceKind::RecordRoot => {
@@ -262,7 +262,7 @@ impl<'a> LostNames<'a> {
         }
         let best = usable.into_iter().max_by_key(|&e| {
             let v = store.index_entry(e);
-            let time = v.map_or(0, |v| v.mft_changed);
+            let time = v.map_or(0, |v| v.time);
             let lsn = v.map_or(0, |v| v.source.lsn);
             let off = v.map_or(u64::MAX, |v| v.source.offset);
             (time, lsn, std::cmp::Reverse(off), std::cmp::Reverse(e))

@@ -24,7 +24,9 @@ pub(crate) mod entry_bits {
 pub(crate) struct IndexEntryRec {
     pub child: u64,
     pub parent: u64,
-    pub mft_changed: u64,
+    /// The entry time: the latest of the four times of the key's
+    /// `$FILE_NAME` copy (FILETIME).
+    pub time: u64,
     pub source_offset: u64,
     pub source_lsn: u64,
     pub name_off: u32,
@@ -80,8 +82,9 @@ pub struct IndexEntryView<'a> {
     pub namespace: Namespace,
     /// The name.
     pub name: StoredName<'a>,
-    /// MFT-change time of the key's `$FILE_NAME` copy (FILETIME).
-    pub mft_changed: u64,
+    /// The *entry time* (ALGORITHMS, vocabulary): the latest of the four
+    /// times of the key's `$FILE_NAME` copy (FILETIME).
+    pub time: u64,
     /// Where the entry was found.
     pub source: EntrySource,
 }

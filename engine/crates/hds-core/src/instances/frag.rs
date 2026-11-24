@@ -18,7 +18,7 @@ pub(crate) const FT_1980: u64 = 119_600_064_000_000_000;
 /// One day in FILETIME ticks.
 pub(crate) const FT_DAY: u64 = 864_000_000_000;
 
-/// D2's "timed": a plausible MFT-change time.
+/// D2's "timed": a plausible record time.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Timed {
     /// Latest plausible time (reference + one day); `None`: no bound.
@@ -36,11 +36,11 @@ impl Timed {
         t != 0 && t >= FT_1980 && self.limit.is_none_or(|l| t <= l)
     }
 
-    /// The record's MFT-change time when it is timed.
+    /// The record time (ALGORITHMS, vocabulary) when it is timed.
     pub fn of(&self, store: &ScanStore, id: RecordId) -> Option<u64> {
         store
             .record(id)
-            .and_then(|r| r.mft_changed())
+            .and_then(|r| r.record_time())
             .filter(|&t| self.ok(t))
     }
 }

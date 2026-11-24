@@ -47,7 +47,7 @@ struct Union {
     numbers: BTreeSet<u64>,
     segments: BTreeSet<(usize, usize)>,
     physical: BTreeSet<u32>,
-    /// Oldest and newest plausible change time.
+    /// Oldest and newest plausible record time.
     span: Option<(u64, u64)>,
     /// Lowest number among its records at the origin of a current `$MFT`.
     at_current_origin: Option<u64>,
@@ -626,7 +626,10 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
             continue;
         }
         let newest = u.span.map(|s| s.1);
-        let container_time = m.entries[container as usize].times.mft_changed;
+        // D7: the container's record time (its base record)
+        let container_time = inputs.base_record[container as usize]
+            .and_then(|i| records::record_time(&m.records[i]))
+            .unwrap_or(0);
         let fresh = newest.is_none_or(|newest| container_time + time::DAY >= newest);
         match validated {
             Some(true) if fresh => embedded[x] = Some(container),

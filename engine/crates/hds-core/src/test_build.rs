@@ -316,8 +316,20 @@ impl Rec {
         self
     }
 
-    pub fn name(mut self, parent: u64, name: &str, namespace: u8, flags: u32) -> Rec {
-        let v = file_name_value(parent, name, namespace, flags, [1, 2, 3, 4]);
+    pub fn name(self, parent: u64, name: &str, namespace: u8, flags: u32) -> Rec {
+        self.name_at(parent, name, namespace, flags, [1, 2, 3, 4])
+    }
+
+    /// A `$FILE_NAME` with the given four times.
+    pub fn name_at(
+        mut self,
+        parent: u64,
+        name: &str,
+        namespace: u8,
+        flags: u32,
+        times: [u64; 4],
+    ) -> Rec {
+        let v = file_name_value(parent, name, namespace, flags, times);
         let id = self.id();
         self.attrs.push(resident_attr(FILE_NAME, "", id, 0, &v));
         self

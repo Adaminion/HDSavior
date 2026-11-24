@@ -114,19 +114,37 @@ pub(crate) fn current_mfts(m: &Manifest) -> Vec<CurrentMft> {
         .collect()
 }
 
-/// The MFT-change time of a record's `$STANDARD_INFORMATION`.
-pub(crate) fn change_time(r: &RecordFact) -> Option<u64> {
-    r.standard_information.map(|(times, _, _)| times[2])
+/// The record time (ALGORITHMS, vocabulary): the latest of the
+/// `$STANDARD_INFORMATION` MFT-change time and the four times of every
+/// `$FILE_NAME` of the record; `None` when it has neither.
+pub(crate) fn record_time(r: &RecordFact) -> Option<u64> {
+    let si = r.standard_information.map(|(times, _, _)| times[2]);
+    let names = r
+        .names
+        .iter()
+        .flat_map(|n| n.times)
+        .max()
+        .filter(|&t| t != 0);
+    match (si, names) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
 }
 
-/// A plausible MFT-change time (D2 "timed"): not 0, not before 1980, not
+/// The entry time (ALGORITHMS, vocabulary): the latest of the four times of
+/// an index entry's `$FILE_NAME` copy.
+pub(crate) fn entry_time(times: &[u64; 4]) -> u64 {
+    times.iter().copied().max().unwrap_or(0)
+}
+
+/// A plausible record time (D2 "timed"): not 0, not before 1980, not
 /// more than a day after the scan.
 pub(crate) fn plausible(t: u64) -> bool {
     t != 0 && t >= time::ymd(1980, 1, 1) && t <= ASSUMED_SCAN_TIME + time::DAY
 }
 
 pub(crate) fn timed(r: &RecordFact) -> Option<u64> {
-    change_time(r).filter(|&t| plausible(t))
+    record_time(r).filter(|&t| plausible(t))
 }
 
 pub(crate) fn in_use(r: &RecordFact) -> bool {
@@ -187,7 +205,8 @@ pub(crate) fn classify(m: &Manifest, current: &[CurrentMft]) -> Vec<Option<Recor
             };
             class = if cv.slot_live(slot) {
                 RecordClass::Live
-            } else if let Some(t) = change_time(r) {
+            } else if let Some(t) = r.standard_information.and_then(|_| record_time(r)) {
+                // C3: a record with a $STANDARD_INFORMATION, by its record time
                 if t >= cv.format_time {
                     RecordClass::PostFormat
                 } else {

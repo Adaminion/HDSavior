@@ -186,6 +186,69 @@ fn d2_fallback_cut_when_no_changepoint() {
     assert_ne!(run.inst(MIB + 50 * 1024), run.inst(MIB + 90 * 1024));
 }
 
+/// As [`generations`] with two contradictions, but the newer generation
+/// was restored from a backup: its `$STANDARD_INFORMATION` times are older
+/// than the older generation's (the copy kept the source's times), its
+/// `$FILE_NAME` times are those of the copy.
+fn restored_generations(lab: &mut Lab, origin: u64) {
+    lab.rec(
+        origin,
+        &Rec::new(40).seq(2).flags(3).si([t(1); 4], 0x10).name_at(
+            ROOT,
+            "new",
+            1,
+            DIR_FLAG,
+            [t(1000); 4],
+        ),
+    );
+    for n in 41..70 {
+        lab.rec(
+            origin,
+            &copied_file(
+                n,
+                1,
+                fref(40, 2),
+                &format!("n{n}.txt"),
+                t(u64::from(n) - 40),
+                t(1000 + u64::from(n)),
+                None,
+            ),
+        );
+    }
+    lab.rec(origin, &dir(75, 1, ROOT, "old", t(10)));
+    for n in 70..100 {
+        if n == 75 {
+            continue;
+        }
+        let parent = if n < 72 { fref(40, 1) } else { fref(75, 1) };
+        lab.rec(
+            origin,
+            &file(n, 1, parent, &format!("o{n}.txt"), t(u64::from(n)), None),
+        );
+    }
+}
+
+#[test]
+fn d2_d3_a_restored_generation_is_timed_by_its_record_times() {
+    let mut lab = Lab::new(4);
+    restored_generations(&mut lab, MIB);
+    let run = lab.run(None);
+    let l = &run.layout;
+    // By $SI MFT-change times the newer side (1..29) would be older than
+    // the older side (70..99): no changepoint, and no fallback either. By
+    // record times the cut lies at 70 with the boundary times of D3.
+    assert_eq!(l.cuts().len(), 1, "{:?}", l.cuts());
+    let c = &l.cuts()[0];
+    assert_eq!(c.at, 70);
+    assert_eq!(c.older_newest, Some(t(99)));
+    assert_eq!(c.newer_oldest, Some(t(1000)));
+    let newer = run.inst(MIB + 50 * 1024).unwrap();
+    assert_ne!(Some(newer), run.inst(MIB + 90 * 1024));
+    assert_eq!(l.main(), Some(newer));
+    assert_eq!(run.kind(MIB + 90 * 1024), Some(InstanceKind::Older));
+    assert_eq!(l.instance(newer).unwrap().times, Some((t(1000), t(1069))));
+}
+
 #[test]
 fn d3_relation_to_a_cut() {
     let c = Cut {
@@ -426,6 +489,50 @@ fn d7_a_container_older_than_the_records_inside_is_stale() {
     assert_ne!(guest.kind, InstanceKind::Embedded);
     let stale = guest.stale_container.as_ref().unwrap();
     assert_eq!(stale.record, run.id(MIB + 60 * 1024));
+}
+
+#[test]
+fn d7_a_container_restored_from_a_backup_is_not_stale() {
+    // The container's $SI MFT-change time is older than the records inside
+    // it, but the file was copied onto this volume later: embedded.
+    let mut lab = Lab::new(16);
+    embedded(&mut lab, t(100));
+    lab.rec(
+        MIB,
+        &copied_file(60, 1, ROOT, "guest.img", t(100), t(500), Some((2048, 512))),
+    );
+    let run = lab.run(None);
+    let l = &run.layout;
+    let guest = l.instance(run.inst(8 * MIB + 64 * 1024).unwrap()).unwrap();
+    assert_eq!(guest.kind, InstanceKind::Embedded);
+    assert!(guest.stale_container.is_none());
+}
+
+#[test]
+fn d8_d9_a_volume_refilled_from_a_backup_is_the_newest() {
+    // Instance A was filled by copying from a backup: old $SI times (days
+    // 30..59), new $FILE_NAME times (1530..1559). Instance B was written in
+    // place at days 1030..1059. A is newer: main; B is older.
+    let mut lab = Lab::new(16);
+    for n in 30..60u32 {
+        lab.rec(
+            MIB,
+            &copied_file(
+                n,
+                1,
+                ROOT,
+                &format!("f{n}.txt"),
+                t(u64::from(n)),
+                t(1500 + u64::from(n)),
+                None,
+            ),
+        );
+    }
+    files(&mut lab, 8 * MIB, 30..60, ROOT, 1000);
+    let run = lab.run(None);
+    let l = &run.layout;
+    assert_eq!(l.main(), run.inst(MIB + 30 * 1024));
+    assert_eq!(run.kind(8 * MIB + 30 * 1024), Some(InstanceKind::Older));
 }
 
 #[test]

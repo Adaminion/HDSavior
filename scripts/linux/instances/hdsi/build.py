@@ -411,6 +411,55 @@ class Scenario:
         vol.notes.append('windows-wipe %s slots %d..%d (%d written)' % (mode, first, last, len(wiped)))
         self.events.append(('wipe', vol.vid, mode, first, last, len(wiped)))
 
+    def backdate_si(self, vol, lo, hi, rnd, pick=None):
+        """Imitate a copy from a backup (robocopy, Copy-Item, Move-Item across volumes): every in-use
+        record numbered 24 or above whose name carries vol's tag (and that `pick(snapshot record)`
+        accepts) gets the four $STANDARD_INFORMATION times of a source file last written between `lo`
+        and `hi` (epoch seconds).  Windows carries the source's MFT-change time over to the tick, while
+        every $FILE_NAME time stays the moment of the copy (docs/notes/quick-format-behaviour.md 7a).
+        ntfs-3g cannot do this: its system.ntfs_times xattr sets creation, write and access time, stamps
+        the MFT-change time with the current clock and rewrites the $FILE_NAME times as well.  So the
+        $SI times are patched in the unmounted volume; $FILE_NAME attributes and index entries keep the
+        times the driver wrote at the copy.  Returns the number of records changed."""
+        snap = read_volume(vol.device, vol.offset)
+        rs = snap['rs']
+        n = 0
+        with open(vol.device, 'r+b') as f:
+            for r in snap['records']:
+                if not r['in_use'] or r['num'] is None or r['num'] < 24 or r['base']:
+                    continue
+                if not r['name'] or not r['name'].startswith(vol.tag) or (pick and not pick(r)):
+                    continue
+                f.seek(r['off'])
+                raw = bytearray(f.read(rs))
+                p = struct.unpack_from('<H', raw, 0x14)[0]
+                while p + 0x18 <= rs:
+                    t, ln = struct.unpack_from('<II', raw, p)
+                    if t == 0xFFFFFFFF or ln < 0x18 or p + ln > rs:
+                        p = None
+                        break
+                    if t == 0x10:
+                        break
+                    p += ln
+                if p is None or raw[p + 8] != 0:
+                    continue
+                v = p + struct.unpack_from('<H', raw, p + 0x14)[0]
+                # the four times must not touch the last two bytes of a sector (update sequence)
+                if any((v + k) % 512 >= 510 for k in range(32)):
+                    raise RuntimeError('SI times of record %d cross a sector end' % r['num'])
+                c = rnd.randint(lo, hi)
+                wr = min(hi, c + rnd.randint(0, 200 * 86400))
+                ch = min(hi, wr + rnd.randint(0, 3600))
+                ac = min(hi, ch + rnd.randint(0, 30 * 86400))
+                struct.pack_into('<4Q', raw, v, *(nr.unix_to_ft(x) + rnd.randint(0, 9999999)
+                                                  for x in (c, wr, ch, ac)))
+                f.seek(r['off'])
+                f.write(raw)
+                n += 1
+        vol.notes.append('backdate_si %d records to %s..%s' % (n, fmt_t(lo), fmt_t(hi)))
+        self.events.append(('backdate_si', vol.vid, lo, hi, n))
+        return n
+
     @contextlib.contextmanager
     def mount(self, vol, at=None):
         if at is None:

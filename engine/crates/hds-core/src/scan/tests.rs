@@ -275,6 +275,9 @@ fn every_field_of_a4_is_stored() {
     );
     assert_eq!(si.flags, 0x20);
     assert_eq!(r.mft_changed(), Some(30));
+    // The names carry the times 1 to 4: the latest is 4, the record time 30.
+    assert_eq!(r.latest_name_time(), Some(4));
+    assert_eq!(r.record_time(), Some(30));
     assert!(r.has_wof_stream());
     assert_eq!(r.reparse(), Reparse::Tag(0x8000_0017));
     assert_eq!(r.attribute_list(), AttributeListState::Absent);
@@ -333,7 +336,8 @@ fn every_field_of_a4_is_stored() {
     assert_eq!(e.parent, FileRef::new(101, 1));
     assert!(e.name.eq_str("sub"));
     assert_eq!(e.namespace, Namespace::Win32);
-    assert_eq!(e.mft_changed, 7);
+    // The entry time: the latest of the four times of the key.
+    assert_eq!(e.time, 8);
     assert_eq!(e.source.offset, 0x10_0400);
     assert_eq!(e.source.lsn, r.lsn());
     assert_eq!(e.source.kind, EntrySourceKind::RecordRoot);
@@ -346,6 +350,7 @@ fn every_field_of_a4_is_stored() {
     assert_eq!(r.base(), FileRef::new(100, 3));
     assert_eq!(r.standard_information(), None);
     assert_eq!(r.mft_changed(), None);
+    assert_eq!(r.record_time(), None);
     let DataExtent::NonResident(extent) = store.data_extents(id).next().unwrap() else {
         panic!()
     };

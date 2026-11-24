@@ -1,4 +1,4 @@
-//! Payloads of the session-file blocks (format version 1).
+//! Payloads of the session-file blocks (format version 2; version 1 is read).
 //!
 //! Every integer is little-endian; strings are a u32 byte length and UTF-8.
 //! Each decoder validates a whole payload before it changes the store, so a
@@ -6,8 +6,8 @@
 //!
 //! | block | payload |
 //! |---|---|
-//! | `RECORDS` | u32 n; n x 91-byte records (offset, LSN, hash, base, the four `$STANDARD_INFORMATION` times, `$SI` flags, number, reparse tag, aux length, sequence, header flags, link count, flag bits, fixup first bad block and count, log2 of the size); u64 aux length; the aux regions of the records in order (see `store::record`) |
-//! | `INDEX_ENTRIES` | u32 n; n x 47 bytes (child, parent, MFT-change time, source offset, source LSN, name offset relative to this block, name length, namespace, flag bits); u64 name-bytes length; name bytes |
+//! | `RECORDS` | u32 n; n x 99-byte records (offset, LSN, hash, base, the four `$STANDARD_INFORMATION` times, the latest `$FILE_NAME` time (absent in version 1: 91 bytes), `$SI` flags, number, reparse tag, aux length, sequence, header flags, link count, flag bits, fixup first bad block and count, log2 of the size); u64 aux length; the aux regions of the records in order (see `store::record`) |
+//! | `INDEX_ENTRIES` | u32 n; n x 47 bytes (child, parent, entry time (version 1: the MFT-change time of the `$FILE_NAME` copy), source offset, source LSN, name offset relative to this block, name length, namespace, flag bits); u64 name-bytes length; name bytes |
 //! | `INDEX_BLOCKS` | u32 n; n x 39 bytes (offset, VCN, LSN, owner, size, owner present, fixup first bad block and count) |
 //! | `BOOT_HITS` | u32 n; n x 64 bytes (offset and the fields of the boot sector) |
 //! | `CARVE_HITS` | u64 n; n x u64 packed hits |
@@ -31,7 +31,9 @@ use crate::store::{
 };
 
 /// Encoded size of one record in a `RECORDS` payload.
-pub(crate) const RECORD_WIRE: usize = 91;
+pub(crate) const RECORD_WIRE: usize = 99;
+/// ... in format version 1 (no `$FILE_NAME` time).
+const RECORD_WIRE_V1: usize = 91;
 const ENTRY_WIRE: usize = 47;
 const BLOCK_WIRE: usize = 39;
 const BOOT_WIRE: usize = 64;
@@ -94,6 +96,7 @@ impl RecordsEncoder {
         for t in record.si_times {
             f.u64(t);
         }
+        f.u64(record.fn_time);
         f.u32(record.si_flags);
         f.u32(record.number);
         f.u32(record.reparse_tag);
@@ -169,6 +172,8 @@ fn record_sound(r: &RawRecord, meta: &SessionMeta, counts: ItemCounts) -> bool {
         && (r.is_in_use() || r.has_attributes())
         && (b & bits::HAS_NUMBER != 0 || r.number == 0)
         && (b & bits::HAS_SI != 0 || (r.si_times == [0; 4] && r.si_flags == 0))
+        // A $FILE_NAME time comes from a stored name.
+        && (counts.names > 0 || r.fn_time == 0)
         && (b & bits::REPARSE_TAG == 0 || b & bits::REPARSE != 0)
         && (b & bits::REPARSE_TAG != 0 || r.reparse_tag == 0)
         && (list || b & (bits::ATTR_LIST_RESIDENT | bits::ATTR_LIST_INCOMPLETE | bits::ATTR_LIST_MALFORMED) == 0)
@@ -182,9 +187,11 @@ pub(crate) fn decode_records(
     payload: &[u8],
     meta: &SessionMeta,
     store: &mut ScanStore,
+    version: u32,
 ) -> Result<(), Malformed> {
+    let v1 = version < 2;
     let mut get = Get::new(payload);
-    let count = get.count(false, RECORD_WIRE)?;
+    let count = get.count(false, if v1 { RECORD_WIRE_V1 } else { RECORD_WIRE })?;
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
         let disk_offset = get.u64()?;
@@ -192,12 +199,14 @@ pub(crate) fn decode_records(
         let hash = get.u64()?;
         let base = get.u64()?;
         let si_times = [get.u64()?, get.u64()?, get.u64()?, get.u64()?];
+        let fn_time = if v1 { 0 } else { get.u64()? };
         records.push(RawRecord {
             disk_offset,
             lsn,
             hash,
             base,
             si_times,
+            fn_time,
             aux_off: 0,
             si_flags: get.u32()?,
             number: get.u32()?,
@@ -266,7 +275,7 @@ pub(crate) fn encode_entries(
         count = next;
         fixed.u64(rec.child);
         fixed.u64(rec.parent);
-        fixed.u64(rec.mft_changed);
+        fixed.u64(rec.time);
         fixed.u64(rec.source_offset);
         fixed.u64(rec.source_lsn);
         fixed.u32(name_off);
@@ -284,10 +293,15 @@ pub(crate) fn encode_entries(
 }
 
 /// Decodes an `INDEX_ENTRIES` payload into `store`.
+///
+/// Format version 1 stored the MFT-change time of the entry's `$FILE_NAME`
+/// copy where version 2 stores the entry time; it is taken as the entry
+/// time (the same layout, so `_version` only documents this).
 pub(crate) fn decode_entries(
     payload: &[u8],
     meta: &SessionMeta,
     store: &mut ScanStore,
+    _version: u32,
 ) -> Result<(), Malformed> {
     let mut get = Get::new(payload);
     let count = get.count(false, ENTRY_WIRE)?;
@@ -296,7 +310,7 @@ pub(crate) fn decode_entries(
         recs.push(IndexEntryRec {
             child: get.u64()?,
             parent: get.u64()?,
-            mft_changed: get.u64()?,
+            time: get.u64()?,
             source_offset: get.u64()?,
             source_lsn: get.u64()?,
             name_off: get.u32()?,

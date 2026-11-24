@@ -67,6 +67,9 @@ class Params:
         self.oob_literal = True        # G1 out_of_bounds: 'a run with LCN >= total_clusters' (False: a run
                                        # reaching beyond total_clusters, first model)
         self.c5_embedded = True        # G1 overwritten from C5 also for embedded instances (False: skipped)
+        self.time_basis = 'record'     # 'record': record time and entry time as ALGORITHMS.md defines them
+                                       # (C3 C4 D2 D3 D7 D8 D9 E6 G2); 'si': the raw $SI MFT-change time and
+                                       # the $FILE_NAME copy's MFT-change time (the rules before 2c63bdc)
         self.fixes = set()             # names of proposed rule changes to apply
         for k, v in kw.items():
             if not hasattr(self, k):
@@ -97,9 +100,10 @@ class Group:
     def is_dir(self):
         return self.base.is_dir
 
-    @property
-    def chtime(self):
-        return self.base.chtime or 0
+    def rtime(self, basis):
+        """Record time of the base record (the file's time in D7 and G2)."""
+        t = self.base.rtime if basis == 'record' else self.base.chtime
+        return t or 0
 
     def first_lcn(self):
         for svcn, runs in self.data:
@@ -132,9 +136,9 @@ class Inst:
         self._times = None
         self._extidx = None
 
-    def times(self, timed):
+    def times(self, timed, rt):
         if getattr(self, '_times', None) is None:
-            ts = [r.si[2] for r in self.recs if timed(r)]
+            ts = [rt(r) for r in self.recs if timed(r)]
             self._times = (min(ts), max(ts)) if ts else (None, None)
         return self._times
 
@@ -195,8 +199,20 @@ class Model:
         self.live_alloc = RangeSet([])
 
     # ------------------------------------------------------------------ helpers
+    def rt(self, r):
+        """Record time (or, with time_basis 'si', the raw $SI MFT-change time); None when there is none."""
+        return r.rtime if self.p.time_basis == 'record' else r.chtime
+
+    def et(self, e):
+        """Entry time of an IndexEntry (or, with time_basis 'si', its $FILE_NAME MFT-change time)."""
+        return e.etime if self.p.time_basis == 'record' else e.chtime
+
+    def itimes(self, I):
+        """(oldest, newest) record time of an instance's timed records."""
+        return I.times(self.timed, self.rt)
+
     def timed(self, r):
-        t = r.si[2] if r.si else 0
+        t = self.rt(r) or 0
         return bool(t) and t >= nr.FT_1980 and t <= self.scan_time + int(self.p.future_days * FT_DAY)
 
     def head(self, off):
@@ -398,7 +414,7 @@ class Model:
                 if used:
                     r.cls = 'live'
                 elif r.si is not None:
-                    r.cls = 'post_format' if r.si[2] >= cv.format_time else 'old'
+                    r.cls = 'post_format' if (self.rt(r) or 0) >= cv.format_time else 'old'
             for n, r in list(cv.slot_rec.items()):
                 if isinstance(r.cls, tuple):
                     if r.in_use:
@@ -432,7 +448,7 @@ class Model:
                 cur = True
             else:
                 ft = ftime_for(e.src_off)
-                if ft is not None and e.chtime >= ft:
+                if ft is not None and self.et(e) >= ft:
                     cur = True
             e.current = cur
         ow = list(self.live_alloc.r)
@@ -494,7 +510,7 @@ class Model:
             recs = f['recs']
             by_num = {r.num: r for r in recs}
             # changepoints: candidate p = every record number present
-            timed = [(r.num, r.si[2]) for r in recs if self.timed(r)]
+            timed = [(r.num, self.rt(r)) for r in recs if self.timed(r)]
             nums = [r.num for r in recs]
             # prefix min of times (numbers < p) and suffix max (numbers >= p)
             tn = sorted(timed)
@@ -594,8 +610,8 @@ class Model:
                 sid += 1
             for k, c in enumerate(kept):
                 below, above = segids[k], segids[k + 1]
-                tb = [r.si[2] for r in self.segments[above]['recs'] if self.timed(r)]
-                ta = [r.si[2] for r in self.segments[below]['recs'] if self.timed(r)]
+                tb = [self.rt(r) for r in self.segments[above]['recs'] if self.timed(r)]
+                ta = [self.rt(r) for r in self.segments[below]['recs'] if self.timed(r)]
                 if 'd2-fallback' in self.fixes and tb and any(t <= max(tb) for t in ta):
                     # D3 for a fallback cut: A_c from the records below that are newer than B_c
                     ta = [t for t in ta if t > max(tb)] or ta
@@ -610,7 +626,7 @@ class Model:
         """fix d2-fallback: no changepoint in (lo, hi]: the record number p in (lo, hi] with the fewest
         timed records out of order for the best time T (numbered < p and not newer than T, or numbered
         >= p and newer than T); on ties the highest p."""
-        timed = sorted((r.num, r.si[2]) for r in recs if self.timed(r))
+        timed = sorted((r.num, self.rt(r)) for r in recs if self.timed(r))
         cand_p = sorted({r.num for r in recs if lo < r.num <= hi})
         if not cand_p or not timed:
             return None
@@ -752,7 +768,7 @@ class Model:
             cnt[t.off - B] += 1
             if self.timed(t):
                 o = t.off - B
-                oldest_at[o] = min(oldest_at.get(o, t.si[2]), t.si[2])
+                oldest_at[o] = min(oldest_at.get(o, self.rt(t)), self.rt(t))
         if 'd4c-size' in self.fixes and not self_map:
             # the record 0 must describe a $MFT that holds every record number of the other side
             init = [d.init for d in r0.data if not d.resident and d.svcn == 0]
@@ -762,7 +778,7 @@ class Model:
         if 'd4c-time' in self.fixes and not self_map:
             # the record 0 must not be older than every record it places (a $MFT record of a file system
             # that ended before these records were written cannot describe them)
-            t0 = r0.si[2] if r0.si and self.timed(r0) else None
+            t0 = self.rt(r0) if r0.si and self.timed(r0) else None
             tol = int(self.p.d4c_tol_days * FT_DAY)
             for o in list(cnt):
                 if t0 is not None and o in oldest_at and t0 < oldest_at[o] - tol:
@@ -795,10 +811,10 @@ class Model:
             for X, Y in ((I, J), (J, I)):
                 if X.id == hb and Y.id == ha:
                     return 'cut'
-                if X.id == hb and self.rel_to_cut(Y.times(self.timed), c) != 'after':
+                if X.id == hb and self.rel_to_cut(self.itimes(Y), c) != 'after':
                     return 'cut'
                 if X.id == ha:
-                    rel = self.rel_to_cut(Y.times(self.timed), c)
+                    rel = self.rel_to_cut(self.itimes(Y), c)
                     if ('d4-older-side' in self.fixes and rel == 'after') or \
                             ('d4-older-side' not in self.fixes and rel != 'before'):
                         return 'cut'
@@ -1283,8 +1299,8 @@ class Model:
             X.embedded_in = None
             if not X.recs:
                 continue
-            newest = X.times(self.timed)[1]
-            oldest = X.times(self.timed)[0]
+            newest = self.itimes(X)[1]
+            oldest = self.itimes(X)[0]
             best = None
             for Y in val:
                 if Y is X:
@@ -1299,11 +1315,11 @@ class Model:
                         ins, gr2 = self.container_of(X, Y, idx[Y.id])
                         if ins:
                             self.tr['d7'].append((X.id, Y.id, len(X.recs), ins / len(X.recs),
-                                                  None if gr2 is None or newest is None else (gr2.chtime - newest) / FT_DAY,
-                                                  None if gr2 is None or oldest is None else (gr2.chtime - oldest) / FT_DAY))
+                                                  None if gr2 is None or newest is None else (gr2.rtime(self.p.time_basis) - newest) / FT_DAY,
+                                                  None if gr2 is None or oldest is None else (gr2.rtime(self.p.time_basis) - oldest) / FT_DAY))
             if best:
                 inside, Y, gr = best
-                ct = gr.chtime
+                ct = gr.rtime(self.p.time_basis)
                 ref = newest
                 if 'd7-oldest' in self.fixes:
                     ref = oldest
@@ -1412,12 +1428,12 @@ class Model:
             starts = {self.start} | {ps for ps, ln in self.s.partitions if self.start <= ps < self.end}
             c2 = [I for I in cand if I.geo and I.geo.validated and I.geo.off in starts]
             if c2:
-                main = max(c2, key=lambda I: (I.times(self.timed)[1] or 0, len(I.recs)))
+                main = max(c2, key=lambda I: (self.itimes(I)[1] or 0, len(I.recs)))
                 why = 'validated-at-start'
         if main is None and cand:
-            timed_c = [I for I in cand if I.times(self.timed)[1] is not None]
+            timed_c = [I for I in cand if self.itimes(I)[1] is not None]
             if timed_c:
-                main = max(timed_c, key=lambda I: (I.times(self.timed)[1], len(I.recs)))
+                main = max(timed_c, key=lambda I: (self.itimes(I)[1], len(I.recs)))
                 why = 'newest'
             else:
                 main = max(cand, key=lambda I: len(I.recs))
@@ -1436,17 +1452,17 @@ class Model:
                 if I.kind is None:
                     I.kind = OTHER
             return
-        mt = main.times(self.timed)
+        mt = self.itimes(main)
         for I in alive:
             if I.kind is not None:
                 continue
             older = False
             for c in self.cuts:
                 if self.seg_owner(c['below']) == main.id:
-                    if self.seg_owner(c['above']) == I.id or self.rel_to_cut(I.times(self.timed), c) == 'before':
+                    if self.seg_owner(c['above']) == I.id or self.rel_to_cut(self.itimes(I), c) == 'before':
                         older = True
             if not older:
-                it = I.times(self.timed)
+                it = self.itimes(I)
                 if it[1] is not None and mt[0] is not None and it[1] < mt[0]:
                     if not (I.geo and I.geo.validated and main.geo and I.geo.off != main.geo.off):
                         older = True
@@ -1589,15 +1605,15 @@ class Model:
                     # "failing both": the owner number is not present in any instance
                     belongs = True
                     if 'e6-floor' in self.fixes:
-                        old = I.times(self.timed)[0]
-                        if old is not None and e.chtime < old - int(self.p.e6_floor_days * FT_DAY):
+                        old = self.itimes(I)[0]
+                        if old is not None and self.et(e) < old - int(self.p.e6_floor_days * FT_DAY):
                             belongs = False
         if not belongs:
             return False
         for c in self.cuts:
             hb = self.seg_owner(c['below'])
             ha = self.seg_owner(c['above'])
-            rel = self.rel_to_cut((e.chtime, e.chtime), c)
+            rel = self.rel_to_cut((self.et(e), self.et(e)), c)
             if hb == I.id and rel != 'after':
                 return False
             if ha == I.id and rel != 'before':
@@ -1625,13 +1641,14 @@ class Model:
                 e = nr.IndexEntry()
                 e.child, e.cseq, e.parent, e.pseq, e.ns, e.name = P, s, fn.parent, fn.pseq, fn.ns, fn.name
                 e.chtime, e.src_off, e.src_lsn, e.src_kind, e.block, e.is_dir = fn.chtime, r.off, r.lsn, 'stray', None, True
+                e.etime = fn.tmax
                 return e
             return None
         nondos = [e for e in cands if e.ns != 2]
         if nondos:
             cands = nondos
         if 'e6-newest' in self.fixes:
-            cands.sort(key=lambda e: (-e.chtime, -e.src_lsn, e.src_off))
+            cands.sort(key=lambda e: (-self.et(e), -e.src_lsn, e.src_off))
         else:
             cands.sort(key=lambda e: (-e.src_lsn, e.src_off))
         return cands[0]
@@ -1695,7 +1712,7 @@ class Model:
 
     def conflict(self, g1, I1, g2, I2):
         def key(g, I):
-            return (-KIND_RANK.get(I.kind, 3), 1 if g.in_use else 0, g.chtime, g.base.lsn)
+            return (-KIND_RANK.get(I.kind, 3), 1 if g.in_use else 0, g.rtime(self.p.time_basis), g.base.lsn)
         k1, k2 = key(g1, I1), key(g2, I2)
         if k1 == k2:
             g1.flags.add('overlap')

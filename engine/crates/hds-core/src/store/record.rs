@@ -87,7 +87,7 @@ const EXTENT_HEADER: usize = 25;
 /// Size of an attribute-list item.
 const ATTR_LIST_ITEM: usize = 21;
 
-/// One MFT record as the scan found it (ALGORITHMS A4). 104 bytes; the
+/// One MFT record as the scan found it (ALGORITHMS A4). 112 bytes; the
 /// variable-length parts live in the store's arena and are read through
 /// [`ScanStore`](crate::store::ScanStore) (`names`, `data_extents`, ...).
 ///
@@ -101,6 +101,10 @@ pub struct RawRecord {
     pub(crate) base: u64,
     /// Creation, modification, MFT change, access (FILETIME).
     pub(crate) si_times: [u64; 4],
+    /// The latest of the four times of every `$FILE_NAME` of the record
+    /// (FILETIME); 0 when the record has no decodable `$FILE_NAME` (or only
+    /// names whose times are all 0).
+    pub(crate) fn_time: u64,
     /// Address of the record's aux region in the store's arena.
     pub(crate) aux_off: u64,
     pub(crate) si_flags: u32,
@@ -294,11 +298,40 @@ impl RawRecord {
         })
     }
 
-    /// The MFT-change time of `$STANDARD_INFORMATION`, when present.
+    /// The MFT-change time of `$STANDARD_INFORMATION`, when present. A
+    /// file time to show, not a rule input: the rules use
+    /// [`record_time`](Self::record_time).
     #[must_use]
     pub fn mft_changed(&self) -> Option<u64> {
         let [_, _, mft_changed, _] = self.si_times;
         (self.bits & bits::HAS_SI != 0).then_some(mft_changed)
+    }
+
+    /// Whether a `$STANDARD_INFORMATION` was decoded.
+    #[must_use]
+    pub fn has_standard_information(&self) -> bool {
+        self.bits & bits::HAS_SI != 0
+    }
+
+    /// The latest of the four times of all `$FILE_NAME` attributes of the
+    /// record, when it has one with a non-zero time.
+    #[must_use]
+    pub fn latest_name_time(&self) -> Option<u64> {
+        (self.fn_time != 0).then_some(self.fn_time)
+    }
+
+    /// The *record time* (ALGORITHMS, vocabulary): the latest of the
+    /// `$STANDARD_INFORMATION` MFT-change time and all `$FILE_NAME` times;
+    /// `None` when the record has neither. Copy tools carry the source's
+    /// MFT-change time over, while the `$FILE_NAME` times of a copy are the
+    /// moment it was created on the volume, so this is the time a record
+    /// was last written on its volume.
+    #[must_use]
+    pub fn record_time(&self) -> Option<u64> {
+        match (self.mft_changed(), self.latest_name_time()) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Whether a `$DATA` stream named `WofCompressedData` exists.

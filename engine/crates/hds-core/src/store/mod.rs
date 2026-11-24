@@ -22,14 +22,14 @@
 //!
 //! | container | chunk | element | bytes |
 //! |---|---|---|---|
-//! | `records` | 16384 items | [`RawRecord`]: offset, LSN, hash, base reference, the four `$STANDARD_INFORMATION` times, address and length of the aux region, number, sequence, flags, fixup status, size | 104 |
+//! | `records` | 16384 items | [`RawRecord`]: offset, LSN, hash, base reference, the four `$STANDARD_INFORMATION` times, the latest `$FILE_NAME` time, address and length of the aux region, number, sequence, flags, fixup status, size | 112 |
 //! | `aux` | 1 MiB | the variable parts of all records: names, `$DATA` and `$INDEX_ALLOCATION` extents with their raw runlists, attribute-list entries, as tagged byte-packed items (see [`record`]) | 18 + 1 per unit per name (2 when a unit is 0x100 or above), 13 per resident `$DATA`, 41 + runlist per extent (25 + runlist after VCN 0), 21 per attribute-list entry |
 //! | `entries`, `entry_names` | 16384 items, 256 KiB | index entries and their names | 48 + name |
 //! | `blocks` | - | [`IndexBlockInfo`] | 48 |
 //! | `boots` | - | [`BootHit`] | 72 |
 //! | `carve` | 65536 items | [`CarveHit`] | 8 |
 //!
-//! A record therefore costs 104 bytes plus its items: about 160 bytes for
+//! A record therefore costs 112 bytes plus its items: about 160 bytes for
 //! a file with one ASCII name and resident data, 190 to 200 with a
 //! non-resident `$DATA` of one or two runs ([`ScanStore::memory_bytes`],
 //! measured on real volumes in the crate's report).
@@ -517,7 +517,7 @@ impl ScanStore {
             parent: FileRef::from_raw(rec.parent),
             namespace: Namespace::from_u8(rec.namespace).unwrap_or(Namespace::Posix),
             name: StoredName::new(self.entry_name(rec), rec.bits & entry_bits::NARROW == 0),
-            mft_changed: rec.mft_changed,
+            time: rec.time,
             source: EntrySource {
                 offset: rec.source_offset,
                 lsn: rec.source_lsn,
@@ -859,7 +859,7 @@ impl ScanStore {
     // ------------------------------------------------------- logical equality
 
     /// Canonical form of one record: its fixed fields and its aux bytes.
-    fn record_key(&self, id: RecordId) -> Option<(u64, [u64; 12], &[u8])> {
+    fn record_key(&self, id: RecordId) -> Option<(u64, [u64; 13], &[u8])> {
         let r = self.record(id)?;
         let [c, m, x, a] = r.si_times;
         Some((
@@ -872,6 +872,7 @@ impl ScanStore {
                 m,
                 x,
                 a,
+                r.fn_time,
                 u64::from(r.si_flags),
                 u64::from(r.number),
                 u64::from(r.reparse_tag),

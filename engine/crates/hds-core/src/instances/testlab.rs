@@ -76,10 +76,41 @@ pub(crate) fn file_cs(
     run: Option<(u64, u64)>,
     cs: u64,
 ) -> Rec {
+    file_named_at(n, seq, parent, name, changed, [1, 2, 3, 4], run, cs)
+}
+
+/// A file copied onto the volume from a backup (robocopy, Copy-Item,
+/// Move-Item across volumes, measured: quick-format-behaviour.md 7a): its
+/// `$STANDARD_INFORMATION` carries the source's times (`source`, all four),
+/// its `$FILE_NAME` times are the moment of the copy (`copied`, all four).
+pub(crate) fn copied_file(
+    n: u32,
+    seq: u16,
+    parent: u64,
+    name: &str,
+    source: u64,
+    copied: u64,
+    run: Option<(u64, u64)>,
+) -> Rec {
+    file_named_at(n, seq, parent, name, source, [copied; 4], run, 4096)
+}
+
+/// As [`file_cs`] with the four `$FILE_NAME` times `name_times`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn file_named_at(
+    n: u32,
+    seq: u16,
+    parent: u64,
+    name: &str,
+    changed: u64,
+    name_times: [u64; 4],
+    run: Option<(u64, u64)>,
+    cs: u64,
+) -> Rec {
     let r = Rec::new(n)
         .seq(seq)
         .si([changed, changed, changed, changed], 0x20)
-        .name(parent, name, 1, 0x20);
+        .name_at(parent, name, 1, 0x20, name_times);
     match run {
         Some((lcn, len)) => r.data_extent(
             0,

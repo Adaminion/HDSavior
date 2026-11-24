@@ -1201,7 +1201,7 @@ impl<'a> Work<'a> {
             if let Some(&(_, y, cont, oldest)) = best.get(&r) {
                 let ct = store
                     .record(cont)
-                    .and_then(|c| c.mft_changed())
+                    .and_then(|c| c.record_time())
                     .unwrap_or(0);
                 let too_old = oldest.is_some_and(|o| ct < o.saturating_sub(FT_DAY));
                 if too_old || self.volume_of_disk(r) {

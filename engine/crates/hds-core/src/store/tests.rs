@@ -452,5 +452,5 @@ fn lookups_by_offset() {
     assert_eq!(s.names(RecordId(99)).count(), 0);
     assert!(s.index_entry(EntryId(0)).is_none());
     assert!(s.memory_bytes() > s.record_bytes());
-    assert_eq!(s.record_bytes(), 104 + s.aux_region(RecordId(0)).len());
+    assert_eq!(s.record_bytes(), 112 + s.aux_region(RecordId(0)).len());
 }

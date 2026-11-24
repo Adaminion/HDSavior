@@ -382,6 +382,63 @@ fn c3_classes_of_records_in_current_slots() {
 }
 
 #[test]
+fn c3_c4_a_copy_from_a_backup_is_judged_by_its_record_and_entry_time() {
+    // Copy tools carry the source's $SI MFT-change time over; the
+    // $FILE_NAME times of the copy are the moment it was made. A file copied
+    // in after the format and deleted again is post_format although its
+    // MFT-change time is years older than the format.
+    let (mut lab, cl) = classes_lab();
+    let o = cl.origin;
+    lab.rec(
+        o,
+        &copied_file(27, 1, ROOT, "restored.txt", t(10), t(1600), Some((2800, 4))),
+    );
+    // Copied before the format: old, whatever its $SI says.
+    lab.rec(
+        o,
+        &copied_file(28, 1, ROOT, "early.txt", t(10), t(100), None),
+    );
+    // C4: an entry outside current clusters whose key was created after the
+    // format (only its MFT-change time is old) is current-volume data; one
+    // whose times are all older is not.
+    let copied = index_entry(
+        fref(42, 1),
+        ROOT,
+        "restoreddir",
+        1,
+        DIR_FLAG,
+        [t(1600), t(10), t(10), t(10)],
+    );
+    let old = index_entry(fref(43, 1), ROOT, "olddir", 1, DIR_FLAG, [t(10); 4]);
+    lab.put(3500 * CS, &indx_block(0, 9, 4096, &[copied, old]));
+    let run = lab.run(None);
+    let l = &run.layout;
+    let store = run.store();
+    let id27 = run.id(o + 27 * 1024);
+    let r27 = store.record(id27).unwrap();
+    assert_eq!(r27.mft_changed(), Some(t(10)));
+    assert_eq!(r27.record_time(), Some(t(1600)));
+    assert_eq!(l.class(id27), RecordClass::PostFormat);
+    assert_eq!(l.class(run.id(o + 28 * 1024)), RecordClass::Old);
+    // C5: its extents are overwritten.
+    assert!(l.live().overwritten().contains_range(2800 * CS..2804 * CS));
+    let live = l.live();
+    let mut seen = 0;
+    for (id, e) in store.index_entries() {
+        let name = e.name.to_string_lossy();
+        if name == "restoreddir" {
+            assert_eq!(e.time, t(1600));
+            assert!(live.is_current_entry(id));
+            seen += 1;
+        } else if name == "olddir" {
+            assert!(!live.is_current_entry(id));
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 2);
+}
+
+#[test]
 fn c4_c5_current_index_data_and_the_overwritten_set() {
     let (mut lab, cl) = classes_lab();
     // An index block inside live-allocated clusters, one outside.
@@ -402,7 +459,7 @@ fn c4_c5_current_index_data_and_the_overwritten_set() {
     }
     for (id, e) in store.index_entries() {
         let in_current_block = e.source.offset == 3000 * CS;
-        let newer = e.mft_changed >= t(1500);
+        let newer = e.time >= t(1500);
         assert_eq!(
             live.is_current_entry(id),
             in_current_block || newer,

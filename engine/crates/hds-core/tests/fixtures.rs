@@ -107,6 +107,15 @@ fn u(v: &Value) -> u64 {
     v.as_u64().unwrap_or_else(|| panic!("not a number: {v}"))
 }
 
+/// The latest of the four times of an inspector `$FILE_NAME` object.
+fn fn_latest(f: &Value) -> u64 {
+    ["created", "modified", "mft_changed", "accessed"]
+        .iter()
+        .map(|k| u(&f[*k]))
+        .max()
+        .unwrap()
+}
+
 fn units(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
@@ -213,6 +222,14 @@ fn compare_with_inspector(
         // Names, in on-disk order.
         let mine: Vec<_> = store.names(id).collect();
         let theirs = rec["names"].as_array().unwrap();
+        // The latest $FILE_NAME time (A4) and the record time.
+        let latest = theirs.iter().map(fn_latest).max().filter(|&t| t != 0);
+        assert_eq!(r.latest_name_time(), latest, "{at}");
+        let record_time = match (r.mft_changed(), latest) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        assert_eq!(r.record_time(), record_time, "{at}");
         assert_eq!(mine.len(), theirs.len(), "{at}: names");
         for (m, t) in mine.iter().zip(theirs) {
             assert_eq!(
@@ -380,7 +397,7 @@ fn compare_with_inspector(
                     FileRef::new(u(&f["parent_record"]), u(&f["parent_sequence"]) as u16),
                     "{at}"
                 );
-                assert_eq!(m.mft_changed, u(&f["mft_changed"]), "{at}");
+                assert_eq!(m.time, fn_latest(f), "{at}");
                 assert_eq!(m.source.lsn, r.lsn(), "{at}");
                 tally.root_entries += 1;
             }
@@ -463,7 +480,7 @@ fn compare_with_inspector(
                 u(&t["file_name"]["namespace"]),
                 "{at}"
             );
-            assert_eq!(m.mft_changed, u(&t["file_name"]["mft_changed"]), "{at}");
+            assert_eq!(m.time, fn_latest(&t["file_name"]), "{at}");
             assert_eq!(m.source.lsn, mine.lsn, "{at}");
             tally.block_entries += 1;
         }

@@ -247,10 +247,21 @@ pub fn fragment_records<'a>(m: &'a Manifest, fragment: &FragmentFact) -> Vec<&'a
         .collect()
 }
 
-/// A plausible MFT-change time in the sense of ALGORITHMS D2 (the manifest
-/// assumes a scan between 2026 and 2037).
+/// A plausible record time in the sense of ALGORITHMS D2 (the manifest
+/// assumes a scan between 2026 and 2037): the latest of the
+/// `$STANDARD_INFORMATION` MFT-change time and every `$FILE_NAME` time.
 fn timed(r: &RecordFact) -> Option<u64> {
-    let t = r.standard_information?.0[2];
+    let si = r.standard_information.map(|s| s.0[2]);
+    let names = r
+        .names
+        .iter()
+        .flat_map(|n| n.times)
+        .max()
+        .filter(|&t| t != 0);
+    let t = match (si, names) {
+        (Some(a), Some(b)) => a.max(b),
+        (a, b) => a.or(b)?,
+    };
     let scan = hds_testkit::expect::ASSUMED_SCAN_TIME;
     (t != 0 && t >= hds_testkit::time::ymd(1980, 1, 1) && t <= scan + hds_testkit::time::DAY)
         .then_some(t)

@@ -26,8 +26,21 @@ use crate::store::{Mark, ScanStore};
 
 /// The first four bytes of a session file.
 pub const MAGIC: [u8; 4] = *b"HDSC";
-/// The format version this code writes and reads.
-pub const FORMAT_VERSION: u32 = 1;
+/// The format version this code writes.
+///
+/// * 1 - the first format.
+/// * 2 - a record carries the latest of its `$FILE_NAME` times (ALGORITHMS
+///   A4, for the record time), and an index entry's time is the entry time
+///   (the latest of the four times of its `$FILE_NAME` copy) instead of the
+///   copy's MFT-change time.
+pub const FORMAT_VERSION: u32 = 2;
+/// The oldest format version this code reads. A version-1 file loads with
+/// no `$FILE_NAME` time per record (the record time falls back to the
+/// `$STANDARD_INFORMATION` MFT-change time) and with the MFT-change time of
+/// each entry's `$FILE_NAME` copy standing for its entry time; a session
+/// that goes on writing to such a file first rewrites it in the current
+/// format ([`Session::attach_file`](super::Session::attach_file)).
+pub const MIN_FORMAT_VERSION: u32 = 1;
 /// Size of the file header.
 pub(crate) const FILE_HEADER: u64 = 8;
 /// Size of a block header.
@@ -104,6 +117,8 @@ pub(crate) struct Origin {
     pub block_crc: u32,
     /// Its sequence number.
     pub sequence: u64,
+    /// The file's format version.
+    pub version: u32,
 }
 
 /// The last block written: offset of its header, payload length, CRC.
@@ -185,8 +200,8 @@ fn corrupt(message: impl Into<String>) -> SessionError {
     SessionError::Corrupt(message.into())
 }
 
-/// Checks the file header.
-fn check_header(header: &[u8; 8]) -> Result<(), SessionError> {
+/// Checks the file header and returns its format version.
+fn check_header(header: &[u8; 8]) -> Result<u32, SessionError> {
     let (magic, version) = header.split_at(4);
     if magic != MAGIC {
         return Err(corrupt("not an HDSavior session file"));
@@ -200,10 +215,10 @@ fn check_header(header: &[u8; 8]) -> Result<(), SessionError> {
     if version > FORMAT_VERSION {
         return Err(SessionError::Unsupported(version));
     }
-    if version != FORMAT_VERSION {
+    if version < MIN_FORMAT_VERSION {
         return Err(corrupt(format!("unknown session format version {version}")));
     }
-    Ok(())
+    Ok(version)
 }
 
 /// One block header.
@@ -348,7 +363,7 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SessionError> {
     if !read_full(&mut r, &mut header).map_err(SessionError::Io)? {
         return Err(corrupt("not an HDSavior session file"));
     }
-    check_header(&header)?;
+    let version = check_header(&header)?;
 
     let mut pos = FILE_HEADER;
     let mut store = ScanStore::new();
@@ -419,6 +434,7 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SessionError> {
                             block_len,
                             block_crc: crc,
                             sequence: c.sequence,
+                            version,
                         };
                         checkpoints = checkpoints.saturating_add(1);
                         committed = Some((c, store.mark(), origin));
@@ -428,10 +444,10 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, SessionError> {
             },
             (_, None) => Err("data before the first checkpoint"),
             (BlockType::Records, Some(m)) => {
-                codec::decode_records(&payload, m, &mut store).map_err(|e| e.0)
+                codec::decode_records(&payload, m, &mut store, version).map_err(|e| e.0)
             }
             (BlockType::IndexEntries, Some(m)) => {
-                codec::decode_entries(&payload, m, &mut store).map_err(|e| e.0)
+                codec::decode_entries(&payload, m, &mut store, version).map_err(|e| e.0)
             }
             (BlockType::IndexBlocks, Some(m)) => {
                 codec::decode_blocks(&payload, m, &mut store).map_err(|e| e.0)
@@ -584,7 +600,9 @@ pub(crate) fn matches_origin(file: &mut OutFile, origin: &Origin) -> Result<bool
     }
     file.seek(SeekFrom::Start(0)).map_err(SessionError::Io)?;
     let mut header = [0_u8; 8];
-    if !read_full(file, &mut header).map_err(SessionError::Io)? || check_header(&header).is_err() {
+    if !read_full(file, &mut header).map_err(SessionError::Io)?
+        || check_header(&header).ok() != Some(origin.version)
+    {
         return Ok(false);
     }
     file.seek(SeekFrom::Start(origin.block_offset))

@@ -410,13 +410,22 @@ fn hostile_files_are_refused_cleanly() {
     ));
     // A newer format version.
     let mut newer = b"HDSC".to_vec();
-    newer.extend_from_slice(&2u32.to_le_bytes());
+    let next = file::FORMAT_VERSION + 1;
+    newer.extend_from_slice(&next.to_le_bytes());
     std::fs::write(&path, &newer).unwrap();
     assert!(matches!(
         Session::load(&path),
-        Err(SessionError::Unsupported(2))
+        Err(SessionError::Unsupported(v)) if v == next
     ));
     assert_eq!(Session::load(&path).unwrap_err().code(), "unsupported");
+    // An older version than any this code reads.
+    let mut older = b"HDSC".to_vec();
+    older.extend_from_slice(&0u32.to_le_bytes());
+    std::fs::write(&path, &older).unwrap();
+    assert!(matches!(
+        Session::load(&path),
+        Err(SessionError::Corrupt(_))
+    ));
     // Not a session file, an empty file, a directory.
     std::fs::write(&path, b"hello world").unwrap();
     assert!(matches!(
@@ -1144,6 +1153,79 @@ fn session_meta_is_validated() {
     let mut odd = id;
     odd.sector_size = 1000;
     assert!(SessionMeta::new(odd, 0..4000, ok).is_err());
+}
+
+/// Turns a session file of the current format into one of format version 1:
+/// the header says 1 and every record loses its `$FILE_NAME` time.
+fn downgrade_to_v1(bytes: &[u8]) -> Vec<u8> {
+    let mut out = b"HDSC".to_vec();
+    out.extend_from_slice(&1u32.to_le_bytes());
+    for (pos, ty, end) in blocks_of(bytes) {
+        let header = &bytes[pos..pos + 20];
+        let payload = &bytes[pos + 20..end];
+        let payload = if ty == 1 {
+            let n = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
+            let mut p = payload[..4].to_vec();
+            for i in 0..n {
+                let rec = &payload[4 + i * codec::RECORD_WIRE..4 + (i + 1) * codec::RECORD_WIRE];
+                // Offset, LSN, hash, base and the four $SI times come first.
+                p.extend_from_slice(&rec[..64]);
+                p.extend_from_slice(&rec[72..]);
+            }
+            p.extend_from_slice(&payload[4 + n * codec::RECORD_WIRE..]);
+            p
+        } else {
+            payload.to_vec()
+        };
+        out.extend_from_slice(&header[..8]);
+        out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        out.extend_from_slice(&super::crc::crc32(&payload).to_le_bytes());
+        out.extend_from_slice(&payload);
+    }
+    out
+}
+
+#[test]
+fn a_version_1_file_loads_and_is_rewritten_before_it_is_appended_to() {
+    let dir = TempDir::new("v1");
+    let (mut session, src) = scanned();
+    let protected = [Protected::session(0..src.size())];
+    let guard = guard_for(src.as_ref(), &protected);
+    let path = dir.join("v2.hds");
+    session.save_as(&path, &guard).unwrap();
+    session.detach_file();
+    let v1 = dir.join("v1.hds");
+    std::fs::write(&v1, downgrade_to_v1(&std::fs::read(&path).unwrap())).unwrap();
+    let (mut loaded, report) = Session::load(&v1).unwrap();
+    assert_eq!(report.ignored_bytes, 0);
+    // Everything but the $FILE_NAME times of the records is there; the
+    // record time falls back to the $STANDARD_INFORMATION MFT-change time.
+    let (a, b) = (session.store(), loaded.store());
+    assert_eq!(a.record_count(), b.record_count());
+    assert_eq!(a.index_entry_count(), b.index_entry_count());
+    let mut with_names = 0;
+    for (&ia, &ib) in a.records_by_offset().iter().zip(b.records_by_offset()) {
+        let (ra, rb) = (a.record(ia).unwrap(), b.record(ib).unwrap());
+        assert_eq!(ra.disk_offset(), rb.disk_offset());
+        assert_eq!(ra.standard_information(), rb.standard_information());
+        assert_eq!(rb.latest_name_time(), None);
+        assert_eq!(rb.record_time(), rb.mft_changed());
+        if ra.latest_name_time().is_some() {
+            with_names += 1;
+        }
+    }
+    assert!(with_names > 0);
+    // Going on in the file rewrites it in the current format first.
+    loaded.attach_file(&v1, &guard).unwrap();
+    loaded
+        .append_opaque(OpaqueKind::Overrides, b"geometry".to_vec())
+        .unwrap();
+    loaded.checkpoint().unwrap();
+    let bytes = std::fs::read(&v1).unwrap();
+    assert_eq!(&bytes[4..8], &file::FORMAT_VERSION.to_le_bytes());
+    let (again, _) = Session::load(&v1).unwrap();
+    assert_eq!(again.opaque(OpaqueKind::Overrides), &[b"geometry".to_vec()]);
+    assert_eq!(again.store(), loaded.store());
 }
 
 #[test]

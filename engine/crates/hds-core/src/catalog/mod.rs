@@ -246,7 +246,7 @@ pub struct CatalogInstance {
     pub root: NodeId,
     /// Records that belong to it.
     pub records: u64,
-    /// The FILETIME range of its timed MFT-change times.
+    /// The FILETIME range of its timed record times.
     pub times: Option<(u64, u64)>,
     /// Display path of the file that holds it (embedded instances).
     pub embedded_in: Option<String>,

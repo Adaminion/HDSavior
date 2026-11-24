@@ -9,7 +9,7 @@ use crate::populate::{populate, TreeSpec};
 use crate::rng::derive;
 use crate::time;
 use crate::volume::params::{BlankSlots, Flavor, ListForm, MftFragment, VolumeParams};
-use crate::volume::spec::{DirSpec, FileSpec, MultiSpec};
+use crate::volume::spec::{DirSpec, FileSpec, MultiSpec, Times};
 
 use super::{old_volume, reformat, MIB};
 
@@ -539,6 +539,103 @@ pub fn three_generations(seed: u64) -> Built {
         &[2048, 1024, 512, 256],
         &[2014, 2017, 2020, 2023],
     );
+    disk.finish()
+}
+
+/// Gives every user file and folder of `v` that is in use the
+/// `$STANDARD_INFORMATION` times of a copy from a backup: robocopy,
+/// Copy-Item and Move-Item copy the source's times, the MFT-change time
+/// included, to the tick (docs/notes/quick-format-behaviour.md 7a). The
+/// `$FILE_NAME` times stay those of the moment the copy was made. The source
+/// times start at `source` and grow by a minute per node.
+fn restore_times(v: &mut crate::volume::Volume, source: u64) {
+    for (i, node) in v.user_nodes().into_iter().enumerate() {
+        if !v.is_in_use(node) {
+            continue;
+        }
+        let t = source + i as u64 * time::MINUTE;
+        v.set_times(
+            node,
+            Times {
+                created: t,
+                modified: t,
+                mft_changed: t + time::SECOND,
+                accessed: t + time::SECOND,
+            },
+        );
+    }
+}
+
+/// [`two_generations`], with the 2020 file system filled from a backup.
+///
+/// **Tests the record time (ALGORITHMS, vocabulary) in C3, D2, D3, D8 and
+/// D9.** Every user file and folder of the 2020 file system carries
+/// `$STANDARD_INFORMATION` times from 2015 and 2016 (copied from the
+/// backup, MFT-change time included), older than anything of the 2017 file
+/// system behind it, while its `$FILE_NAME` times are from 2020. By
+/// MFT-change times the 2020 records would be the older ones: no
+/// changepoint at 512, every contradiction unexplained, one instance. By
+/// record times the cut at 512 is kept exactly as in [`two_generations`]
+/// and the 2020 file system is `main`. After the accidental 2023 format,
+/// three files from the same backup were copied onto the new volume and
+/// deleted again: their records are `post_format` (C3) although their
+/// MFT-change times are from 2015.
+pub fn restored_from_backup(seed: u64) -> Built {
+    let mut disk = Disk::new("restored_from_backup", seed, 128 * MIB);
+    disk.describe(
+        "Like two_generations, but the 2020 file system was filled from a backup: old $STANDARD_INFORMATION times, new $FILE_NAME times.",
+        &["C3", "D2", "D3", "D8", "D9"],
+    );
+    let size = 128 * MIB;
+    let mut ids = Vec::new();
+    for (i, (files, capacity, year)) in [(650, 1024, 2017), (130, 512, 2020)]
+        .into_iter()
+        .enumerate()
+    {
+        let label = format!("gen{}", i + 1);
+        let id = disk.format(
+            VolumeParams::new(0, size)
+                .label(&label)
+                .volume_name(&label)
+                .formatted_at(time::ymd(year, 5, 17))
+                .mft_capacity(capacity),
+        );
+        populate(
+            disk.volume(id),
+            &TreeSpec {
+                files,
+                name_shift: 7 * i,
+                ..TreeSpec::default()
+            },
+        );
+        if year == 2020 {
+            restore_times(disk.volume(id), time::ymd(2015, 3, 1));
+        }
+        disk.render(id);
+        ids.push(id);
+    }
+    let current = disk.format(
+        VolumeParams::new(0, size)
+            .label("current")
+            .volume_name("current")
+            .formatted_at(time::ymd(2023, 5, 17))
+            .mft_capacity(256),
+    );
+    let v = disk.volume(current);
+    let root = v.root();
+    for i in 0..3u64 {
+        let file = v.add_file(
+            root,
+            format!("restored-{i}.dat").as_str(),
+            FileSpec::tagged(derive(seed, "restored") + i, 6000 + 1000 * i),
+        );
+        let t = time::ymd(2015, 2, 1) + i * time::HOUR;
+        v.set_times(file, Times::all(t));
+        v.delete(file);
+    }
+    disk.render(current);
+    disk.expect_kind(ids[0], InstanceKind::Older);
+    disk.expect_kind(ids[1], InstanceKind::Main);
     disk.finish()
 }
 

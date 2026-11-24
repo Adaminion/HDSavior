@@ -812,6 +812,7 @@ impl Session {
                     block_len,
                     block_crc,
                     sequence,
+                    version: file::FORMAT_VERSION,
                 },
             ));
         }
@@ -1000,7 +1001,8 @@ impl Session {
     /// Continues writing to the session file at `path`: the file this
     /// session was loaded from or last written to, with the checkpoint it
     /// was left at (checked). Used to resume a loaded session. The guard
-    /// runs first.
+    /// runs first. A file of an older format version is first rewritten in
+    /// the current one, as [`save_as`](Self::save_as) does.
     pub fn attach_file(
         &mut self,
         path: &Path,
@@ -1027,6 +1029,14 @@ impl Session {
                 "{} is not the session file this session was loaded from or last saved to",
                 target.display()
             )));
+        }
+        if origin.version < file::FORMAT_VERSION {
+            // A file of an older format: blocks of the current format cannot
+            // be appended to it. Rewrite it in the current format (a
+            // compacted copy that replaces it) and go on in that.
+            drop(file);
+            self.save_as(path, guard)?;
+            return Ok(());
         }
         self.writer = Some(Writer {
             _dir: dir,

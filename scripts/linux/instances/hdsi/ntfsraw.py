@@ -170,7 +170,7 @@ def apply_fixups(raw, size):
 # --------------------------------------------------------------------------- FILE record
 
 class FileName:
-    __slots__ = ('parent', 'pseq', 'ns', 'flags', 'attr_id', 'name', 'ctime', 'chtime')
+    __slots__ = ('parent', 'pseq', 'ns', 'flags', 'attr_id', 'name', 'ctime', 'chtime', 'tmax')
 
     def __repr__(self):
         return 'FN(%r <- %d.%d ns%d)' % (self.name, self.parent, self.pseq, self.ns)
@@ -183,8 +183,10 @@ class DataExt:
 
 
 class IndexEntry:
-    __slots__ = ('child', 'cseq', 'parent', 'pseq', 'ns', 'name', 'chtime', 'is_dir',
+    __slots__ = ('child', 'cseq', 'parent', 'pseq', 'ns', 'name', 'chtime', 'etime', 'is_dir',
                  'src_off', 'src_lsn', 'src_kind', 'block', 'current')
+    # chtime: the MFT-change time of the $FILE_NAME copy; etime: the entry time (ALGORITHMS.md
+    # vocabulary), the latest of its four times
 
 
 class Record:
@@ -207,7 +209,17 @@ class Record:
 
     @property
     def chtime(self):
+        """The raw $STANDARD_INFORMATION MFT-change time (the rules' time before 'record time')."""
         return self.si[2] if self.si else None
+
+    @property
+    def rtime(self):
+        """Record time (ALGORITHMS.md vocabulary): the latest of the $SI MFT-change time and the four
+        times of every $FILE_NAME; None when the record has neither."""
+        ts = [fn.tmax for fn in self.names]
+        if self.si:
+            ts.append(self.si[2])
+        return max(ts) if ts else None
 
     def best_name(self):
         """E4 namespace preference (Win32 or Win32+DOS, then POSIX, then DOS), lowest attribute id."""
@@ -234,6 +246,7 @@ def _parse_file_name(c):
     fn.pseq = pref >> 48
     fn.ctime = struct.unpack_from('<Q', c, 8)[0]
     fn.chtime = struct.unpack_from('<Q', c, 0x18)[0]
+    fn.tmax = max(struct.unpack_from('<QQQQ', c, 8))
     fn.flags = struct.unpack_from('<I', c, 0x38)[0]
     nl = c[0x40]
     fn.ns = c[0x41]
@@ -264,6 +277,7 @@ def parse_index_entries(b, start, end, src_off, src_lsn, src_kind):
                 e.ns = fn.ns
                 e.name = fn.name
                 e.chtime = fn.chtime
+                e.etime = fn.tmax
                 e.is_dir = bool(fn.flags & 0x10000000)
                 e.src_off = src_off
                 e.src_lsn = src_lsn

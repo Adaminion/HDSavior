@@ -797,6 +797,86 @@ fn generations_are_separable_exactly_when_the_scenario_says_so() {
         }
     });
 
+    each("restored_from_backup", |built| {
+        let m = &built.manifest;
+        let kinds: Vec<_> = m
+            .instances
+            .iter()
+            .map(|i| (i.label.as_str(), i.expected_kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("gen1", Some(InstanceKind::Older)),
+                ("gen2", Some(InstanceKind::Main)),
+                ("current", None)
+            ]
+        );
+        let (main, older) = (catalog(m, "gen2"), catalog(m, "gen1"));
+        assert_eq!(
+            (main.kind, older.kind),
+            (InstanceKind::Main, InstanceKind::Older)
+        );
+        // The trap: every intact in-use 2020 user record has a
+        // $STANDARD_INFORMATION MFT-change time older than every 2017 one,
+        // and $FILE_NAME times newer than all of them.
+        let si = |r: &RecordFact| r.standard_information.map(|s| s.0[2]);
+        let user = |r: &RecordFact| r.slot >= 38 && r.flags & 1 == 1;
+        let gen1 = intact_records(m, "gen1");
+        let gen2 = intact_records(m, "gen2");
+        let newest_2017 = gen1
+            .iter()
+            .filter(|r| user(r))
+            .filter_map(|r| si(r))
+            .max()
+            .unwrap();
+        let restored: Vec<&&RecordFact> = gen2
+            .iter()
+            .filter(|r| user(r))
+            .filter(|r| r.standard_information.is_some() && !r.names.is_empty())
+            .collect();
+        assert!(restored.len() >= 64, "{}", restored.len());
+        for r in &restored {
+            assert!(si(r).unwrap() < newest_2017, "slot {}", r.slot);
+            let fn_newest = r.names.iter().flat_map(|n| n.times).max().unwrap();
+            assert!(fn_newest > newest_2017, "slot {}", r.slot);
+        }
+        // D2 by record times: the cut at 512, as in two_generations.
+        let f = anchor_fragment(m);
+        check_d2(m, f);
+        assert_eq!(f.cuts.iter().map(|c| c.position).collect::<Vec<_>>(), [512]);
+        assert!(
+            f.contradictions.len() >= 10
+                && f.contradictions.iter().all(|c| c.explained_by == Some(512))
+        );
+        assert_eq!(f.segment_instances, [Some(main.id), Some(older.id)]);
+        assert_eq!(warning(m, "mixed_generations"), Some(false));
+        for e in m.entries_of("gen2").filter(|e| shown(e)) {
+            assert_eq!(instance_of(m, e).id, main.id);
+            must_not(e, Flag::OlderGeneration);
+        }
+        // C3: the files copied onto the new volume and deleted again are
+        // post_format, although their MFT-change times are from 2015.
+        let current = m.instance("current").id;
+        let copies: Vec<&RecordFact> = m
+            .records
+            .iter()
+            .filter(|r| {
+                r.instance == current && r.names.iter().any(|n| n.name.starts_with("restored-"))
+            })
+            .collect();
+        assert_eq!(copies.len(), 3);
+        for r in copies {
+            assert!(si(r).unwrap() < hds_testkit::time::ymd(2016, 1, 1));
+            assert_eq!(
+                r.expect.class,
+                Some(RecordClass::PostFormat),
+                "slot {}",
+                r.slot
+            );
+        }
+    });
+
     each("generations_not_separable", |built| {
         let m = &built.manifest;
         let f = anchor_fragment(m);

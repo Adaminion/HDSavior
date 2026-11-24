@@ -201,7 +201,7 @@ impl LiveIndex {
                     .iter()
                     .find(|v| v.volume_range().contains(&src))
                     .map_or(min_ft, |v| v.format_time);
-                if from_current || e.mft_changed >= ft {
+                if from_current || e.time >= ft {
                     current_entries.set(id.index());
                 }
             }
@@ -299,7 +299,7 @@ fn classify_volume(
             }
         }
     }
-    // Pass 1: in use per the bitmap, or decided by the change time.
+    // Pass 1: in use per the bitmap, or decided by the record time.
     let mut undecided: Vec<(RecordId, u64)> = Vec::new();
     for &(id, n) in &slotted {
         let Some(rec) = store.record(id) else {
@@ -308,7 +308,13 @@ fn classify_volume(
         let class = if cv.slot_in_use(n) {
             Some(RecordClass::Live)
         } else {
-            match rec.mft_changed() {
+            // C3 asks for a $STANDARD_INFORMATION and compares the record
+            // time: a file copied in after the format keeps the source's
+            // MFT-change time, but its $FILE_NAME times are new.
+            let time = rec
+                .has_standard_information()
+                .then(|| rec.record_time().unwrap_or(0));
+            match time {
                 Some(t) if t >= cv.format_time => Some(RecordClass::PostFormat),
                 Some(_) => Some(RecordClass::Old),
                 None if rec.is_in_use() => Some(RecordClass::Old),

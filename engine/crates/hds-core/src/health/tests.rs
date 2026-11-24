@@ -319,6 +319,34 @@ fn g2_overlap_conflicts() {
 }
 
 #[test]
+fn g2_the_later_record_time_wins_for_a_restored_file() {
+    // Both in use, both of main, sharing cluster 3400. "restored.bin" was
+    // copied from a backup after "plain.bin" was written: its $SI
+    // MFT-change time (day 5) is older, its $FILE_NAME times (day 20) are
+    // newer. The record time decides: the copy wins.
+    let mut lab = base_lab(32, 24);
+    lab.rec(
+        ORIGIN,
+        &file(110, 1, ROOT, "plain.bin", t(10), Some((3400, 1))),
+    );
+    lab.rec(
+        ORIGIN,
+        &copied_file(111, 1, ROOT, "restored.bin", t(5), t(20), Some((3400, 1))),
+    );
+    let run = lab.run(None);
+    let store = run.store();
+    let cat = catalog(&run);
+    let f = |p: &str| cat.flags(at(&cat, store, p));
+    assert!(
+        f("plain.bin").contains(Flag::Overwritten),
+        "{:?}",
+        f("plain.bin")
+    );
+    assert!(f("restored.bin").contains(Flag::Overlap));
+    assert!(!f("restored.bin").contains(Flag::Overwritten));
+}
+
+#[test]
 fn g1_older_generation_files() {
     let mut lab = base_lab(32, 30);
     // A file system from before: its own fragment, older times, text

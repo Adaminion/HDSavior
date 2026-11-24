@@ -14,7 +14,7 @@ use crate::ondisk::FileRef;
 
 use super::catalog::{Catalog, Inputs};
 use super::intersects;
-use super::records::{side, Side};
+use super::records::{self, side, Side};
 
 /// E9 and E5 for a record of class `Old`: hidden by its number, or because
 /// it lives below `$Extend`. `None`: the number a scanner needs is missing.
@@ -122,7 +122,8 @@ fn overlap_conflicts(inputs: &Inputs, catalog: &Catalog, out: &[Expect]) -> Vec<
             kind,
             marked: inputs.analysis.marked(base),
             in_use: !e.deleted,
-            time: e.times.mft_changed,
+            // G2: the record time of the base record
+            time: records::record_time(&m.records[base]).unwrap_or(0),
             lsn: e.lsn,
         });
         for x in &e.extents {
@@ -315,7 +316,7 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
 
     let mut offers: HashMap<Key, Vec<Offer>> = HashMap::new();
     let mut offer = |c: u32, lsn: u64, e: &crate::facts::IndexEntryFact, source: u64| {
-        let t = e.key.times[2];
+        let t = records::entry_time(&e.key.times);
         if e.key.flags & FN_DIRECTORY == 0
             || current_data(t)
             || !on_side(c, t)

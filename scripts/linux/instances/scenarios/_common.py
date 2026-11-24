@@ -85,3 +85,25 @@ def rewrite_history(sc, vol, t0, rnd, cnt, a=700, b=1500):
             e = vol.manifest.pop(base[:0] + tmp.rsplit('/', 1)[1])
             vol.manifest[base] = e
             e['path'] = rel
+
+
+def restored_generation(sc, vol, t0, nfiles, src_lo, src_hi, rnd, cnt, avg_kib=6, later=300, churn=0.05,
+                        tops=('Photos', 'Docs', 'Music', 'Work')):
+    """A file system filled from a backup at t0 (robocopy-style: every restored record keeps the
+    source's $SI times, last written between src_lo and src_hi; $FILE_NAME times are t0), then used:
+    `later` new files 60 days on, churn of `churn` 200 days on.  Returns (dirs, files)."""
+    dirs, files = [], []
+    with sc.mount(vol, t0) as w:
+        per = max(1, nfiles // len(tops))
+        for top in tops:
+            d, f = pop.tree(w, 'Restore' + top, per, rnd, cnt, avg_kib=avg_kib)
+            dirs += d
+            files += f
+    sc.backdate_si(vol, src_lo, src_hi, rnd)
+    if later:
+        with sc.mount(vol, t0 + 86400 * 60) as w:
+            files += pop.add_files(w, dirs, later, rnd, cnt, avg_kib=avg_kib)
+    if churn:
+        with sc.mount(vol, t0 + 86400 * 200) as w:
+            pop.churn(w, files, dirs, churn, rnd, cnt, avg_kib=avg_kib)
+    return dirs, files

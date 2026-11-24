@@ -8,7 +8,7 @@ use hds_io::{read_unaligned, AlignedBuf, RangedSource, ReadOutcome};
 use hds_ntfs::{
     attr_type, fnv1a64, is_boot_sector_candidate, parse_boot_sector, parse_file_record,
     parse_index_block, probe_file_record, probe_index_block, AttrBody, AttributeList, FileName,
-    FileRecord, FixupStatus, Utf16Name, FILE_MAGIC, I30, INDX_MAGIC, MAX_INDEX_BLOCK_SIZE,
+    FileRecord, FixupStatus, Times, Utf16Name, FILE_MAGIC, I30, INDX_MAGIC, MAX_INDEX_BLOCK_SIZE,
     MAX_RECORD_SIZE, SECTOR_SIZE, WOF_COMPRESSED_DATA,
 };
 
@@ -325,6 +325,11 @@ fn encode_name(name: &Utf16Name<'_>, out: &mut Vec<u8>) -> bool {
     narrow
 }
 
+/// The latest of four times.
+fn latest_time(t: &Times) -> u64 {
+    t.created.max(t.modified).max(t.mft_changed).max(t.accessed)
+}
+
 /// An index entry record for `file_name`; its name is appended to `names`
 /// and `name_off` is left at 0 (the store sets it).
 fn entry_rec(
@@ -339,7 +344,7 @@ fn entry_rec(
     IndexEntryRec {
         child,
         parent: file_name.parent.raw(),
-        mft_changed: file_name.times.mft_changed,
+        time: latest_time(&file_name.times),
         source_offset,
         source_lsn,
         name_off: 0,
@@ -367,6 +372,7 @@ fn describe_record(
     let header = record.header();
     let mut flags = 0_u16;
     let mut si_times = [0_u64; 4];
+    let mut fn_time = 0_u64;
     let mut si_flags = 0_u32;
     let mut reparse_tag = 0_u32;
     if header.record_number.is_some() {
@@ -424,7 +430,10 @@ fn describe_record(
                 }
             }
             attr_type::FILE_NAME => match attr.file_name() {
-                Some(name) => aux.push_name(&name, attr.id),
+                Some(name) => {
+                    fn_time = fn_time.max(latest_time(&name.times));
+                    aux.push_name(&name, attr.id);
+                }
                 None => flags |= bits::NAME_MALFORMED,
             },
             attr_type::DATA => {
@@ -496,6 +505,7 @@ fn describe_record(
         hash,
         base: header.base.raw(),
         si_times,
+        fn_time,
         aux_off: 0,
         si_flags,
         number: header.record_number.unwrap_or(0),

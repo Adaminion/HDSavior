@@ -78,6 +78,7 @@ catalog![
     accidents::two_generations,
     accidents::three_generations,
     accidents::generations_not_separable,
+    accidents::restored_from_backup,
     accidents::embedded_volume,
     accidents::embedded_volume_fragmented,
     accidents::old_volume_larger_than_range,

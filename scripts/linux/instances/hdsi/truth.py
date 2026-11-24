@@ -244,6 +244,7 @@ def make_truth(build_dir, scan_spec, scan_result):
             e = nr.IndexEntry()
             e.child, e.cseq, e.parent, e.pseq, e.ns, e.name = r.num, r.seq, fn.parent, fn.pseq, fn.ns, fn.name
             e.src_off, e.src_lsn, e.src_kind, e.chtime, e.block, e.is_dir = r.off, r.lsn, 'stray', fn.chtime, None, True
+            e.etime = fn.tmax
             entries[(lab['volume'], r.num, r.seq)].append(e)
 
     # ------------------------------------------------------------------ placement

@@ -41,9 +41,9 @@ pub struct InstanceSummary {
     pub lost_dirs: u64,
     /// Bytes of the non-deleted files.
     pub bytes: u64,
-    /// Oldest MFT-change time, Unix ms.
+    /// Oldest record time, Unix ms.
     pub time_from: Option<i64>,
-    /// Newest MFT-change time, Unix ms.
+    /// Newest record time, Unix ms.
     pub time_to: Option<i64>,
     /// Display path of the containing file.
     pub embedded_in: Option<String>,

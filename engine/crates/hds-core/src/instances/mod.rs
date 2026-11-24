@@ -34,7 +34,7 @@
 //!   carry are not counted (a bound against crafted input). Merging keeps
 //!   the id of the larger instance; ties between equal evidence go to the
 //!   lower instance ids.
-//! * D7: the container's time is compared with the oldest change time of
+//! * D7: the container's record time is compared with the oldest record time of
 //!   the instance's records inside that container, as written.
 //! * D8 (2), (3): ties go to the instance with more records.
 //! * Labels: `[Older file system]`, `[Older file system 2]`, ...;
@@ -118,9 +118,9 @@ pub struct Cut {
     /// The record number `p`: records numbered `p` or above are on the
     /// older side.
     pub at: u32,
-    /// `B_c`: the newest timed change time of the segment above.
+    /// `B_c`: the newest timed record time of the segment above.
     pub older_newest: Option<u64>,
-    /// `A_c`: the oldest timed change time of the segment below that is
+    /// `A_c`: the oldest timed record time of the segment below that is
     /// newer than `B_c`.
     pub newer_oldest: Option<u64>,
     /// The segment below the cut (newer side).
@@ -203,7 +203,7 @@ pub struct Instance {
     pub records: Vec<(u32, RecordId)>,
     /// Its segments (empty for strays).
     pub segments: Vec<SegmentId>,
-    /// Oldest and newest timed MFT-change time of its records.
+    /// Oldest and newest timed record time of its records.
     pub times: Option<(u64, u64)>,
     /// Indices into [`Layout::live_volumes`] of the current volumes whose
     /// `$MFT` origin it holds (D8 anchor).
@@ -1003,7 +1003,7 @@ impl Layout {
         if !at_start.is_empty() {
             return pick(&at_start);
         }
-        // (3) the newest change time.
+        // (3) the newest record time.
         let timed: Vec<usize> = pickable
             .iter()
             .copied()
