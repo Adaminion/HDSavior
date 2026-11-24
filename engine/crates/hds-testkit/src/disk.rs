@@ -37,8 +37,9 @@ use crate::content::ContentSpec;
 use crate::facts::{ArtifactState, BootFact, IndexBlockFact, RecordFact, RecordRole};
 use crate::image::Image;
 use crate::manifest::{
-    Entry, EntryKind, EntryName, EntryTimes, Expect, Extent, Flag, Geometry, Instance, InstanceKind, InstanceRole,
-    Manifest, MftExtentFact, PartitionFact, Presence, RecordState, Truth,
+    Entry, EntryKind, EntryName, EntryTimes, Expect, Extent, Flag, Geometry, Instance,
+    InstanceKind, InstanceRole, Manifest, MftExtentFact, PartitionFact, Presence, RecordState,
+    Truth,
 };
 use crate::ondisk::attr::reparse_tag;
 use crate::ondisk::FileRef;
@@ -86,7 +87,9 @@ impl RenderSink for Sink<'_> {
 
     fn index_block(&mut self, bytes: Vec<u8>, fact: IndexBlockFact) {
         self.image.write_at(fact.offset, &bytes);
-        self.registry.index_blocks.insert(fact.offset, (bytes, fact));
+        self.registry
+            .index_blocks
+            .insert(fact.offset, (bytes, fact));
     }
 
     fn boot_sector(&mut self, bytes: Vec<u8>, fact: BootFact) {
@@ -181,12 +184,18 @@ impl Disk {
             params.label
         );
         assert!(
-            self.volumes.iter().all(|v| v.volume.params().label != params.label),
+            self.volumes
+                .iter()
+                .all(|v| v.volume.params().label != params.label),
             "two volumes are labelled {:?}",
             params.label
         );
         let seed = derive(self.seed, &params.label);
-        self.volumes.push(VolumeState { volume: Volume::format(params, seed), role: None, kind: None });
+        self.volumes.push(VolumeState {
+            volume: Volume::format(params, seed),
+            role: None,
+            kind: None,
+        });
         VolumeId(self.volumes.len() - 1)
     }
 
@@ -206,7 +215,9 @@ impl Disk {
     pub fn reformat_params(&self, old: VolumeId) -> VolumeParams {
         let v = &self.volumes[old.0].volume;
         let p = v.params();
-        let mut params = VolumeParams::new(p.offset, p.partition_bytes()).label("new").volume_name("New Volume");
+        let mut params = VolumeParams::new(p.offset, p.partition_bytes())
+            .label("new")
+            .volume_name("New Volume");
         params.bytes_per_sector = p.bytes_per_sector;
         params.partition_sectors = p.partition_sectors;
         params.cluster_size = p.cluster_size;
@@ -221,7 +232,12 @@ impl Disk {
     /// Writes a volume into the image as its model describes it now. May be
     /// called again after further changes: everything is rewritten.
     pub fn render(&mut self, id: VolumeId) {
-        let Disk { image, registry, volumes, .. } = self;
+        let Disk {
+            image,
+            registry,
+            volumes,
+            ..
+        } = self;
         let mut sink = Sink { image, registry };
         volumes[id.0].volume.render(id.0 as u32, &mut sink);
     }
@@ -272,7 +288,9 @@ impl Disk {
         for (bytes, mut fact) in blocks {
             fact.offset = fact.offset - src + dst;
             fact.stale_copy = true;
-            self.registry.index_blocks.insert(fact.offset, (bytes, fact));
+            self.registry
+                .index_blocks
+                .insert(fact.offset, (bytes, fact));
         }
         let boots: Vec<(Vec<u8>, BootFact)> = self
             .registry
@@ -298,7 +316,9 @@ impl Disk {
         model: &crate::ondisk::record::RecordModel,
         role: RecordRole,
     ) {
-        let bytes = model.encode().unwrap_or_else(|e| panic!("placed record: {e}"));
+        let bytes = model
+            .encode()
+            .unwrap_or_else(|e| panic!("placed record: {e}"));
         let mut fact = crate::facts::record_fact(model, &bytes);
         fact.offset = offset;
         fact.instance = volume.0 as u32;
@@ -322,7 +342,12 @@ impl Disk {
 
     /// Sets the session range tests should scan (default: the whole disk).
     pub fn set_scan_range(&mut self, start: u64, end: u64) {
-        assert!(start < end && end <= self.image.len() && start.is_multiple_of(512) && end.is_multiple_of(512));
+        assert!(
+            start < end
+                && end <= self.image.len()
+                && start.is_multiple_of(512)
+                && end.is_multiple_of(512)
+        );
         self.scan_range = Some((start, end));
     }
 
@@ -359,7 +384,11 @@ impl Disk {
         spec.content = ContentSpec::blob(bytes);
         spec.storage = crate::volume::spec::StorageSpec::NonResident;
         let node = self.volumes[volume.0].volume.add_file(parent, name, spec);
-        self.embedded.push(Embedded { host_volume: volume.0, host_node: node, inner: Arc::new(inner) });
+        self.embedded.push(Embedded {
+            host_volume: volume.0,
+            host_node: node,
+            inner: Arc::new(inner),
+        });
         node
     }
 
@@ -368,9 +397,16 @@ impl Disk {
     /// the rules leave an instance kind open that the scenario did not state
     /// with [`Disk::expect_kind`], or when a stated kind contradicts them.
     pub fn finish(self) -> Built {
-        let overrides: BTreeMap<u32, InstanceKind> =
-            self.volumes.iter().enumerate().filter_map(|(i, s)| Some((i as u32, s.kind?))).collect();
-        let Built { image, mut manifest } = self.finish_local();
+        let overrides: BTreeMap<u32, InstanceKind> = self
+            .volumes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| Some((i as u32, s.kind?)))
+            .collect();
+        let Built {
+            image,
+            mut manifest,
+        } = self.finish_local();
         let undecided = crate::expect::derive(&mut manifest, &image, &overrides);
         assert!(
             undecided.is_empty(),
@@ -448,7 +484,12 @@ impl Disk {
         // or at a partition start of the table, and its record 0 is where
         // that boot sector says.
         let starts: BTreeSet<u64> = std::iter::once(range.0)
-            .chain(self.partitions.iter().map(|p| p.offset).filter(|&o| o >= range.0 && o < range.1))
+            .chain(
+                self.partitions
+                    .iter()
+                    .map(|p| p.offset)
+                    .filter(|&o| o >= range.0 && o < range.1),
+            )
             .collect();
         let roles: Vec<InstanceRole> = (0..volume_count)
             .map(|vi| {
@@ -457,7 +498,9 @@ impl Disk {
                 }
                 let v = &self.volumes[vi].volume;
                 let offset = v.offset();
-                let boot_here = boot_sectors.iter().any(|b| b.offset == offset && !b.backup && b.instance == vi as u32);
+                let boot_here = boot_sectors
+                    .iter()
+                    .any(|b| b.offset == offset && !b.backup && b.instance == vi as u32);
                 let record0 = v.record_offset(0);
                 let mft_here = records.iter().any(|r| {
                     r.offset == record0
@@ -488,7 +531,9 @@ impl Disk {
         let mut generation = vec![0u32; volume_count];
         for i in (0..volume_count).rev() {
             // the next volume formatted over this one decides
-            if let Some(j) = (i + 1..volume_count).find(|&j| overlaps(&self.volumes[i].volume, &self.volumes[j].volume)) {
+            if let Some(j) = (i + 1..volume_count)
+                .find(|&j| overlaps(&self.volumes[i].volume, &self.volumes[j].volume))
+            {
                 generation[i] = generation[j] + 1;
             }
         }
@@ -497,7 +542,12 @@ impl Disk {
             let v = &state.volume;
             let rendered = v.rendered.as_ref().expect("checked");
             let role = roles[i];
-            let times: Vec<u64> = v.nodes.iter().filter(|n| !n.system).map(|n| n.times[2]).collect();
+            let times: Vec<u64> = v
+                .nodes
+                .iter()
+                .filter(|n| !n.system)
+                .map(|n| n.times[2])
+                .collect();
             let cs = v.cluster_size();
             instances.push(Instance {
                 id: i as u32,
@@ -511,11 +561,19 @@ impl Disk {
                 embedded_in: None,
                 offset_in_host: None,
                 live_allocated: if role == InstanceRole::Current {
-                    rendered.used_ranges.iter().map(|&(lcn, n)| (v.lcn_to_offset(lcn), n * cs)).collect()
+                    rendered
+                        .used_ranges
+                        .iter()
+                        .map(|&(lcn, n)| (v.lcn_to_offset(lcn), n * cs))
+                        .collect()
                 } else {
                     Vec::new()
                 },
-                live_slots: if role == InstanceRole::Current { ranges(&rendered.slots_in_use) } else { Vec::new() },
+                live_slots: if role == InstanceRole::Current {
+                    ranges(&rendered.slots_in_use)
+                } else {
+                    Vec::new()
+                },
                 time_range: times.iter().min().copied().zip(times.iter().max().copied()),
             });
         }
@@ -534,7 +592,8 @@ impl Disk {
         // ---- embedded file systems ---------------------------------------
         for embedded in &self.embedded {
             let host = &self.volumes[embedded.host_volume].volume;
-            let host_entry = entry_ids[embedded.host_volume][embedded.host_node.0].expect("the host file has a name");
+            let host_entry = entry_ids[embedded.host_volume][embedded.host_node.0]
+                .expect("the host file has a name");
             let map = HostMap::new(host, embedded.host_node);
             adopt_embedded(
                 &embedded.inner,
@@ -566,7 +625,10 @@ impl Disk {
         manifest.index_blocks = index_blocks;
         manifest.boot_sectors = boot_sectors;
         manifest.notes = self.notes;
-        Built { image: self.image, manifest }
+        Built {
+            image: self.image,
+            manifest,
+        }
     }
 }
 
@@ -629,7 +691,12 @@ pub(crate) fn merge_ranges(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
 
 /// State of a structure in the finished image: `None` when its signature is
 /// gone.
-fn artifact_state(image: &Image, offset: u64, bytes: &[u8], magic: &[u8; 4]) -> Option<ArtifactState> {
+fn artifact_state(
+    image: &Image,
+    offset: u64,
+    bytes: &[u8],
+    magic: &[u8; 4],
+) -> Option<ArtifactState> {
     let now = image.read_vec(offset, bytes.len());
     if now == bytes {
         Some(ArtifactState::Intact)
@@ -640,7 +707,15 @@ fn artifact_state(image: &Image, offset: u64, bytes: &[u8], magic: &[u8; 4]) -> 
     }
 }
 
-fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], image: &Image, range: (u64, u64)) -> Entry {
+fn build_entry(
+    v: &Volume,
+    vi: usize,
+    ni: usize,
+    id: u32,
+    ids: &[Option<u32>],
+    image: &Image,
+    range: (u64, u64),
+) -> Entry {
     let node = &v.nodes[ni];
     let rendered = v.rendered.as_ref().expect("checked");
     let cs = v.cluster_size();
@@ -651,7 +726,11 @@ fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], i
         Some(image.read_vec(r.offset, r.bytes.len()) == r.bytes)
     };
 
-    let base_intact = if node.superseded { None } else { rendered_intact(node.record) };
+    let base_intact = if node.superseded {
+        None
+    } else {
+        rendered_intact(node.record)
+    };
     let record_state = match base_intact {
         None => RecordState::Reused,
         Some(true) => RecordState::Intact,
@@ -664,7 +743,13 @@ fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], i
         .map(|e| e.record)
         .collect();
     let names_holder = node.multi.as_ref().map_or(0, |m| m.names_in);
-    let holder_record = |holder: usize| if holder == 0 { node.record } else { node.extensions[holder - 1].record };
+    let holder_record = |holder: usize| {
+        if holder == 0 {
+            node.record
+        } else {
+            node.extensions[holder - 1].record
+        }
+    };
     // attribute ids as rendered; a record that was never written (its slot
     // was reused before the first render) has them in storage order
     let name_ids: Vec<u16> = rendered
@@ -681,7 +766,10 @@ fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], i
             name: String::from_utf16_lossy(&l.name),
             name_utf16: l.name.clone(),
             namespace: l.namespace,
-            parent: node.quirks.raw_parent.unwrap_or_else(|| v.parent_ref(&l.parent)),
+            parent: node
+                .quirks
+                .raw_parent
+                .unwrap_or_else(|| v.parent_ref(&l.parent)),
             holder_record: holder_record(names_holder),
             attr_id,
         })
@@ -710,9 +798,16 @@ fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], i
                 for run in runs {
                     let offset = run.lcn.map(|lcn| v.lcn_to_offset(lcn));
                     if let Some(o) = offset {
-                        data_in_range &= in_range(o, run.len * cs) && o + run.len * cs <= image.len();
+                        data_in_range &=
+                            in_range(o, run.len * cs) && o + run.len * cs <= image.len();
                     }
-                    extents.push(Extent { vcn, clusters: run.len, lcn: run.lcn, offset, bytes: run.len * cs });
+                    extents.push(Extent {
+                        vcn,
+                        clusters: run.len,
+                        lcn: run.lcn,
+                        offset,
+                        bytes: run.len * cs,
+                    });
                     vcn += run.len;
                 }
                 allocated_size = vcn * cs;
@@ -721,7 +816,12 @@ fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], i
                 let holder = node.multi.as_ref().map_or(0, |m| m.resident_data_in);
                 let slot = holder_record(holder);
                 if let Some(r) = rendered.records.get(&slot).filter(|r| r.node == Some(ni)) {
-                    let at = r.fact.data.iter().find(|d| d.name.is_empty()).and_then(|d| d.resident);
+                    let at = r
+                        .fact
+                        .data
+                        .iter()
+                        .find(|d| d.name.is_empty())
+                        .and_then(|d| d.resident);
                     resident_at = at.map(|(value_offset, len)| (r.offset, value_offset, len));
                 }
             }
@@ -735,7 +835,13 @@ fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], i
                         let holder = node.multi.as_ref().map_or(0, |m| m.resident_data_in);
                         rendered_intact(holder_record(holder)) == Some(true)
                     }
-                    Some(runs) => content_on_disk(image, v, runs, content, stream.initialized.min(stream.real_size)),
+                    Some(runs) => content_on_disk(
+                        image,
+                        v,
+                        runs,
+                        content,
+                        stream.initialized.min(stream.real_size),
+                    ),
                 })
             };
         }
@@ -749,7 +855,12 @@ fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], i
     let mut ancestors_intact = true;
     let mut at = node;
     for _ in 0..256 {
-        let Some(link) = at.names.iter().find(|l| l.namespace != 2).or(at.names.first()) else {
+        let Some(link) = at
+            .names
+            .iter()
+            .find(|l| l.namespace != 2)
+            .or(at.names.first())
+        else {
             break;
         };
         match link.parent {
@@ -764,7 +875,10 @@ fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], i
                         .records
                         .get(&parent.record)
                         .filter(|r| r.node == Some(parent_index))
-                        .is_some_and(|r| image.read_vec(r.offset, r.bytes.len()) == r.bytes && in_range(r.offset, rs));
+                        .is_some_and(|r| {
+                            image.read_vec(r.offset, r.bytes.len()) == r.bytes
+                                && in_range(r.offset, rs)
+                        });
                 if !intact {
                     ancestors_intact = false;
                     break;
@@ -783,7 +897,13 @@ fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], i
         let mut at = node;
         let mut ok = false;
         for _ in 0..256 {
-            match at.names.iter().find(|l| l.namespace != 2).or(at.names.first()).map(|l| l.parent) {
+            match at
+                .names
+                .iter()
+                .find(|l| l.namespace != 2)
+                .or(at.names.first())
+                .map(|l| l.parent)
+            {
                 Some(ParentRef::Node(p)) => {
                     if v.node(p).record == 5 {
                         ok = true;
@@ -820,30 +940,48 @@ fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], i
     // ---- expectations that follow from the entry alone -------------------
     // Presence, instance, path and the flags that need the whole image are
     // worked out by `crate::expect` when the manifest is finished.
-    let mut expect =
-        Expect { presence: Presence::Unspecified, instance: None, path: None, flags_set: Vec::new(), flags_clear: Vec::new() };
+    let mut expect = Expect {
+        presence: Presence::Unspecified,
+        instance: None,
+        path: None,
+        flags_set: Vec::new(),
+        flags_clear: Vec::new(),
+    };
     {
         let mut flag = |f: Flag, on: bool| if on { expect.set(f) } else { expect.clear(f) };
         flag(Flag::Deleted, !node.in_use);
         let torn = !node.quirks.torn_blocks.is_empty()
-            || node.quirks.torn_extension_blocks.iter().any(|(_, b)| !b.is_empty());
+            || node
+                .quirks
+                .torn_extension_blocks
+                .iter()
+                .any(|(_, b)| !b.is_empty());
         flag(Flag::TornRecord, torn);
         flag(Flag::BadSectors, false);
         if !node.is_dir {
             let tag = node.reparse.as_ref().map(|(t, _)| *t);
-            let wof_stream = node.streams.iter().any(|s| s.name == crate::ondisk::utf16("WofCompressedData"));
+            let wof_stream = node
+                .streams
+                .iter()
+                .any(|s| s.name == crate::ondisk::utf16("WofCompressedData"));
             let non_resident = data.is_some_and(|s| s.runs.is_some());
             let data_flags = data.map_or(0, |s| s.flags);
             flag(
                 Flag::Compressed,
-                (non_resident && data_flags & 0x00FF != 0) || tag == Some(reparse_tag::WOF) || wof_stream,
+                (non_resident && data_flags & 0x00FF != 0)
+                    || tag == Some(reparse_tag::WOF)
+                    || wof_stream,
             );
             flag(Flag::Encrypted, data_flags & 0x4000 != 0);
             flag(
                 Flag::Placeholder,
-                tag.is_some_and(|t| t & 0xFFFF_0FFF == reparse_tag::CLOUD || t == reparse_tag::DEDUP),
+                tag.is_some_and(|t| {
+                    t & 0xFFFF_0FFF == reparse_tag::CLOUD || t == reparse_tag::DEDUP
+                }),
             );
-            let hole = data.and_then(|s| s.runs.as_ref()).is_some_and(|r| r.iter().any(|x| x.lcn.is_none()));
+            let hole = data
+                .and_then(|s| s.runs.as_ref())
+                .is_some_and(|r| r.iter().any(|x| x.lcn.is_none()));
             flag(Flag::Sparse, hole || data_flags & 0x8000 != 0);
             flag(Flag::NoData, data.is_none() && node.multi.is_none());
             flag(Flag::OutOfBounds, !data_in_range);
@@ -856,8 +994,14 @@ fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], i
                 .filter(|(_, e)| lost_extensions.contains(&e.record))
                 .map(|(k, _)| k + 1)
                 .collect();
-            let pieces = node.multi.as_ref().map(|m| m.data.clone()).unwrap_or_default();
-            let lost_first = pieces.first().is_some_and(|p| lost_holders.contains(&p.holder));
+            let pieces = node
+                .multi
+                .as_ref()
+                .map(|m| m.data.clone())
+                .unwrap_or_default();
+            let lost_first = pieces
+                .first()
+                .is_some_and(|p| lost_holders.contains(&p.holder));
             let lost_any = pieces.iter().any(|p| lost_holders.contains(&p.holder));
             let list_without_data = data.is_none() && node.multi.is_some();
             flag(Flag::MissingFragments, lost_any || list_without_data);
@@ -868,7 +1012,11 @@ fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], i
     Entry {
         id,
         instance: vi as u32,
-        kind: if node.is_dir { EntryKind::Dir } else { EntryKind::File },
+        kind: if node.is_dir {
+            EntryKind::Dir
+        } else {
+            EntryKind::File
+        },
         system: node.system,
         path: components.join("/"),
         components,
@@ -890,7 +1038,12 @@ fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], i
         resident_at,
         extents,
         data_flags: data.map_or(0, |s| s.flags),
-        streams: node.streams.iter().filter(|s| !s.name.is_empty()).map(|s| String::from_utf16_lossy(&s.name)).collect(),
+        streams: node
+            .streams
+            .iter()
+            .filter(|s| !s.name.is_empty())
+            .map(|s| String::from_utf16_lossy(&s.name))
+            .collect(),
         reparse_tag: node.reparse.as_ref().map(|(t, _)| *t),
         file_attributes: node.file_attributes,
         times: EntryTimes {
@@ -936,7 +1089,9 @@ fn content_on_disk(
                     return false;
                 }
                 content.read_at(pos, &mut expected[..take]);
-                image.read_at(at, &mut actual[..take]).expect("range was checked");
+                image
+                    .read_at(at, &mut actual[..take])
+                    .expect("range was checked");
                 if expected[..take] != actual[..take] {
                     return false;
                 }
@@ -953,9 +1108,16 @@ fn content_on_disk(
     }
 }
 
-fn surviving_index_entries(entries: &mut [Entry], records: &[RecordFact], index_blocks: &[IndexBlockFact]) {
+fn surviving_index_entries(
+    entries: &mut [Entry],
+    records: &[RecordFact],
+    index_blocks: &[IndexBlockFact],
+) {
     let mut counts: BTreeMap<(u32, FileRef), u32> = BTreeMap::new();
-    for block in index_blocks.iter().filter(|b| b.state == ArtifactState::Intact) {
+    for block in index_blocks
+        .iter()
+        .filter(|b| b.state == ArtifactState::Intact)
+    {
         for e in &block.entries {
             *counts.entry((block.instance, e.child)).or_default() += 1;
         }
@@ -998,7 +1160,10 @@ impl HostMap {
         let mut pos = start;
         let end = start + len;
         while pos < end {
-            let &(file, abs, piece_len) = self.pieces.iter().find(|&&(f, _, l)| pos >= f && pos < f + l)?;
+            let &(file, abs, piece_len) = self
+                .pieces
+                .iter()
+                .find(|&&(f, _, l)| pos >= f && pos < f + l)?;
             let take = (file + piece_len - pos).min(end - pos);
             out.push((abs + (pos - file), take));
             pos += take;
@@ -1073,7 +1238,9 @@ fn adopt_embedded(
         e.parent = e.parent.map(|p| p + entry_base);
         let record_size = m.instances[entry.instance as usize].geometry.record_size as u64;
         let mut intact = entry.truth.record_intact;
-        e.record_offset = entry.record_offset.and_then(|o| map.map_contiguous(o, record_size));
+        e.record_offset = entry
+            .record_offset
+            .and_then(|o| map.map_contiguous(o, record_size));
         if let Some(o) = entry.record_offset {
             intact &= outer_equals_inner(image, &inner.image, map, o, record_size);
         }
@@ -1085,14 +1252,17 @@ fn adopt_embedded(
                 Some((n, map.map_contiguous(o, record_size)?))
             })
             .collect();
-        e.resident_at = entry.resident_at.and_then(|(o, v, l)| Some((map.map_contiguous(o, record_size)?, v, l)));
+        e.resident_at = entry
+            .resident_at
+            .and_then(|(o, v, l)| Some((map.map_contiguous(o, record_size)?, v, l)));
         let mut content_ok = true;
         let mut extents = Vec::new();
         for extent in &entry.extents {
             match extent.offset {
                 None => extents.push(extent.clone()),
                 Some(offset) => {
-                    content_ok &= outer_equals_inner(image, &inner.image, map, offset, extent.bytes);
+                    content_ok &=
+                        outer_equals_inner(image, &inner.image, map, offset, extent.bytes);
                     // an inner run that crosses a fragment boundary of the
                     // host file becomes several absolute pieces
                     let cluster = extent.bytes / extent.clusters.max(1);
@@ -1135,8 +1305,16 @@ fn adopt_embedded(
         if image.read_vec(first, 512) != inner.image.read_vec(offset, 512) {
             return None;
         }
-        let whole = map.map_contiguous(offset, len).is_some() && outer_equals_inner(image, &inner.image, map, offset, len);
-        Some((first, if whole { ArtifactState::Intact } else { ArtifactState::Damaged }))
+        let whole = map.map_contiguous(offset, len).is_some()
+            && outer_equals_inner(image, &inner.image, map, offset, len);
+        Some((
+            first,
+            if whole {
+                ArtifactState::Intact
+            } else {
+                ArtifactState::Damaged
+            },
+        ))
     };
     for record in &m.records {
         if let Some((offset, state)) = translate(record.offset, record.size as u64) {
@@ -1183,7 +1361,10 @@ mod tests {
 
     #[test]
     fn range_helpers() {
-        assert_eq!(merge_ranges(vec![(10, 5), (0, 4), (4, 2), (14, 10), (100, 0), (40, 1)]), [(0, 6), (10, 14), (40, 1)]);
+        assert_eq!(
+            merge_ranges(vec![(10, 5), (0, 4), (4, 2), (14, 10), (100, 0), (40, 1)]),
+            [(0, 6), (10, 14), (40, 1)]
+        );
         let set = [(0u64, 6u64), (10, 14), (40, 1)];
         assert!(intersects(&set, 5, 1));
         assert!(!intersects(&set, 6, 4));

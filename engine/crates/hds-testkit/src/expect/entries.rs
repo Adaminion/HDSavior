@@ -6,7 +6,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::facts::ArtifactState;
-use crate::manifest::{CatalogInstance, Entry, EntryKind, Expect, Flag, InstanceKind, Presence, RecordClass};
+use crate::manifest::{
+    CatalogInstance, Entry, EntryKind, Expect, Flag, InstanceKind, Presence, RecordClass,
+};
 use crate::ondisk::attr::FN_DIRECTORY;
 use crate::ondisk::FileRef;
 
@@ -81,9 +83,19 @@ struct Party {
 fn key(p: &Party, reading: usize) -> (u8, u8, u8, u64, u64) {
     let marked = p.marked == Some(true);
     match reading {
-        0 => (u8::from(!marked), 3 - rank(p.kind), u8::from(p.in_use), p.time, p.lsn),
+        0 => (
+            u8::from(!marked),
+            3 - rank(p.kind),
+            u8::from(p.in_use),
+            p.time,
+            p.lsn,
+        ),
         _ => {
-            let r = if marked { rank(InstanceKind::Older).max(rank(p.kind)) } else { rank(p.kind) };
+            let r = if marked {
+                rank(InstanceKind::Older).max(rank(p.kind))
+            } else {
+                rank(p.kind)
+            };
             (1, 3 - r, u8::from(p.in_use), p.time, p.lsn)
         }
     }
@@ -131,7 +143,9 @@ fn overlap_conflicts(inputs: &Inputs, catalog: &Catalog, out: &[Expect]) -> Vec<
         }
         active.push((end, k));
     }
-    let mut outcome: Vec<Outcome> = (0..m.entries.len()).map(|_| Some([(false, false); 2])).collect();
+    let mut outcome: Vec<Outcome> = (0..m.entries.len())
+        .map(|_| Some([(false, false); 2]))
+        .collect();
     for &(a, b) in &pairs {
         let (Some(pa), Some(pb)) = (parties[a], parties[b]) else {
             outcome[a] = None;
@@ -154,7 +168,11 @@ fn overlap_conflicts(inputs: &Inputs, catalog: &Catalog, out: &[Expect]) -> Vec<
                     }
                 }
                 order => {
-                    let (winner, loser) = if order == std::cmp::Ordering::Greater { (a, b) } else { (b, a) };
+                    let (winner, loser) = if order == std::cmp::Ordering::Greater {
+                        (a, b)
+                    } else {
+                        (b, a)
+                    };
                     if let Some(o) = outcome[loser].as_mut() {
                         o[reading].0 = true;
                     }
@@ -173,14 +191,20 @@ fn overlap_conflicts(inputs: &Inputs, catalog: &Catalog, out: &[Expect]) -> Vec<
 /// ALGORITHMS E4: among the names of the best namespace (Win32 or
 /// Win32+DOS, then POSIX, then DOS) one whose parent passes `survives`,
 /// then the lowest attribute id.
-pub(crate) fn best_name(names: &[NameChoice], survives: impl Fn(FileRef) -> bool) -> Option<(String, FileRef)> {
+pub(crate) fn best_name(
+    names: &[NameChoice],
+    survives: impl Fn(FileRef) -> bool,
+) -> Option<(String, FileRef)> {
     let rank = |namespace: u8| match namespace {
         1 | 3 => 0,
         0 => 1,
         _ => 2,
     };
     let best = names.iter().map(|n| rank(n.0)).min()?;
-    let chosen = names.iter().filter(|n| rank(n.0) == best).min_by_key(|n| (!survives(n.2), n.3))?;
+    let chosen = names
+        .iter()
+        .filter(|n| rank(n.0) == best)
+        .min_by_key(|n| (!survives(n.2), n.3))?;
     Some((chosen.1.clone(), chosen.2))
 }
 
@@ -207,12 +231,16 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
     let mut folders: HashMap<Key, usize> = HashMap::new();
     let mut uncertain_folders: BTreeSet<usize> = BTreeSet::new();
     for (k, e) in m.entries.iter().enumerate() {
-        let Some(c) = out[k].instance.filter(|&c| is_tree(c)) else { continue };
+        let Some(c) = out[k].instance.filter(|&c| is_tree(c)) else {
+            continue;
+        };
         if out[k].presence != Presence::Shown || e.kind != EntryKind::Dir {
             continue;
         }
         let base = inputs.base_record[k].expect("shown entries have a base record");
-        let Some(number) = inputs.analysis.numbers[base] else { continue };
+        let Some(number) = inputs.analysis.numbers[base] else {
+            continue;
+        };
         match inputs.analysis.marked(base) {
             Some(true) => continue, // E5: never a record marked by D2
             None => {
@@ -231,15 +259,20 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
     // that concern it with the side it is on
     let mut files_of: BTreeMap<u32, Vec<(u64, u64)>> = BTreeMap::new();
     for (k, e) in m.entries.iter().enumerate() {
-        if let (Some(c), Presence::Shown, EntryKind::File, false) = (out[k].instance, out[k].presence, e.kind, e.deleted) {
-            files_of
-                .entry(c)
-                .or_default()
-                .extend(e.extents.iter().filter_map(|x| x.offset.map(|o| (o, x.bytes))));
+        if let (Some(c), Presence::Shown, EntryKind::File, false) =
+            (out[k].instance, out[k].presence, e.kind, e.deleted)
+        {
+            files_of.entry(c).or_default().extend(
+                e.extents
+                    .iter()
+                    .filter_map(|x| x.offset.map(|o| (o, x.bytes))),
+            );
         }
     }
-    let files_of: BTreeMap<u32, Vec<(u64, u64)>> =
-        files_of.into_iter().map(|(c, r)| (c, crate::disk::merge_ranges(r))).collect();
+    let files_of: BTreeMap<u32, Vec<(u64, u64)>> = files_of
+        .into_iter()
+        .map(|(c, r)| (c, crate::disk::merge_ranges(r)))
+        .collect();
     let mut cuts_of: BTreeMap<u32, Vec<(crate::manifest::CutFact, bool)>> = BTreeMap::new();
     for (&(f, s), &c) in &catalog.of_segment {
         for (j, cut) in inputs.analysis.fragments[f].cuts.iter().enumerate() {
@@ -259,23 +292,35 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
             })
         })
     };
-    let inside_file = |c: u32, offset: u64| files_of.get(&c).is_some_and(|r| intersects(r, offset, 1));
+    let inside_file =
+        |c: u32, offset: u64| files_of.get(&c).is_some_and(|r| intersects(r, offset, 1));
     let format_min = inputs.current.iter().map(|c| c.format_time).min();
     let current_data = |t: u64| format_min.is_some_and(|f| t >= f);
     let live: Vec<(u64, u64)> = crate::disk::merge_ranges(
         inputs
             .current
             .iter()
-            .flat_map(|c| m.instances[c.instance as usize].live_allocated.iter().copied())
+            .flat_map(|c| {
+                m.instances[c.instance as usize]
+                    .live_allocated
+                    .iter()
+                    .copied()
+            })
             .collect(),
     );
-    let trees: Vec<u32> = (0..instances.len() as u32).filter(|&c| is_tree(c)).collect();
+    let trees: Vec<u32> = (0..instances.len() as u32)
+        .filter(|&c| is_tree(c))
+        .collect();
     let (range_start, range_end) = m.scan_range;
 
     let mut offers: HashMap<Key, Vec<Offer>> = HashMap::new();
     let mut offer = |c: u32, lsn: u64, e: &crate::facts::IndexEntryFact, source: u64| {
         let t = e.key.times[2];
-        if e.key.flags & FN_DIRECTORY == 0 || current_data(t) || !on_side(c, t) || inside_file(c, source) {
+        if e.key.flags & FN_DIRECTORY == 0
+            || current_data(t)
+            || !on_side(c, t)
+            || inside_file(c, source)
+        {
             return;
         }
         offers
@@ -283,12 +328,22 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
             .or_default()
             .push((lsn, e.key.namespace, e.key.name.clone(), e.key.parent));
     };
-    for b in m.index_blocks.iter().filter(|b| b.state == ArtifactState::Intact) {
-        if b.offset < range_start || b.offset + b.size as u64 > range_end || intersects(&live, b.offset, b.size as u64) {
+    for b in m
+        .index_blocks
+        .iter()
+        .filter(|b| b.state == ArtifactState::Intact)
+    {
+        if b.offset < range_start
+            || b.offset + b.size as u64 > range_end
+            || intersects(&live, b.offset, b.size as u64)
+        {
             continue;
         }
-        let owners: Vec<u32> =
-            trees.iter().copied().filter(|&c| folders.contains_key(&(c, b.owner.number, b.owner.seq))).collect();
+        let owners: Vec<u32> = trees
+            .iter()
+            .copied()
+            .filter(|&c| folders.contains_key(&(c, b.owner.number, b.owner.seq)))
+            .collect();
         let users: Vec<u32> = if !owners.is_empty() {
             owners
         } else if !present.contains(&b.owner.number) {
@@ -303,7 +358,9 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
         }
     }
     for (i, r) in m.records.iter().enumerate() {
-        let Some(c) = catalog.of_record[i].filter(|&c| is_tree(c)) else { continue };
+        let Some(c) = catalog.of_record[i].filter(|&c| is_tree(c)) else {
+            continue;
+        };
         if r.state != ArtifactState::Intact || r.offset < range_start || r.offset >= range_end {
             continue;
         }
@@ -314,13 +371,23 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
     // E6 (b): in-use directory records among the strays
     let mut copies: HashMap<(u64, u16), Option<(String, FileRef)>> = HashMap::new();
     for (i, r) in m.records.iter().enumerate() {
-        let Some(c) = catalog.of_record[i] else { continue };
+        let Some(c) = catalog.of_record[i] else {
+            continue;
+        };
         if is_tree(c) || r.flags & 3 != 3 {
             continue;
         }
-        let Some(number) = inputs.analysis.numbers[i] else { continue };
-        let names: Vec<NameChoice> = r.names.iter().map(|n| (n.namespace, n.name.clone(), n.parent, n.attr_id)).collect();
-        let Some(name) = best_name(&names, |_| true) else { continue };
+        let Some(number) = inputs.analysis.numbers[i] else {
+            continue;
+        };
+        let names: Vec<NameChoice> = r
+            .names
+            .iter()
+            .map(|n| (n.namespace, n.name.clone(), n.parent, n.attr_id))
+            .collect();
+        let Some(name) = best_name(&names, |_| true) else {
+            continue;
+        };
         copies
             .entry((number, r.sequence))
             .and_modify(|v| {
@@ -331,10 +398,15 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
             .or_insert(Some(name));
     }
 
-    let survives = |c: u32, parent: FileRef| parent.number == 5 || folders.contains_key(&(c, parent.number, parent.seq));
+    let survives = |c: u32, parent: FileRef| {
+        parent.number == 5 || folders.contains_key(&(c, parent.number, parent.seq))
+    };
     let own_name = |k: usize, c: u32| -> Option<(String, FileRef)> {
-        let names: Vec<NameChoice> =
-            m.entries[k].names.iter().map(|n| (n.namespace, n.name.clone(), n.parent, n.attr_id)).collect();
+        let names: Vec<NameChoice> = m.entries[k]
+            .names
+            .iter()
+            .map(|n| (n.namespace, n.name.clone(), n.parent, n.attr_id))
+            .collect();
         best_name(&names, |parent| survives(c, parent))
     };
     let lost_name = |key: Key| -> Result<Option<(String, FileRef)>, ()> {
@@ -342,10 +414,18 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
             let non_dos = list.iter().any(|o| o.1 != 2);
             let usable: Vec<&Offer> = list.iter().filter(|o| !non_dos || o.1 != 2).collect();
             let top = usable.iter().map(|o| o.0).max().expect("not empty");
-            let mut best: Vec<(&String, FileRef)> = usable.iter().filter(|o| o.0 == top).map(|o| (&o.2, o.3)).collect();
+            let mut best: Vec<(&String, FileRef)> = usable
+                .iter()
+                .filter(|o| o.0 == top)
+                .map(|o| (&o.2, o.3))
+                .collect();
             best.sort();
             best.dedup();
-            return if best.len() == 1 { Ok(Some((best[0].0.clone(), best[0].1))) } else { Err(()) };
+            return if best.len() == 1 {
+                Ok(Some((best[0].0.clone(), best[0].1)))
+            } else {
+                Err(())
+            };
         }
         match copies.get(&(key.1, key.2)) {
             Some(Some(v)) => Ok(Some(v.clone())),
@@ -424,7 +504,11 @@ fn paths(inputs: &Inputs, catalog: &Catalog, out: &mut [Expect]) {
                             return None;
                         }
                         path.push("[Lost folders]".to_string());
-                        path.push(if nameless.len() > 1 { format!("Folder #{number}.{seq}") } else { format!("Folder #{number}") });
+                        path.push(if nameless.len() > 1 {
+                            format!("Folder #{number}.{seq}")
+                        } else {
+                            format!("Folder #{number}")
+                        });
                     }
                 }
             }
@@ -456,7 +540,15 @@ pub(crate) fn expectations(inputs: &Inputs, catalog: &Catalog) -> Vec<Expect> {
         match kind {
             Some(kind) => {
                 let older = kind == InstanceKind::Older || marked == Some(true);
-                flag(x, Flag::OlderGeneration, if older { Some(true) } else { marked.map(|_| false) });
+                flag(
+                    x,
+                    Flag::OlderGeneration,
+                    if older {
+                        Some(true)
+                    } else {
+                        marked.map(|_| false)
+                    },
+                );
                 flag(x, Flag::Embedded, Some(kind == InstanceKind::Embedded));
                 flag(x, Flag::Stray, Some(kind == InstanceKind::Strays));
             }
@@ -473,13 +565,20 @@ pub(crate) fn expectations(inputs: &Inputs, catalog: &Catalog) -> Vec<Expect> {
         if x.presence != Presence::Shown || e.kind != EntryKind::File {
             continue;
         }
-        let written = e.extents.iter().any(|ext| ext.offset.is_some_and(|o| intersects(inputs.overwritten, o, ext.bytes)));
+        let written = e.extents.iter().any(|ext| {
+            ext.offset
+                .is_some_and(|o| intersects(inputs.overwritten, o, ext.bytes))
+        });
         let stale = catalog.stale_containers.contains(&e.id);
         let (lost, overlap) = match outcome[k] {
             Some([a, b]) => ((a.0 == b.0).then_some(a.0), (a.1 == b.1).then_some(a.1)),
             None => (None, None),
         };
-        flag(x, Flag::Overwritten, if written || stale { Some(true) } else { lost });
+        flag(
+            x,
+            Flag::Overwritten,
+            if written || stale { Some(true) } else { lost },
+        );
         flag(x, Flag::Overlap, overlap);
     }
     paths(inputs, catalog, &mut out);
@@ -492,12 +591,18 @@ mod tests {
 
     #[test]
     fn name_choice_follows_namespace_then_parent_then_attribute_id() {
-        let name = |namespace: u8, name: &str, parent: u64, id: u16| (namespace, name.to_string(), FileRef::new(parent, 1), id);
+        let name = |namespace: u8, name: &str, parent: u64, id: u16| {
+            (namespace, name.to_string(), FileRef::new(parent, 1), id)
+        };
         let pick = |names: &[NameChoice], alive: &[u64]| {
             best_name(names, |parent| alive.contains(&parent.number)).map(|(name, _)| name)
         };
         // Win32 beats POSIX beats DOS, wherever they stand
-        let mixed = [name(2, "DOS~1", 9, 1), name(0, "posix", 9, 2), name(1, "win32", 9, 3)];
+        let mixed = [
+            name(2, "DOS~1", 9, 1),
+            name(0, "posix", 9, 2),
+            name(1, "win32", 9, 3),
+        ];
         assert_eq!(pick(&mixed, &[9]).as_deref(), Some("win32"));
         assert_eq!(pick(&mixed[..2], &[9]).as_deref(), Some("posix"));
         assert_eq!(pick(&mixed[..1], &[9]).as_deref(), Some("DOS~1"));
@@ -505,15 +610,22 @@ mod tests {
         let both = [name(1, "long", 9, 5), name(3, "SHORT", 9, 4)];
         assert_eq!(pick(&both, &[9]).as_deref(), Some("SHORT"));
         // a surviving parent beats a lower id; among survivors the lower id wins
-        let links = [name(1, "first stored", 7, 6), name(1, "second stored", 8, 3), name(1, "third stored", 9, 2)];
+        let links = [
+            name(1, "first stored", 7, 6),
+            name(1, "second stored", 8, 3),
+            name(1, "third stored", 9, 2),
+        ];
         assert_eq!(pick(&links, &[7]).as_deref(), Some("first stored"));
         assert_eq!(pick(&links, &[7, 8]).as_deref(), Some("second stored"));
         assert_eq!(pick(&links, &[7, 8, 9]).as_deref(), Some("third stored"));
-        assert_eq!(pick(&links, &[]).as_deref(), Some("third stored"), "no parent survives: the lowest id");
+        assert_eq!(
+            pick(&links, &[]).as_deref(),
+            Some("third stored"),
+            "no parent survives: the lowest id"
+        );
         // a better namespace is preferred even when only the worse one has a parent
         let split = [name(0, "posix here", 7, 1), name(1, "win32 there", 8, 2)];
         assert_eq!(pick(&split, &[7]).as_deref(), Some("win32 there"));
         assert_eq!(pick(&[], &[7]), None);
     }
-
 }

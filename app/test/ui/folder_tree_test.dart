@@ -201,4 +201,3 @@ void main() {
     expect(tree.entryAt(index).loading, isFalse);
   });
 }
-

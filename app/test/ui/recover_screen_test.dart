@@ -86,6 +86,7 @@ void main() {
     await fake.step(2);
     final progress = fake.app.recover.progress!;
     expect(find.text(S.recoverCurrent(progress.current!)), findsOneWidget);
+    expect(find.text(S.recoverDestinationLine(r'F:\Rescued')), findsOneWidget);
     expect(find.text(S.outcomeOk(en.count(progress.ok))), findsOneWidget);
     expect(find.text(S.outcomeWarnings(en.count(progress.warnings))), findsOneWidget);
     await fake.finishJob();
@@ -116,13 +117,19 @@ void main() {
   testWidgets('refusals: the scanned area, the lost volume, a wrong path; never startable', (tester) async {
     final fake = await recovering(tester);
     await typeAndSubmit(tester, find.byKey(destination), r'E:\Rescued');
-    expect(find.text(S.verdictHeadline(DestinationVerdict.overlapsSource, ProtectionReason.sessionRange)), findsOneWidget);
+    expect(
+      find.text(S.verdictHeadline(DestinationVerdict.overlapsSource, ProtectionReason.sessionRange)),
+      findsOneWidget,
+    );
     expect(startButton(tester).onPressed, isNull);
     expect(find.text(S.recoverWhyRefused), findsOneWidget);
     expect(find.text(S.useAnyway), findsNothing, reason: 'no override for the protected ranges');
 
     await typeAndSubmit(tester, find.byKey(destination), r'L:\Rescued');
-    expect(find.text(S.verdictHeadline(DestinationVerdict.overlapsSource, ProtectionReason.lostVolume)), findsOneWidget);
+    expect(
+      find.text(S.verdictHeadline(DestinationVerdict.overlapsSource, ProtectionReason.lostVolume)),
+      findsOneWidget,
+    );
     final check = fake.app.recover.destinationCheck!;
     expect(check.lostFiles, greaterThan(0));
     expect(find.textContaining(S.lostFilesHere(en.count(check.lostFiles), en.bytes(check.lostBytes))), findsOneWidget);
@@ -254,7 +261,9 @@ void main() {
     await closeApp(tester, fake);
   });
 
-  testWidgets('without its disk a session cannot recover: the field waits, the banner offers to attach', (tester) async {
+  testWidgets('without its disk a session cannot recover: the field waits, the banner offers to attach', (
+    tester,
+  ) async {
     final fake = await pumpApp(tester);
     await fake.run(() => fake.app.source.loadSession(r'D:\scans\detached.hdsc'));
     fake.app.selection.setChecked(fake.app.catalog.info!.mainInstance!.root, const [], true);

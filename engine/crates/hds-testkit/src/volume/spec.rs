@@ -55,7 +55,10 @@ pub struct NameSpec {
 impl NameSpec {
     /// A name in the given namespace.
     pub fn new(name: impl Into<Name>, namespace: u8) -> Self {
-        NameSpec { name: name.into(), namespace }
+        NameSpec {
+            name: name.into(),
+            namespace,
+        }
     }
 }
 
@@ -134,13 +137,19 @@ impl MultiSpec {
 
     /// Splits the unnamed `$DATA`: `(holder, number of runs)` per piece.
     pub fn data(mut self, pieces: &[(Holder, usize)]) -> Self {
-        self.data = pieces.iter().map(|&(holder, runs)| Piece { holder, runs }).collect();
+        self.data = pieces
+            .iter()
+            .map(|&(holder, runs)| Piece { holder, runs })
+            .collect();
         self
     }
 
     /// Splits the `$INDEX_ALLOCATION`.
     pub fn index_allocation(mut self, pieces: &[(Holder, usize)]) -> Self {
-        self.index_allocation = pieces.iter().map(|&(holder, runs)| Piece { holder, runs }).collect();
+        self.index_allocation = pieces
+            .iter()
+            .map(|&(holder, runs)| Piece { holder, runs })
+            .collect();
         self
     }
 
@@ -206,7 +215,12 @@ pub struct Times {
 impl Times {
     /// All four times equal.
     pub fn all(t: u64) -> Self {
-        Times { created: t, modified: t, mft_changed: t, accessed: t }
+        Times {
+            created: t,
+            modified: t,
+            mft_changed: t,
+            accessed: t,
+        }
     }
 
     pub(crate) fn array(self) -> [u64; 4] {
@@ -432,7 +446,11 @@ impl FileSpec {
 
     /// Adds a named stream.
     pub fn stream(mut self, name: impl Into<Name>, content: ContentSpec) -> Self {
-        self.streams.push(StreamSpec { name: name.into(), content, non_resident: false });
+        self.streams.push(StreamSpec {
+            name: name.into(),
+            content,
+            non_resident: false,
+        });
         self
     }
 
@@ -478,9 +496,17 @@ impl FileSpec {
         let mut spec = Self::tagged(seed, len).sparse();
         spec.storage = StorageSpec::NonResident;
         spec.placement = Placement::Runs(Vec::new());
-        let packed = ContentSpec::tagged(crate::rng::derive_n(seed, 0x57_4F46), (len / 2).max(4096));
-        spec.streams.push(StreamSpec { name: "WofCompressedData".into(), content: packed, non_resident: true });
-        spec.reparse(reparse_tag::WOF, vec![1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0])
+        let packed =
+            ContentSpec::tagged(crate::rng::derive_n(seed, 0x57_4F46), (len / 2).max(4096));
+        spec.streams.push(StreamSpec {
+            name: "WofCompressedData".into(),
+            content: packed,
+            non_resident: true,
+        });
+        spec.reparse(
+            reparse_tag::WOF,
+            vec![1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
+        )
     }
 }
 

@@ -37,15 +37,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::content::{fill_tagged, ContentKind, ContentSpec};
 use crate::disk::{Built, Disk};
-use crate::facts::{index_entry_facts, record_fact, ArtifactState, IndexBlockFact, RecordFact, RecordRole};
+use crate::facts::{
+    index_entry_facts, record_fact, ArtifactState, IndexBlockFact, RecordFact, RecordRole,
+};
 use crate::image::{FileSink, Image, Sink};
 use crate::manifest::{
-    Entry, EntryKind, EntryName, EntryTimes, Expect, Extent, Geometry, Instance, InstanceKind, InstanceRole, Manifest,
-    MftExtentFact, Presence, RecordState, Truth,
+    Entry, EntryKind, EntryName, EntryTimes, Expect, Extent, Geometry, Instance, InstanceKind,
+    InstanceRole, Manifest, MftExtentFact, Presence, RecordState, Truth,
 };
 use crate::ondisk::attr::{file_name, standard_information, FileNameValue, SiV3, FN_DIRECTORY};
-use crate::ondisk::index::{build_tree, index_root_value, indx_block, indx_capacity, IndexEntry, Tree};
-use crate::ondisk::record::{attr_type, AttrBody, AttrModel, NonResident, RecordModel, END_TAIL_WINDOWS, FLAG_DIRECTORY, FLAG_IN_USE};
+use crate::ondisk::index::{
+    build_tree, index_root_value, indx_block, indx_capacity, IndexEntry, Tree,
+};
+use crate::ondisk::record::{
+    attr_type, AttrBody, AttrModel, NonResident, RecordModel, END_TAIL_WINDOWS, FLAG_DIRECTORY,
+    FLAG_IN_USE,
+};
 use crate::ondisk::runlist::Run;
 use crate::ondisk::{utf16, FileRef};
 use crate::rng::{derive, derive_n, mix64};
@@ -76,12 +83,24 @@ pub struct ScaleSpec {
 impl ScaleSpec {
     /// About one million records.
     pub fn million(seed: u64) -> Self {
-        ScaleSpec { seed, areas: 100, units_per_area: 20, batches_per_unit: 20, big_batch_every: 1000 }
+        ScaleSpec {
+            seed,
+            areas: 100,
+            units_per_area: 20,
+            batches_per_unit: 20,
+            big_batch_every: 1000,
+        }
     }
 
     /// The same structure with about 8000 records.
     pub fn small(seed: u64) -> Self {
-        ScaleSpec { seed, areas: 100, units_per_area: 2, batches_per_unit: 1, big_batch_every: 40 }
+        ScaleSpec {
+            seed,
+            areas: 100,
+            units_per_area: 2,
+            batches_per_unit: 1,
+            big_batch_every: 40,
+        }
     }
 }
 
@@ -206,7 +225,8 @@ impl ScaleLayout {
         let mft_clusters = mft_records * RECORD / CLUSTER;
         let index_lcn = mft_lcn + mft_clusters;
         // index blocks: at most one per 30 entries plus one per folder
-        let index_clusters = (total + spec.areas + units + batches) / 30 + spec.areas + units + batches + 64;
+        let index_clusters =
+            (total + spec.areas + units + batches) / 30 + spec.areas + units + batches + 64;
         let front_start = (16 << 20) / CLUSTER;
         let front_end = mft_lcn - (8 << 20) / CLUSTER;
         ScaleLayout {
@@ -275,7 +295,12 @@ impl ScaleLayout {
         // one that orders the records
         let created = time::ymd(2019, 1, 1) + record * 30 * time::SECOND;
         let jitter = mix64(self.spec.seed ^ record) % (20 * time::SECOND);
-        [created, created.saturating_sub(jitter * 1000), created + jitter, created + 2 * jitter]
+        [
+            created,
+            created.saturating_sub(jitter * 1000),
+            created + jitter,
+            created + 2 * jitter,
+        ]
     }
 
     fn lsn(&self, record: u64) -> u64 {
@@ -295,7 +320,11 @@ impl ScaleLayout {
             let slot = file / 5;
             let clusters = 1 + (h >> 8) % SLOT_CLUSTERS;
             // media files are never tiny: every format has a minimum size
-            let cut = if self.media_kind(file).is_some() { (h >> 16) % 1000 } else { (h >> 16) % CLUSTER };
+            let cut = if self.media_kind(file).is_some() {
+                (h >> 16) % 1000
+            } else {
+                (h >> 16) % CLUSTER
+            };
             (clusters * CLUSTER - cut, Some(slot))
         }
     }
@@ -309,7 +338,11 @@ impl ScaleLayout {
     }
 
     fn media_kind(&self, file: u64) -> Option<ContentKind> {
-        (file.is_multiple_of(2500)).then_some(if (file / 2500).is_multiple_of(2) { ContentKind::Png } else { ContentKind::Jpeg })
+        (file.is_multiple_of(2500)).then_some(if (file / 2500).is_multiple_of(2) {
+            ContentKind::Png
+        } else {
+            ContentKind::Jpeg
+        })
     }
 
     fn file_runs(&self, file: u64) -> Vec<Run> {
@@ -340,9 +373,15 @@ impl ScaleLayout {
         let n = record - FIRST_USER;
         match self.kind(record) {
             ScaleKind::Area => format!("Area {n:03}"),
-            ScaleKind::Unit => format!("Unit {:02}", (n - self.spec.areas) % self.spec.units_per_area),
+            ScaleKind::Unit => format!(
+                "Unit {:02}",
+                (n - self.spec.areas) % self.spec.units_per_area
+            ),
             ScaleKind::Batch => {
-                format!("Batch {:02}", (n - self.spec.areas - self.units) % self.spec.batches_per_unit)
+                format!(
+                    "Batch {:02}",
+                    (n - self.spec.areas - self.units) % self.spec.batches_per_unit
+                )
             }
             ScaleKind::File => {
                 let file = record - self.first_file_record();
@@ -360,14 +399,21 @@ impl ScaleLayout {
         match self.kind(record) {
             ScaleKind::Area => 5,
             ScaleKind::Unit => self.area_record((n - self.spec.areas) / self.spec.units_per_area),
-            ScaleKind::Batch => self.unit_record((n - self.spec.areas - self.units) / self.spec.batches_per_unit),
-            ScaleKind::File => self.batch_record(self.batch_of_file(record - self.first_file_record())),
+            ScaleKind::Batch => {
+                self.unit_record((n - self.spec.areas - self.units) / self.spec.batches_per_unit)
+            }
+            ScaleKind::File => {
+                self.batch_record(self.batch_of_file(record - self.first_file_record()))
+            }
         }
     }
 
     /// Describes record `record` (38 ≤ record < [`ScaleLayout::end_record`]).
     pub fn entry(&self, record: u64) -> ScaleEntry {
-        assert!((FIRST_USER..self.end_record()).contains(&record), "record {record} is not a user record");
+        assert!(
+            (FIRST_USER..self.end_record()).contains(&record),
+            "record {record} is not a user record"
+        );
         let kind = self.kind(record);
         let mut path = vec![self.name(record)];
         let mut at = record;
@@ -429,7 +475,14 @@ impl Writer<'_> {
         } else {
             let file = record - l.first_file_record();
             let (size, slot) = l.file_shape(file);
-            (if slot.is_some() { size.div_ceil(CLUSTER) * CLUSTER } else { size.div_ceil(8) * 8 }, size)
+            (
+                if slot.is_some() {
+                    size.div_ceil(CLUSTER) * CLUSTER
+                } else {
+                    size.div_ceil(8) * 8
+                },
+                size,
+            )
         };
         let parent = l.parent(record);
         file_name(&FileNameValue {
@@ -447,25 +500,43 @@ impl Writer<'_> {
     fn common_attrs(&self, record: u64, model: &mut RecordModel) {
         let l = self.layout;
         let dir = l.kind(record) != ScaleKind::File;
-        let v3 = SiV3 { owner_id: 0, security_id: 0x107, quota_charged: 0, usn: 0 };
+        let v3 = SiV3 {
+            owner_id: 0,
+            security_id: 0x107,
+            quota_charged: 0,
+            usn: 0,
+        };
         let mut si = AttrModel::resident(
             attr_type::STANDARD_INFORMATION,
             standard_information(&l.times(record), if dir { 0 } else { 0x20 }, Some(v3)),
         );
         si.unnamed_name_offset = Some(0);
         let mut name = AttrModel::resident(attr_type::FILE_NAME, Vec::new()).with_id(1);
-        name.body = AttrBody::Resident { value: self.name_value(record, false), indexed: true };
+        name.body = AttrBody::Resident {
+            value: self.name_value(record, false),
+            indexed: true,
+        };
         name.unnamed_name_offset = Some(0);
         model.attrs.push(si);
         model.attrs.push(name);
     }
 
-    fn emit_record(&mut self, model: &RecordModel, role: RecordRole, index_root: Option<&[IndexEntry]>, out: &mut Vec<u8>) {
-        let bytes = model.encode().unwrap_or_else(|e| panic!("scale record: {e}"));
+    fn emit_record(
+        &mut self,
+        model: &RecordModel,
+        role: RecordRole,
+        index_root: Option<&[IndexEntry]>,
+        out: &mut Vec<u8>,
+    ) {
+        let bytes = model
+            .encode()
+            .unwrap_or_else(|e| panic!("scale record: {e}"));
         if let Some(c) = self.collect.as_mut() {
             let number = match model.header {
                 crate::ondisk::record::HeaderForm::V31 { number, .. } => number as u64,
-                crate::ondisk::record::HeaderForm::V30 => unreachable!("scale records are numbered"),
+                crate::ondisk::record::HeaderForm::V30 => {
+                    unreachable!("scale records are numbered")
+                }
             };
             if number >= DESTROYED {
                 let mut fact = record_fact(model, &bytes);
@@ -481,7 +552,12 @@ impl Writer<'_> {
 
     /// Writes the index blocks of one folder and returns the entries of its
     /// index root and the run of its index allocation.
-    fn write_index(&mut self, owner: FileRef, entries: Vec<IndexEntry>, skip_first_block: bool) -> io::Result<(Tree, Option<Run>)> {
+    fn write_index(
+        &mut self,
+        owner: FileRef,
+        entries: Vec<IndexEntry>,
+        skip_first_block: bool,
+    ) -> io::Result<(Tree, Option<Run>)> {
         let mut tree = build_tree(entries.clone(), 600, indx_capacity(4096), 1, 100, false);
         if tree.blocks.is_empty() {
             return Ok((tree, None));
@@ -517,7 +593,12 @@ impl Writer<'_> {
         Ok((tree, Some(run)))
     }
 
-    fn folder_record(&mut self, record: u64, children: Vec<u64>, out: &mut Vec<u8>) -> io::Result<()> {
+    fn folder_record(
+        &mut self,
+        record: u64,
+        children: Vec<u64>,
+        out: &mut Vec<u8>,
+    ) -> io::Result<()> {
         let entries: Vec<IndexEntry> = children
             .into_iter()
             .map(|child| IndexEntry::new(FileRef::new(child, 1), self.name_value(child, true)))
@@ -527,9 +608,12 @@ impl Writer<'_> {
         self.common_attrs(record, &mut model);
         let i30 = utf16("$I30");
         model.attrs.push(
-            AttrModel::resident(attr_type::INDEX_ROOT, index_root_value(attr_type::FILE_NAME, 1, 4096, 4096, &tree.root))
-                .named(&i30)
-                .with_id(2),
+            AttrModel::resident(
+                attr_type::INDEX_ROOT,
+                index_root_value(attr_type::FILE_NAME, 1, 4096, 4096, &tree.root),
+            )
+            .named(&i30)
+            .with_id(2),
         );
         if let Some(run) = run {
             let blocks = run.len;
@@ -555,7 +639,11 @@ impl Writer<'_> {
             for b in 0..blocks as usize {
                 bits[b / 8] |= 1 << (b % 8);
             }
-            model.attrs.push(AttrModel::resident(attr_type::BITMAP, bits).named(&i30).with_id(4));
+            model.attrs.push(
+                AttrModel::resident(attr_type::BITMAP, bits)
+                    .named(&i30)
+                    .with_id(4),
+            );
         }
         model.next_attr_id = model.attrs.len() as u16;
         self.emit_record(&model, RecordRole::Base, Some(&tree.root), out);
@@ -578,8 +666,10 @@ impl Writer<'_> {
                 let runs = l.file_runs(file);
                 let clusters: u64 = runs.iter().map(|r| r.len).sum();
                 if let Some(kind) = l.media_kind(file) {
-                    let content = ContentSpec::media(kind, derive_n(l.spec.seed, file), size).to_vec();
-                    self.sink.put(runs[0].lcn.expect("allocated") * CLUSTER, &content)?;
+                    let content =
+                        ContentSpec::media(kind, derive_n(l.spec.seed, file), size).to_vec();
+                    self.sink
+                        .put(runs[0].lcn.expect("allocated") * CLUSTER, &content)?;
                 }
                 AttrModel::non_resident(
                     attr_type::DATA,
@@ -632,7 +722,11 @@ fn geometry(l: &ScaleLayout, boot: &crate::ondisk::boot::BootParams) -> Geometry
 
 /// Writes the volume of `spec` to `sink`. With `collect` the full manifest
 /// is built as well (only sensible for small specs).
-pub fn write_scale(spec: &ScaleSpec, sink: &mut dyn Sink, collect: bool) -> io::Result<(ScaleManifest, Option<Manifest>)> {
+pub fn write_scale(
+    spec: &ScaleSpec,
+    sink: &mut dyn Sink,
+    collect: bool,
+) -> io::Result<(ScaleManifest, Option<Manifest>)> {
     let layout = ScaleLayout::new(spec);
     let l = &layout;
     // The current volume: an ordinary quick format, rendered in memory.
@@ -643,10 +737,17 @@ pub fn write_scale(spec: &ScaleSpec, sink: &mut dyn Sink, collect: bool) -> io::
         .formatted_at(l.times(l.end_record())[2] + time::DAY)
         .mft_capacity(256);
     let current = overlay.format(params);
-    assert_eq!(overlay.volume_ref(current).mft_extents()[0].lcn, l.mft_lcn, "old and new MFT must coincide");
+    assert_eq!(
+        overlay.volume_ref(current).mft_extents()[0].lcn,
+        l.mft_lcn,
+        "old and new MFT must coincide"
+    );
     overlay.render(current);
     let boot = overlay.volume_ref(current).boot_params();
-    let Built { image: overlay_image, manifest: overlay_manifest } = overlay.finish();
+    let Built {
+        image: overlay_image,
+        manifest: overlay_manifest,
+    } = overlay.finish();
     let mut written = 0u64;
     // Whole pages of the new volume go first; the old structures that
     // survive are written afterwards, on top of the pages' unused parts.
@@ -658,14 +759,22 @@ pub fn write_scale(spec: &ScaleSpec, sink: &mut dyn Sink, collect: bool) -> io::
     let mut w = Writer {
         layout: l,
         sink,
-        collect: collect.then(|| Collector { records: Vec::new(), index_blocks: Vec::new() }),
+        collect: collect.then(|| Collector {
+            records: Vec::new(),
+            index_blocks: Vec::new(),
+        }),
         next_index_cluster: l.index_lcn,
         index_blocks: 0,
     };
     // The old root's index: block 0 was where the new root index block is
     // now; its later blocks survive in the index area.
     let root_entries: Vec<IndexEntry> = (0..spec.areas)
-        .map(|a| IndexEntry::new(FileRef::new(l.area_record(a), 1), w.name_value(l.area_record(a), true)))
+        .map(|a| {
+            IndexEntry::new(
+                FileRef::new(l.area_record(a), 1),
+                w.name_value(l.area_record(a), true),
+            )
+        })
         .collect();
     w.write_index(FileRef::new(5, 5), root_entries, true)?;
 
@@ -675,10 +784,14 @@ pub fn write_scale(spec: &ScaleSpec, sink: &mut dyn Sink, collect: bool) -> io::
     for record in FIRST_USER..FIRST_USER + folders {
         let n = record - FIRST_USER;
         let children: Vec<u64> = match l.kind(record) {
-            ScaleKind::Area => (0..spec.units_per_area).map(|i| l.unit_record(n * spec.units_per_area + i)).collect(),
+            ScaleKind::Area => (0..spec.units_per_area)
+                .map(|i| l.unit_record(n * spec.units_per_area + i))
+                .collect(),
             ScaleKind::Unit => {
                 let unit = n - spec.areas;
-                (0..spec.batches_per_unit).map(|i| l.batch_record(unit * spec.batches_per_unit + i)).collect()
+                (0..spec.batches_per_unit)
+                    .map(|i| l.batch_record(unit * spec.batches_per_unit + i))
+                    .collect()
             }
             ScaleKind::Batch => {
                 let batch = (n - spec.areas - l.units) as usize;
@@ -692,7 +805,10 @@ pub fn write_scale(spec: &ScaleSpec, sink: &mut dyn Sink, collect: bool) -> io::
         w.folder_record(record, children, &mut folder_bytes)?;
     }
     let skip = ((DESTROYED - FIRST_USER) * RECORD) as usize;
-    w.sink.put(l.record_offset(DESTROYED), &folder_bytes[skip.min(folder_bytes.len())..])?;
+    w.sink.put(
+        l.record_offset(DESTROYED),
+        &folder_bytes[skip.min(folder_bytes.len())..],
+    )?;
     written += (folder_bytes.len() - skip.min(folder_bytes.len())) as u64;
     drop(folder_bytes);
 
@@ -738,13 +854,24 @@ pub fn write_scale(spec: &ScaleSpec, sink: &mut dyn Sink, collect: bool) -> io::
         index_blocks: w.index_blocks,
         media_files: media,
         current_records: overlay_manifest.records.len() as u64,
-        time_range: (l.times(DESTROYED)[2], l.times(l.end_record() - 1)[2] + 20 * time::SECOND),
+        time_range: (
+            l.times(DESTROYED)[2],
+            l.times(l.end_record() - 1)[2] + 20 * time::SECOND,
+        ),
     };
-    let full = w.collect.take().map(|c| full_manifest(l, &summary, overlay_manifest, c));
+    let full = w
+        .collect
+        .take()
+        .map(|c| full_manifest(l, &summary, overlay_manifest, c));
     Ok((summary, full))
 }
 
-fn full_manifest(l: &ScaleLayout, summary: &ScaleManifest, mut current: Manifest, c: Collector) -> Manifest {
+fn full_manifest(
+    l: &ScaleLayout,
+    summary: &ScaleManifest,
+    mut current: Manifest,
+    c: Collector,
+) -> Manifest {
     // instance 0: the old volume; the current volume's facts follow
     let shift = |instance: u32| instance + 1;
     let old = Instance {
@@ -778,7 +905,13 @@ fn full_manifest(l: &ScaleLayout, summary: &ScaleManifest, mut current: Manifest
             e.runs
                 .iter()
                 .map(|r| {
-                    let x = Extent { vcn, clusters: r.len, lcn: r.lcn, offset: r.lcn.map(|l| l * CLUSTER), bytes: r.len * CLUSTER };
+                    let x = Extent {
+                        vcn,
+                        clusters: r.len,
+                        lcn: r.lcn,
+                        offset: r.lcn.map(|l| l * CLUSTER),
+                        bytes: r.len * CLUSTER,
+                    };
                     vcn += r.len;
                     x
                 })
@@ -788,7 +921,11 @@ fn full_manifest(l: &ScaleLayout, summary: &ScaleManifest, mut current: Manifest
         entries.push(Entry {
             id: (record - FIRST_USER) as u32,
             instance: 0,
-            kind: if is_file { EntryKind::File } else { EntryKind::Dir },
+            kind: if is_file {
+                EntryKind::File
+            } else {
+                EntryKind::Dir
+            },
             system: false,
             path: e.path.join("/"),
             components: e.path.clone(),
@@ -809,19 +946,30 @@ fn full_manifest(l: &ScaleLayout, summary: &ScaleManifest, mut current: Manifest
             allocated_size: extents.iter().map(|x| x.bytes).sum(),
             initialized_size: e.size,
             resident: e.resident,
-            resident_at: resident_values.get(&record).map(|&(value, len)| (e.record_offset, value, len)),
+            resident_at: resident_values
+                .get(&record)
+                .map(|&(value, len)| (e.record_offset, value, len)),
             extents,
             data_flags: 0,
             streams: Vec::new(),
             reparse_tag: None,
             file_attributes: if is_file { 0x20 } else { 0 },
-            times: EntryTimes { created: times[0], modified: times[1], mft_changed: times[2], accessed: times[3] },
+            times: EntryTimes {
+                created: times[0],
+                modified: times[1],
+                mft_changed: times[2],
+                accessed: times[3],
+            },
             lsn: l.lsn(record),
             sha256: e.content.as_ref().map(ContentSpec::sha256),
             content: e.content,
             deleted: e.deleted,
             truth: Truth {
-                record_state: if intact { RecordState::Intact } else { RecordState::Destroyed },
+                record_state: if intact {
+                    RecordState::Intact
+                } else {
+                    RecordState::Destroyed
+                },
                 record_intact: intact,
                 lost_extension_records: Vec::new(),
                 content_intact: is_file.then_some(intact),
@@ -839,7 +987,11 @@ fn full_manifest(l: &ScaleLayout, summary: &ScaleManifest, mut current: Manifest
                 surviving_index_entries: 0,
             },
             expect: Expect {
-                presence: if intact { Presence::Shown } else { Presence::Gone },
+                presence: if intact {
+                    Presence::Shown
+                } else {
+                    Presence::Gone
+                },
                 instance: None,
                 path: None,
                 flags_set: Vec::new(),
@@ -884,7 +1036,9 @@ fn full_manifest(l: &ScaleLayout, summary: &ScaleManifest, mut current: Manifest
     index_blocks.append(&mut current.index_blocks);
     index_blocks.sort_by_key(|b| b.offset);
     let mut m = Manifest::blank("scale", l.partition_bytes);
-    m.description = "Old volume with a fixed tree shape, quick-formatted; see hds_testkit::scenarios::scale.".into();
+    m.description =
+        "Old volume with a fixed tree shape, quick-formatted; see hds_testkit::scenarios::scale."
+            .into();
     m.rules = vec!["A4".into(), "A8".into()];
     m.seed = l.spec.seed;
     m.instances = instances;
@@ -922,7 +1076,11 @@ pub fn scale_in_memory(spec: &ScaleSpec) -> Built {
     let mut image = Image::new(layout.image_size());
     let (_, manifest) = write_scale(spec, &mut image, true).expect("writing to memory cannot fail");
     let mut manifest = manifest.expect("collected");
-    let undecided = crate::expect::derive(&mut manifest, &image, &std::collections::BTreeMap::new());
-    assert!(undecided.is_empty(), "the scale volume leaves {undecided:?} open");
+    let undecided =
+        crate::expect::derive(&mut manifest, &image, &std::collections::BTreeMap::new());
+    assert!(
+        undecided.is_empty(),
+        "the scale volume leaves {undecided:?} open"
+    );
     Built { image, manifest }
 }

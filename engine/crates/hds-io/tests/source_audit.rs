@@ -433,11 +433,14 @@ fn s1_devices_are_opened_by_one_function_for_query_or_read() {
         }
     }
     let expected: BTreeMap<&str, Vec<String>> = [
-        // Directories of the output tree: list + change times; fallbacks without rights.
+        // Directories of the output tree: list + change times; fallbacks without
+        // rights; and a handle without rights that compares a name with the open
+        // source images before it is deleted.
         (
             "src/out/windows.rs",
             vec![
                 "FILE_LIST_DIRECTORY | FILE_WRITE_ATTRIBUTES".to_string(),
+                "0".to_string(),
                 "0".to_string(),
                 "0".to_string(),
             ],

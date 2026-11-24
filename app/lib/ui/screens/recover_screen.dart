@@ -413,7 +413,7 @@ class _Progress extends StatelessWidget {
         Row(
           children: [
             Expanded(
-              child: Text(S.recoverDestinationLine(recover.checkedDestination ?? ''), style: theme.textTheme.bodySmall),
+              child: Text(S.recoverDestinationLine(recover.jobDestination ?? ''), style: theme.textTheme.bodySmall),
             ),
             const SizedBox(width: 16),
             OutlinedButton.icon(
@@ -452,7 +452,7 @@ class _Outcome extends StatelessWidget {
     final done = recover.result;
     final failure = recover.failure;
     final status = recover.status;
-    final dest = done?.dest ?? recover.checkedDestination;
+    final dest = done?.dest ?? recover.jobDestination;
     final report = done?.reportPath;
     final Widget headline = switch (status) {
       JobStatus.completed => Notice(

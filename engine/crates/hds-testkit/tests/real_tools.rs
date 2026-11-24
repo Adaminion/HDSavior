@@ -55,27 +55,47 @@ fn feature_volume(name: &str, params: VolumeParams) -> Built {
         },
     );
     let special = v.mkdir(root, "special");
-    v.add_file(special, "fragmented.bin", FileSpec::tagged(1, 40 * cs + 17).fragments(9));
+    v.add_file(
+        special,
+        "fragmented.bin",
+        FileSpec::tagged(1, 40 * cs + 17).fragments(9),
+    );
     // two free runs for a sparse file with a hole between them
     let first = v.allocator().alloc(6);
     let second = v.allocator().alloc(4);
     v.allocator().free_runs(&[first, second]);
-    v.add_file(special, "sparse.bin", FileSpec::tagged(2, 60 * cs - 3).runs(vec![first, Run::hole(50), second]).sparse());
-    v.add_file(special, "valid-data-short.bin", FileSpec::tagged(3, 10 * cs).initialized(3 * cs + 100));
+    v.add_file(
+        special,
+        "sparse.bin",
+        FileSpec::tagged(2, 60 * cs - 3)
+            .runs(vec![first, Run::hole(50), second])
+            .sparse(),
+    );
+    v.add_file(
+        special,
+        "valid-data-short.bin",
+        FileSpec::tagged(3, 10 * cs).initialized(3 * cs + 100),
+    );
     v.add_file(
         special,
         "list-resident.bin",
-        FileSpec::tagged(4, 24 * cs - 5).fragments(12).multi(MultiSpec::new(ListForm::Resident).data(&[(1, 4), (2, 4), (3, 4)])),
+        FileSpec::tagged(4, 24 * cs - 5)
+            .fragments(12)
+            .multi(MultiSpec::new(ListForm::Resident).data(&[(1, 4), (2, 4), (3, 4)])),
     );
     v.add_file(
         special,
         "list-nonresident.bin",
-        FileSpec::tagged(5, 18 * cs).fragments(9).multi(MultiSpec::new(ListForm::NonResident).data(&[(0, 3), (1, 3), (2, 0)])),
+        FileSpec::tagged(5, 18 * cs)
+            .fragments(9)
+            .multi(MultiSpec::new(ListForm::NonResident).data(&[(0, 3), (1, 3), (2, 0)])),
     );
     v.add_file(
         special,
         "vcn0-in-extension.bin",
-        FileSpec::tagged(6, 12 * cs - 77).fragments(4).multi(MultiSpec::new(ListForm::Resident).data(&[(2, 2), (1, 2)])),
+        FileSpec::tagged(6, 12 * cs - 77)
+            .fragments(4)
+            .multi(MultiSpec::new(ListForm::Resident).data(&[(2, 2), (1, 2)])),
     );
     v.add_file(
         special,
@@ -85,7 +105,9 @@ fn feature_volume(name: &str, params: VolumeParams) -> Built {
     v.add_file(
         special,
         "resident-in-extension.txt",
-        FileSpec::tagged(8, 300).resident().multi(MultiSpec::new(ListForm::Resident).resident_data_in(1)),
+        FileSpec::tagged(8, 300)
+            .resident()
+            .multi(MultiSpec::new(ListForm::Resident).resident_data_in(1)),
     );
     // An index allocation split over two records needs several runs, which
     // large clusters do not give a folder of this size; there the folder is
@@ -100,7 +122,11 @@ fn feature_volume(name: &str, params: VolumeParams) -> Built {
     for i in 0..300 {
         v.add_tagged(dir, format!("member {i:04}.dat").as_str(), 50 + i);
     }
-    v.add_file(special, format!("{}.dat", "x".repeat(251)).as_str(), FileSpec::tagged(9, 1234));
+    v.add_file(
+        special,
+        format!("{}.dat", "x".repeat(251)).as_str(),
+        FileSpec::tagged(9, 1234),
+    );
     v.add_file(special, "empty.txt", FileSpec::tagged(0, 0));
     let linked = v.add_file(special, "linked.bin", FileSpec::tagged(10, 70_000));
     v.hard_link(linked, tree.folders[0], "second name of linked.bin", 1);
@@ -115,13 +141,18 @@ fn visible(manifest: &Manifest) -> Vec<&Entry> {
     manifest
         .entries
         .iter()
-        .filter(|e| !e.deleted && e.record >= 16 && !e.path.is_empty() && e.components[0] != "$Extend")
+        .filter(|e| {
+            !e.deleted && e.record >= 16 && !e.path.is_empty() && e.components[0] != "$Extend"
+        })
         .collect()
 }
 
 fn run(program: &str, args: &[&str]) -> Option<String> {
     let output = Command::new(program).args(args).output().ok()?;
-    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 struct Mount<'a>(&'a Path);
@@ -129,7 +160,11 @@ struct Mount<'a>(&'a Path);
 impl Drop for Mount<'_> {
     fn drop(&mut self) {
         for _ in 0..50 {
-            if Command::new("umount").arg(self.0).output().is_ok_and(|o| o.status.success()) {
+            if Command::new("umount")
+                .arg(self.0)
+                .output()
+                .is_ok_and(|o| o.status.success())
+            {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -142,7 +177,11 @@ fn walk(dir: &Path, prefix: &str, out: &mut BTreeSet<String>) {
     for entry in std::fs::read_dir(dir).expect("read mounted directory") {
         let entry = entry.expect("directory entry");
         let name = entry.file_name().to_string_lossy().into_owned();
-        let path = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+        let path = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
         if entry.file_type().expect("file type").is_dir() {
             walk(&entry.path(), &path, out);
         }
@@ -157,11 +196,18 @@ fn mounted_volume_equals_manifest(dir: &TempDir, name: &str, built: &Built) -> b
     let (image, _) = write_built(dir, name, built);
     let mount_point = dir.path(&format!("{name}.mnt"));
     std::fs::create_dir_all(&mount_point).unwrap();
-    let mounted = Command::new("ntfs-3g").args(["-o", "ro"]).arg(&image).arg(&mount_point).output();
+    let mounted = Command::new("ntfs-3g")
+        .args(["-o", "ro"])
+        .arg(&image)
+        .arg(&mount_point)
+        .output();
     match mounted {
         Ok(o) if o.status.success() => {}
         Ok(o) => {
-            eprintln!("ntfs-3g refused {name}: {}", String::from_utf8_lossy(&o.stderr).trim());
+            eprintln!(
+                "ntfs-3g refused {name}: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
             return false;
         }
         Err(e) => {
@@ -176,33 +222,62 @@ fn mounted_volume_equals_manifest(dir: &TempDir, name: &str, built: &Built) -> b
     for e in &entries {
         expected.insert(e.path.clone());
         for alias in e.names.iter().filter(|n| n.namespace != 2) {
-            let parent = built.manifest.entries.iter().find(|p| p.instance == e.instance && p.record == alias.parent.number);
+            let parent = built
+                .manifest
+                .entries
+                .iter()
+                .find(|p| p.instance == e.instance && p.record == alias.parent.number);
             let parent_path = parent.map(|p| p.path.clone()).unwrap_or_default();
-            expected.insert(if parent_path.is_empty() { alias.name.clone() } else { format!("{parent_path}/{}", alias.name) });
+            expected.insert(if parent_path.is_empty() {
+                alias.name.clone()
+            } else {
+                format!("{parent_path}/{}", alias.name)
+            });
         }
     }
     let mut found = BTreeSet::new();
     walk(&mount_point, "", &mut found);
     let missing: Vec<&String> = expected.difference(&found).take(10).collect();
     let extra: Vec<&String> = found.difference(&expected).take(10).collect();
-    assert!(missing.is_empty() && extra.is_empty(), "{name}: the driver does not list {missing:?} and lists {extra:?}");
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "{name}: the driver does not list {missing:?} and lists {extra:?}"
+    );
     let mut files = 0;
-    for e in entries.iter().filter(|e| e.kind == EntryKind::File && e.sha256.is_some()) {
-        let data = std::fs::read(mount_point.join(&e.path)).unwrap_or_else(|err| panic!("{name}: reading {}: {err}", e.path));
+    for e in entries
+        .iter()
+        .filter(|e| e.kind == EntryKind::File && e.sha256.is_some())
+    {
+        let data = std::fs::read(mount_point.join(&e.path))
+            .unwrap_or_else(|err| panic!("{name}: reading {}: {err}", e.path));
         assert_eq!(data.len() as u64, e.size, "{name}: size of {}", e.path);
-        assert_eq!(&sha256_hex(&data), e.sha256.as_ref().unwrap(), "{name}: content of {}", e.path);
+        assert_eq!(
+            &sha256_hex(&data),
+            e.sha256.as_ref().unwrap(),
+            "{name}: content of {}",
+            e.path
+        );
         files += 1;
     }
-    println!("{name}: ntfs-3g lists {} paths and returns {files} files with the manifest's content", found.len());
+    println!(
+        "{name}: ntfs-3g lists {} paths and returns {files} files with the manifest's content",
+        found.len()
+    );
     assert!(files > 500 && found.len() > 880);
     true
 }
 
 fn tools() -> bool {
-    if ["ntfs-3g", "ntfsinfo", "ntfsls", "ntfscat"].into_iter().all(have) {
+    if ["ntfs-3g", "ntfsinfo", "ntfsls", "ntfscat"]
+        .into_iter()
+        .all(have)
+    {
         return true;
     }
-    skip("the real-tool validation", "ntfs-3g / ntfsprogs are not installed");
+    skip(
+        "the real-tool validation",
+        "ntfs-3g / ntfsprogs are not installed",
+    );
     false
 }
 
@@ -219,8 +294,18 @@ fn ntfs3g_reads_every_geometry_and_flavour() {
         ("cluster-2k", base().cluster_size(2048)),
         ("cluster-4k", base()),
         ("cluster-8k", base().cluster_size(8192)),
-        ("cluster-64k", VolumeParams::new(0, 256 * MIB).cluster_size(65_536).mft_capacity(1024)),
-        ("cluster-2m", VolumeParams::new(0, 6144 * MIB).cluster_size(2 << 20).mft_capacity(2048)),
+        (
+            "cluster-64k",
+            VolumeParams::new(0, 256 * MIB)
+                .cluster_size(65_536)
+                .mft_capacity(1024),
+        ),
+        (
+            "cluster-2m",
+            VolumeParams::new(0, 6144 * MIB)
+                .cluster_size(2 << 20)
+                .mft_capacity(2048),
+        ),
         ("records-4k", base().record_size(4096)),
         ("sector-4k", base().sector_size(4096).record_size(4096)),
         ("win7", base().flavor(Flavor::Win7)),
@@ -230,10 +315,22 @@ fn ntfs3g_reads_every_geometry_and_flavour() {
         ("offset-63", VolumeParams::new(63 * 512, 96 * MIB)),
     ];
     // a fragmented $MFT whose second half is described by record 15
-    for (name, form) in [("mft-list-resident", ListForm::Resident), ("mft-list-nonresident", ListForm::NonResident)] {
+    for (name, form) in [
+        ("mft-list-resident", ListForm::Resident),
+        ("mft-list-nonresident", ListForm::NonResident),
+    ] {
         let mut params = base();
         let far = params.total_clusters() * 3 / 4;
-        params.mft = vec![MftFragment { lcn: None, records: 512 }, MftFragment { lcn: Some(far), records: 512 }];
+        params.mft = vec![
+            MftFragment {
+                lcn: None,
+                records: 512,
+            },
+            MftFragment {
+                lcn: Some(far),
+                records: 512,
+            },
+        ];
         params.mft_attribute_list = Some(form);
         variants.push((name, params));
     }
@@ -244,7 +341,8 @@ fn ntfs3g_reads_every_geometry_and_flavour() {
         if offset != 0 {
             // ntfs-3g mounts volumes, not disks: hand it the partition alone
             let size = built.image.len() - offset;
-            let volume = hds_testkit::image::Image::from_bytes(&built.image.read_vec(offset, size as usize));
+            let volume =
+                hds_testkit::image::Image::from_bytes(&built.image.read_vec(offset, size as usize));
             let mut shifted = built.clone();
             shifted.image = volume;
             mounted += usize::from(mounted_volume_equals_manifest(&dir, name, &shifted));
@@ -253,9 +351,15 @@ fn ntfs3g_reads_every_geometry_and_flavour() {
         }
     }
     if mounted == 0 {
-        skip("the ntfs-3g mount test", "mounting is not possible here (not root, or no FUSE)");
+        skip(
+            "the ntfs-3g mount test",
+            "mounting is not possible here (not root, or no FUSE)",
+        );
     } else {
-        assert_eq!(mounted, 16, "some variants could not be mounted although others could");
+        assert_eq!(
+            mounted, 16,
+            "some variants could not be mounted although others could"
+        );
     }
 }
 
@@ -267,12 +371,23 @@ fn ntfsinfo_reports_the_geometry_of_the_manifest() {
     let dir = TempDir::new("real-tools-info");
     for (name, params) in [
         ("info-4k", VolumeParams::new(0, 96 * MIB)),
-        ("info-64k", VolumeParams::new(0, 256 * MIB).cluster_size(65_536).mft_capacity(1024)),
-        ("info-4kn", VolumeParams::new(0, 96 * MIB).sector_size(4096).record_size(4096)),
+        (
+            "info-64k",
+            VolumeParams::new(0, 256 * MIB)
+                .cluster_size(65_536)
+                .mft_capacity(1024),
+        ),
+        (
+            "info-4kn",
+            VolumeParams::new(0, 96 * MIB)
+                .sector_size(4096)
+                .record_size(4096),
+        ),
     ] {
         let built = feature_volume(name, params);
         let (image, _) = write_built(&dir, name, &built);
-        let info = run("ntfsinfo", &["-m", image.to_str().unwrap()]).unwrap_or_else(|| panic!("ntfsinfo -m rejects {name}"));
+        let info = run("ntfsinfo", &["-m", image.to_str().unwrap()])
+            .unwrap_or_else(|| panic!("ntfsinfo -m rejects {name}"));
         let field = |label: &str| -> String {
             info.lines()
                 .find_map(|l| l.trim().strip_prefix(label).map(|v| v.trim().to_string()))
@@ -284,10 +399,19 @@ fn ntfsinfo_reports_the_geometry_of_the_manifest() {
         assert_eq!(field("Sector Size:"), g.bytes_per_sector.to_string());
         assert_eq!(field("Cluster Size:"), g.cluster_size.to_string());
         assert_eq!(field("Index Block Size:"), g.index_block_size.to_string());
-        assert_eq!(field("Volume Size in Clusters:"), g.total_clusters.to_string());
+        assert_eq!(
+            field("Volume Size in Clusters:"),
+            g.total_clusters.to_string()
+        );
         assert_eq!(field("MFT Record Size:"), g.record_size.to_string());
-        assert_eq!(field("LCN of Data Attribute for FILE_MFT:"), g.mft_extents[0].lcn.to_string());
-        assert_eq!(field("LCN of Data Attribute for File_MFTMirr:"), g.mftmirr_lcn.to_string());
+        assert_eq!(
+            field("LCN of Data Attribute for FILE_MFT:"),
+            g.mft_extents[0].lcn.to_string()
+        );
+        assert_eq!(
+            field("LCN of Data Attribute for File_MFTMirr:"),
+            g.mftmirr_lcn.to_string()
+        );
         assert_eq!(field("Size of Attribute Definition Table:"), "2560");
         println!("{name}: ntfsinfo -m agrees with the manifest");
     }
@@ -310,20 +434,36 @@ fn ntfsls_lists_the_tree_of_the_manifest() {
         if let Some(path) = line.strip_suffix(':').filter(|p| p.starts_with('/')) {
             section = path.trim_matches('/').to_string();
         } else if !line.is_empty() && line != "." && line != ".." {
-            found.insert(if section.is_empty() { line.to_string() } else { format!("{section}/{line}") });
+            found.insert(if section.is_empty() {
+                line.to_string()
+            } else {
+                format!("{section}/{line}")
+            });
         }
     }
     let mut expected = BTreeSet::new();
     for e in visible(&built.manifest) {
         for n in e.names.iter().filter(|n| n.namespace != 2) {
-            let parent = built.manifest.entries.iter().find(|p| p.record == n.parent.number).map(|p| p.path.clone());
+            let parent = built
+                .manifest
+                .entries
+                .iter()
+                .find(|p| p.record == n.parent.number)
+                .map(|p| p.path.clone());
             let parent = parent.unwrap_or_default();
-            expected.insert(if parent.is_empty() { n.name.clone() } else { format!("{parent}/{}", n.name) });
+            expected.insert(if parent.is_empty() {
+                n.name.clone()
+            } else {
+                format!("{parent}/{}", n.name)
+            });
         }
     }
     let missing: Vec<&String> = expected.difference(&found).take(10).collect();
     let extra: Vec<&String> = found.difference(&expected).take(10).collect();
-    assert!(missing.is_empty() && extra.is_empty(), "ntfsls does not list {missing:?} and lists {extra:?}");
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "ntfsls does not list {missing:?} and lists {extra:?}"
+    );
     println!("ntfsls -R lists the manifest's {} paths", found.len());
     assert!(found.len() > 880);
 }
@@ -335,18 +475,41 @@ fn system_files_equal_those_of_mkntfs_where_they_must() {
     }
     let dir = TempDir::new("real-tools-mkntfs");
     let reference = dir.path("mkntfs.img");
-    std::fs::File::create(&reference).unwrap().set_len(64 * MIB).unwrap();
-    let made = Command::new("mkntfs").args(["-Q", "-F", "-c", "4096", "-s", "512"]).arg(&reference).output().unwrap();
-    assert!(made.status.success(), "mkntfs failed: {}", String::from_utf8_lossy(&made.stderr));
+    std::fs::File::create(&reference)
+        .unwrap()
+        .set_len(64 * MIB)
+        .unwrap();
+    let made = Command::new("mkntfs")
+        .args(["-Q", "-F", "-c", "4096", "-s", "512"])
+        .arg(&reference)
+        .output()
+        .unwrap();
+    assert!(
+        made.status.success(),
+        "mkntfs failed: {}",
+        String::from_utf8_lossy(&made.stderr)
+    );
     let built = feature_volume("ours", VolumeParams::new(0, 64 * MIB));
     let (ours, _) = write_built(&dir, "ours", &built);
     let cat = |image: &Path, file: &str| -> Vec<u8> {
-        let output = Command::new("ntfscat").arg(image).arg(file).output().unwrap();
-        assert!(output.status.success(), "ntfscat {file}: {}", String::from_utf8_lossy(&output.stderr));
+        let output = Command::new("ntfscat")
+            .arg(image)
+            .arg(file)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "ntfscat {file}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         output.stdout
     };
     // the attribute definition table is fixed for NTFS 3.1
-    assert_eq!(cat(&ours, "$AttrDef"), cat(&reference, "$AttrDef"), "$AttrDef differs from mkntfs");
+    assert_eq!(
+        cat(&ours, "$AttrDef"),
+        cat(&reference, "$AttrDef"),
+        "$AttrDef differs from mkntfs"
+    );
     // $UpCase: ours is a documented subset; it must be read back as written
     // and agree with mkntfs on ASCII
     let upcase = cat(&ours, "$UpCase");
@@ -354,7 +517,10 @@ fn system_files_equal_those_of_mkntfs_where_they_must() {
     assert_eq!(upcase[..256], cat(&reference, "$UpCase")[..256]);
     // a file of ours, through the tool
     let entry = built.manifest.entry("volume", "special/fragmented.bin");
-    assert_eq!(&sha256_hex(&cat(&ours, "special/fragmented.bin")), entry.sha256.as_ref().unwrap());
+    assert_eq!(
+        &sha256_hex(&cat(&ours, "special/fragmented.bin")),
+        entry.sha256.as_ref().unwrap()
+    );
 }
 
 /// Mounts the current volume of a scenario read-only and compares what the
@@ -373,29 +539,58 @@ fn current_volume_mounts(dir: &TempDir, scenario: &str) -> Option<usize> {
     let path = dir.path(&format!("{scenario}.img"));
     image.write_to_file(&path).unwrap();
     // ntfsprogs refuse an image that is mounted: ask ntfsinfo first
-    let info = run("ntfsinfo", &["-m", path.to_str().unwrap()]).unwrap_or_else(|| panic!("ntfsinfo -m rejects {scenario}"));
-    assert!(info.contains(&format!("Cluster Size: {}", current.geometry.cluster_size)), "{scenario}: {info}");
+    let info = run("ntfsinfo", &["-m", path.to_str().unwrap()])
+        .unwrap_or_else(|| panic!("ntfsinfo -m rejects {scenario}"));
+    assert!(
+        info.contains(&format!("Cluster Size: {}", current.geometry.cluster_size)),
+        "{scenario}: {info}"
+    );
     let mount_point = dir.path(&format!("{scenario}.mnt"));
     std::fs::create_dir_all(&mount_point).unwrap();
-    let mounted = Command::new("ntfs-3g").args(["-o", "ro"]).arg(&path).arg(&mount_point).output().ok()?;
+    let mounted = Command::new("ntfs-3g")
+        .args(["-o", "ro"])
+        .arg(&path)
+        .arg(&mount_point)
+        .output()
+        .ok()?;
     if !mounted.status.success() {
-        eprintln!("ntfs-3g refused {scenario}: {}", String::from_utf8_lossy(&mounted.stderr).trim());
+        eprintln!(
+            "ntfs-3g refused {scenario}: {}",
+            String::from_utf8_lossy(&mounted.stderr).trim()
+        );
         return None;
     }
     let _mount = Mount(&mount_point);
     let entries: Vec<&Entry> = m
         .entries
         .iter()
-        .filter(|e| e.instance == current.id && !e.deleted && e.record >= 16 && !e.path.is_empty() && e.components[0] != "$Extend")
+        .filter(|e| {
+            e.instance == current.id
+                && !e.deleted
+                && e.record >= 16
+                && !e.path.is_empty()
+                && e.components[0] != "$Extend"
+        })
         .collect();
     let expected: BTreeSet<String> = entries.iter().map(|e| e.path.clone()).collect();
     let mut found = BTreeSet::new();
     walk(&mount_point, "", &mut found);
-    assert_eq!(found, expected, "{scenario}: the driver lists other paths than the manifest");
+    assert_eq!(
+        found, expected,
+        "{scenario}: the driver lists other paths than the manifest"
+    );
     let mut files = 0;
-    for e in entries.iter().filter(|e| e.kind == EntryKind::File && e.sha256.is_some()) {
+    for e in entries
+        .iter()
+        .filter(|e| e.kind == EntryKind::File && e.sha256.is_some())
+    {
         let data = std::fs::read(mount_point.join(&e.path)).unwrap();
-        assert_eq!(&sha256_hex(&data), e.sha256.as_ref().unwrap(), "{scenario}: content of {}", e.path);
+        assert_eq!(
+            &sha256_hex(&data),
+            e.sha256.as_ref().unwrap(),
+            "{scenario}: content of {}",
+            e.path
+        );
         files += 1;
     }
     println!("{scenario}: ntfs-3g lists the {} paths of the current volume and returns its {files} files", found.len());
@@ -417,9 +612,19 @@ fn the_volume_left_by_an_accident_is_a_valid_ntfs_volume() {
         "quick_format_cluster_change",
         "sector_4k",
     ];
-    let mounted: Vec<usize> = scenarios.iter().filter_map(|s| current_volume_mounts(&dir, s)).collect();
+    let mounted: Vec<usize> = scenarios
+        .iter()
+        .filter_map(|s| current_volume_mounts(&dir, s))
+        .collect();
     if mounted.is_empty() {
-        return skip("mounting scenario volumes", "mounting is not possible here (not root, or no FUSE)");
+        return skip(
+            "mounting scenario volumes",
+            "mounting is not possible here (not root, or no FUSE)",
+        );
     }
-    assert_eq!(mounted.len(), scenarios.len(), "some scenario volumes could not be mounted although others could");
+    assert_eq!(
+        mounted.len(),
+        scenarios.len(),
+        "some scenario volumes could not be mounted although others could"
+    );
 }

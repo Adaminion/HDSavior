@@ -30,7 +30,11 @@ pub fn current_volume(seed: u64) -> Built {
         "A healthy Windows 10 volume that was never formatted over: everything on it is live.",
         &["C1", "C2", "C3"],
     );
-    old_volume(&mut disk, VolumeParams::new(0, 64 * MIB).label("live"), &TreeSpec::small());
+    old_volume(
+        &mut disk,
+        VolumeParams::new(0, 64 * MIB).label("live"),
+        &TreeSpec::small(),
+    );
     disk.finish()
 }
 
@@ -51,9 +55,15 @@ pub fn quick_format_same_geometry(seed: u64) -> Built {
     let mut disk = Disk::new("quick_format_same_geometry", seed, 96 * MIB);
     disk.describe(
         "Windows 10 volume, quick-formatted by Windows 10 on the same partition.",
-        &["A2", "C1", "C2", "C3", "D8", "E5", "E6", "E9", "F2", "F3", "I"],
+        &[
+            "A2", "C1", "C2", "C3", "D8", "E5", "E6", "E9", "F2", "F3", "I",
+        ],
     );
-    let (old, _) = old_volume(&mut disk, VolumeParams::new(0, 96 * MIB).label("old"), &TreeSpec::default());
+    let (old, _) = old_volume(
+        &mut disk,
+        VolumeParams::new(0, 96 * MIB).label("old"),
+        &TreeSpec::default(),
+    );
     reformat(&mut disk, old);
     disk.finish()
 }
@@ -74,7 +84,9 @@ pub fn quick_format_blank_records(seed: u64) -> Built {
         "Windows 7 volume quick-formatted by Windows 7: blank FILE records in unused slots, 8.3 aliases.",
         &["A3", "C3", "E4"],
     );
-    let params = VolumeParams::new(0, 96 * MIB).label("old").flavor(Flavor::Win7);
+    let params = VolumeParams::new(0, 96 * MIB)
+        .label("old")
+        .flavor(Flavor::Win7);
     let (old, _) = old_volume(&mut disk, params, &TreeSpec::default());
     let new = disk.format(disk.reformat_params(old).flavor(Flavor::Win7));
     disk.render(new);
@@ -97,7 +109,11 @@ pub fn quick_format_untouched_slots(seed: u64) -> Built {
         "Quick format whose new MFT leaves its unused slots unwritten: old records survive inside the live MFT.",
         &["C3"],
     );
-    let (old, _) = old_volume(&mut disk, VolumeParams::new(0, 96 * MIB).label("old"), &TreeSpec::default());
+    let (old, _) = old_volume(
+        &mut disk,
+        VolumeParams::new(0, 96 * MIB).label("old"),
+        &TreeSpec::default(),
+    );
     let new = disk.format(disk.reformat_params(old).blank_slots(BlankSlots::Untouched));
     disk.render(new);
     disk.finish()
@@ -130,9 +146,21 @@ pub fn quick_format_cluster_change(seed: u64) -> Built {
     let v = disk.volume(old);
     let home = tree.folders[5];
     let victims = [
-        v.add_file(home, "written-over.bin", FileSpec::tagged(derive(seed, "victim 1"), 300_000)),
-        v.add_file(home, "between.bin", FileSpec::tagged(derive(seed, "between"), 200_000)),
-        v.add_file(home, "written-over-then-freed.bin", FileSpec::tagged(derive(seed, "victim 2"), 300_000)),
+        v.add_file(
+            home,
+            "written-over.bin",
+            FileSpec::tagged(derive(seed, "victim 1"), 300_000),
+        ),
+        v.add_file(
+            home,
+            "between.bin",
+            FileSpec::tagged(derive(seed, "between"), 200_000),
+        ),
+        v.add_file(
+            home,
+            "written-over-then-freed.bin",
+            FileSpec::tagged(derive(seed, "victim 2"), 300_000),
+        ),
     ];
     let ranges = [v.byte_ranges(victims[0])[0], v.byte_ranges(victims[2])[0]];
     disk.render(old);
@@ -141,7 +169,10 @@ pub fn quick_format_cluster_change(seed: u64) -> Built {
         let v = disk.volume_ref(new);
         v.lcn_to_offset(v.allocation().cursor())
     };
-    assert!(ranges[0].0 >= new_data_start, "the old files must lie behind the new system files");
+    assert!(
+        ranges[0].0 >= new_data_start,
+        "the old files must lie behind the new system files"
+    );
     let v = disk.volume(new);
     let root = v.root();
     // whole 64 KiB clusters that cover the first run of each victim
@@ -152,8 +183,16 @@ pub fn quick_format_cluster_change(seed: u64) -> Built {
     };
     let live = cover(v, ranges[0]);
     let dead = cover(v, ranges[1]);
-    v.add_file(root, "new-live.bin", FileSpec::tagged(derive(seed, "live"), total_clusters(&live) * 65_536 - 7).runs(live));
-    let gone = v.add_file(root, "new-deleted.bin", FileSpec::tagged(derive(seed, "dead"), total_clusters(&dead) * 65_536).runs(dead));
+    v.add_file(
+        root,
+        "new-live.bin",
+        FileSpec::tagged(derive(seed, "live"), total_clusters(&live) * 65_536 - 7).runs(live),
+    );
+    let gone = v.add_file(
+        root,
+        "new-deleted.bin",
+        FileSpec::tagged(derive(seed, "dead"), total_clusters(&dead) * 65_536).runs(dead),
+    );
     v.delete(gone);
     disk.render(new);
     disk.finish()
@@ -181,8 +220,14 @@ pub fn repartitioned_other_offset(seed: u64) -> Built {
         "Windows XP volume at sector 63, disk re-partitioned and formatted by Windows 10 at 1 MiB; scan range: the new partition.",
         &["A3", "F2", "E5", "E9", "D8", "G1", "S2"],
     );
-    let old_params = VolumeParams::new(63 * 512, 112 * MIB).label("old").flavor(Flavor::WinXp).mft_capacity(2048);
-    let tree = TreeSpec { files: 700, ..TreeSpec::default() };
+    let old_params = VolumeParams::new(63 * 512, 112 * MIB)
+        .label("old")
+        .flavor(Flavor::WinXp)
+        .mft_capacity(2048);
+    let tree = TreeSpec {
+        files: 700,
+        ..TreeSpec::default()
+    };
     let (old, _) = old_volume(&mut disk, old_params, &tree);
     let new = disk.format(
         VolumeParams::new(MIB, size - MIB)
@@ -191,7 +236,14 @@ pub fn repartitioned_other_offset(seed: u64) -> Built {
             .mft_capacity(256),
     );
     disk.render(new);
-    write_mbr(&mut disk, 512, &[Partition { offset: MIB, size: size - MIB }]);
+    write_mbr(
+        &mut disk,
+        512,
+        &[Partition {
+            offset: MIB,
+            size: size - MIB,
+        }],
+    );
     disk.set_scan_range(MIB, size);
     disk.expect_kind(old, InstanceKind::Main);
     disk.finish()
@@ -227,9 +279,16 @@ pub fn post_format_activity(seed: u64) -> Built {
         let file = FileSpec::tagged(derive(seed, "kept") + i, 20_000 + 9_000 * i);
         v.add_file(tree.folders[3], format!("kept-{i}.dat").as_str(), file);
     }
-    let first = v.add_file(tree.folders[7], "written-over.bin", FileSpec::tagged(derive(seed, "victim 1"), 40_000));
-    let second =
-        v.add_file(tree.folders[7], "written-over-then-freed.bin", FileSpec::tagged(derive(seed, "victim 2"), 50_000));
+    let first = v.add_file(
+        tree.folders[7],
+        "written-over.bin",
+        FileSpec::tagged(derive(seed, "victim 1"), 40_000),
+    );
+    let second = v.add_file(
+        tree.folders[7],
+        "written-over-then-freed.bin",
+        FileSpec::tagged(derive(seed, "victim 2"), 50_000),
+    );
     let (live_runs, dead_runs) = (v.runs(first), v.runs(second));
     let reused = v.reference(tree.folders[3]).number;
     disk.render(old);
@@ -238,11 +297,16 @@ pub fn post_format_activity(seed: u64) -> Built {
     let root = v.root();
     let cs = v.cluster_size();
     let folder = v.mkdir_with(root, "New folder", DirSpec::new().record(reused));
-    v.add_file(folder, "inside.dat", FileSpec::tagged(derive(seed, "inside"), 2000));
+    v.add_file(
+        folder,
+        "inside.dat",
+        FileSpec::tagged(derive(seed, "inside"), 2000),
+    );
     v.add_file(
         root,
         "overwriter-live.bin",
-        FileSpec::tagged(derive(seed, "live"), total_clusters(&live_runs) * cs - 100).runs(live_runs),
+        FileSpec::tagged(derive(seed, "live"), total_clusters(&live_runs) * cs - 100)
+            .runs(live_runs),
     );
     let dead = v.add_file(
         root,
@@ -259,7 +323,11 @@ pub fn post_format_activity(seed: u64) -> Built {
     );
     v.delete(multi);
     for i in 0..6 {
-        v.add_file(root, format!("new-{i}.bin").as_str(), FileSpec::tagged(derive(seed, "new") + i, 150_000));
+        v.add_file(
+            root,
+            format!("new-{i}.bin").as_str(),
+            FileSpec::tagged(derive(seed, "new") + i, 150_000),
+        );
     }
     disk.render(new);
     disk.finish()
@@ -274,15 +342,29 @@ pub fn post_format_activity(seed: u64) -> Built {
 /// gone as well, old records from 512 on survive.
 pub fn new_mft_grew(seed: u64) -> Built {
     let mut disk = Disk::new("new_mft_grew", seed, 96 * MIB);
-    disk.describe("Quick format, then 330 new files: the new MFT grew to 512 records.", &["C2", "C3"]);
-    let tree = TreeSpec { files: 500, ..TreeSpec::default() };
-    let (old, _) = old_volume(&mut disk, VolumeParams::new(0, 96 * MIB).label("old"), &tree);
+    disk.describe(
+        "Quick format, then 330 new files: the new MFT grew to 512 records.",
+        &["C2", "C3"],
+    );
+    let tree = TreeSpec {
+        files: 500,
+        ..TreeSpec::default()
+    };
+    let (old, _) = old_volume(
+        &mut disk,
+        VolumeParams::new(0, 96 * MIB).label("old"),
+        &tree,
+    );
     let new = disk.format(disk.reformat_params(old).mft_capacity(512));
     let v = disk.volume(new);
     let root = v.root();
     let folder = v.mkdir(root, "Downloads");
     for i in 0..329 {
-        v.add_file(folder, format!("setup-{i:03}.dat").as_str(), FileSpec::tagged(derive(seed, "grown") + i, 300 + 11 * i));
+        v.add_file(
+            folder,
+            format!("setup-{i:03}.dat").as_str(),
+            FileSpec::tagged(derive(seed, "grown") + i, 300 + 11 * i),
+        );
     }
     disk.render(new);
     disk.finish()
@@ -304,16 +386,33 @@ pub fn live_mft_with_attribute_list(seed: u64) -> Built {
         "Quick format; the new $MFT has a second fragment that only its attribute list (record 15) describes.",
         &["C2"],
     );
-    let (old, _) = old_volume(&mut disk, VolumeParams::new(0, 96 * MIB).label("old"), &TreeSpec::default());
+    let (old, _) = old_volume(
+        &mut disk,
+        VolumeParams::new(0, 96 * MIB).label("old"),
+        &TreeSpec::default(),
+    );
     let mut params = disk.reformat_params(old);
     let second = params.total_clusters() * 3 / 4;
-    params.mft = vec![MftFragment { lcn: None, records: 256 }, MftFragment { lcn: Some(second), records: 256 }];
+    params.mft = vec![
+        MftFragment {
+            lcn: None,
+            records: 256,
+        },
+        MftFragment {
+            lcn: Some(second),
+            records: 256,
+        },
+    ];
     params.mft_attribute_list = Some(ListForm::Resident);
     let new = disk.format(params);
     let v = disk.volume(new);
     let root = v.root();
     for i in 0..300 {
-        v.add_file(root, format!("new-{i:03}.dat").as_str(), FileSpec::tagged(derive(seed, "list") + i, 500));
+        v.add_file(
+            root,
+            format!("new-{i:03}.dat").as_str(),
+            FileSpec::tagged(derive(seed, "list") + i, 500),
+        );
     }
     disk.render(new);
     disk.finish()
@@ -335,7 +434,11 @@ pub fn live_mft_partly_initialized(seed: u64) -> Built {
         "Quick format; the new $MFT is allocated for 512 records, initialized for 256, with stray bitmap bits beyond.",
         &["C3"],
     );
-    let (old, _) = old_volume(&mut disk, VolumeParams::new(0, 96 * MIB).label("old"), &TreeSpec::default());
+    let (old, _) = old_volume(
+        &mut disk,
+        VolumeParams::new(0, 96 * MIB).label("old"),
+        &TreeSpec::default(),
+    );
     let mut params = disk.reformat_params(old).mft_capacity(512);
     params.mft_initialized_records = Some(256);
     let new = disk.format(params);
@@ -347,11 +450,21 @@ pub fn live_mft_partly_initialized(seed: u64) -> Built {
 
 /// Formats `count` generations over each other on one partition and
 /// returns them oldest first; the last one is the current volume.
-fn generations(disk: &mut Disk, size: u64, files: &[usize], capacities: &[u64], years: &[u32]) -> Vec<VolumeId> {
+fn generations(
+    disk: &mut Disk,
+    size: u64,
+    files: &[usize],
+    capacities: &[u64],
+    years: &[u32],
+) -> Vec<VolumeId> {
     let mut ids = Vec::new();
     let count = files.len();
     for (i, ((&files, &capacity), &year)) in files.iter().zip(capacities).zip(years).enumerate() {
-        let label = if i + 1 == count { "current".to_string() } else { format!("gen{}", i + 1) };
+        let label = if i + 1 == count {
+            "current".to_string()
+        } else {
+            format!("gen{}", i + 1)
+        };
         let params = VolumeParams::new(0, size)
             .label(&label)
             .volume_name(&label)
@@ -360,7 +473,11 @@ fn generations(disk: &mut Disk, size: u64, files: &[usize], capacities: &[u64], 
         let id = disk.format(params);
         if files > 0 {
             // other folder names in every generation
-            let tree = TreeSpec { files, name_shift: 7 * i, ..TreeSpec::default() };
+            let tree = TreeSpec {
+                files,
+                name_shift: 7 * i,
+                ..TreeSpec::default()
+            };
             populate(disk.volume(id), &tree);
         }
         disk.render(id);
@@ -392,7 +509,13 @@ pub fn two_generations(seed: u64) -> Built {
         "Three formats on one partition (2017, 2020, 2023): the tail of the 2017 MFT survives behind the 2020 one.",
         &["D2", "D3", "D4", "D8", "D9", "E6", "G1", "G2"],
     );
-    generations(&mut disk, 128 * MIB, &[650, 130, 0], &[1024, 512, 256], &[2017, 2020, 2023]);
+    generations(
+        &mut disk,
+        128 * MIB,
+        &[650, 130, 0],
+        &[1024, 512, 256],
+        &[2017, 2020, 2023],
+    );
     disk.finish()
 }
 
@@ -409,7 +532,13 @@ pub fn three_generations(seed: u64) -> Built {
         "Four formats on one partition (2014, 2017, 2020, 2023): two older generations behind the main one.",
         &["D2", "D3", "D4", "D9"],
     );
-    generations(&mut disk, 160 * MIB, &[1300, 650, 130, 0], &[2048, 1024, 512, 256], &[2014, 2017, 2020, 2023]);
+    generations(
+        &mut disk,
+        160 * MIB,
+        &[1300, 650, 130, 0],
+        &[2048, 1024, 512, 256],
+        &[2014, 2017, 2020, 2023],
+    );
     disk.finish()
 }
 
@@ -437,9 +566,19 @@ pub fn generations_not_separable(seed: u64) -> Built {
     );
     let size = 128 * MIB;
     let gen1 = disk.format(
-        VolumeParams::new(0, size).label("gen1").volume_name("gen1").formatted_at(time::ymd(2017, 5, 17)).mft_capacity(1024),
+        VolumeParams::new(0, size)
+            .label("gen1")
+            .volume_name("gen1")
+            .formatted_at(time::ymd(2017, 5, 17))
+            .mft_capacity(1024),
     );
-    let tree = populate(disk.volume(gen1), &TreeSpec { files: 650, ..TreeSpec::default() });
+    let tree = populate(
+        disk.volume(gen1),
+        &TreeSpec {
+            files: 650,
+            ..TreeSpec::default()
+        },
+    );
     // the highest-numbered records: the big folder's files
     let v = disk.volume(gen1);
     for (i, &node) in tree.big_files.iter().rev().take(40).enumerate() {
@@ -449,18 +588,37 @@ pub fn generations_not_separable(seed: u64) -> Built {
     }
     disk.render(gen1);
     let gen2 = disk.format(
-        VolumeParams::new(0, size).label("gen2").volume_name("gen2").formatted_at(time::ymd(2020, 5, 17)).mft_capacity(512),
+        VolumeParams::new(0, size)
+            .label("gen2")
+            .volume_name("gen2")
+            .formatted_at(time::ymd(2020, 5, 17))
+            .mft_capacity(512),
     );
-    populate(disk.volume(gen2), &TreeSpec { files: 130, name_shift: 7, ..TreeSpec::default() });
+    populate(
+        disk.volume(gen2),
+        &TreeSpec {
+            files: 130,
+            name_shift: 7,
+            ..TreeSpec::default()
+        },
+    );
     disk.render(gen2);
     let current = disk.format(
-        VolumeParams::new(0, size).label("current").formatted_at(time::ymd(2023, 5, 17)).mft_capacity(256),
+        VolumeParams::new(0, size)
+            .label("current")
+            .formatted_at(time::ymd(2023, 5, 17))
+            .mft_capacity(256),
     );
     disk.render(current);
     disk.expect_kind(gen1, InstanceKind::Main);
     disk.expect_kind(gen2, InstanceKind::Main);
     let mut built = disk.finish();
-    for entry in built.manifest.entries.iter_mut().filter(|e| e.expect.presence == Presence::Shown) {
+    for entry in built
+        .manifest
+        .entries
+        .iter_mut()
+        .filter(|e| e.expect.presence == Presence::Shown)
+    {
         entry.expect.path = None;
     }
     built.manifest.notes.push(
@@ -501,7 +659,11 @@ fn embedded(name: &str, seed: u64, fragments: u64) -> Built {
     let (old, tree) = old_volume(
         &mut disk,
         VolumeParams::new(0, 128 * MIB).label("old"),
-        &TreeSpec { files: 150, big_folder: 60, ..TreeSpec::default() },
+        &TreeSpec {
+            files: 150,
+            big_folder: 60,
+            ..TreeSpec::default()
+        },
     );
     let v = disk.volume(old);
     let root = v.root();
@@ -514,11 +676,21 @@ fn embedded(name: &str, seed: u64, fragments: u64) -> Built {
         }
     }
     let documents = tree.folders[1];
-    let spec = if fragments > 1 { FileSpec::tagged(0, 0).fragments(fragments) } else { FileSpec::tagged(0, 0) };
+    let spec = if fragments > 1 {
+        FileSpec::tagged(0, 0).fragments(fragments)
+    } else {
+        FileSpec::tagged(0, 0)
+    };
     let host = disk.embed(old, documents, "old-laptop.img", inner, spec);
-    assert!(disk.volume_ref(old).reference(host).number >= 256, "the image file's record must survive the format");
+    assert!(
+        disk.volume_ref(old).reference(host).number >= 256,
+        "the image file's record must survive the format"
+    );
     let host_records = disk.volume_ref(old).user_nodes().len();
-    assert!(inner_records > host_records, "the inner file system must have more records than its host");
+    assert!(
+        inner_records > host_records,
+        "the inner file system must have more records than its host"
+    );
     disk.render(old);
     reformat(&mut disk, old);
     disk.note(
@@ -544,7 +716,9 @@ fn embedded(name: &str, seed: u64, fragments: u64) -> Built {
 /// stored in one piece.
 pub fn embedded_volume(seed: u64) -> Built {
     let mut built = embedded("embedded_volume", seed, 1);
-    built.manifest.description = "Quick-formatted volume holding a 24 MiB disk image file with an NTFS volume of its own.".into();
+    built.manifest.description =
+        "Quick-formatted volume holding a 24 MiB disk image file with an NTFS volume of its own."
+            .into();
     built.manifest.rules = ["D7", "D8", "E6", "G3"].map(String::from).to_vec();
     built
 }
@@ -559,7 +733,8 @@ pub fn embedded_volume(seed: u64) -> Built {
 /// where each of its clusters is.
 pub fn embedded_volume_fragmented(seed: u64) -> Built {
     let mut built = embedded("embedded_volume_fragmented", seed, 5);
-    built.manifest.description = "Like embedded_volume, with the image file in five fragments.".into();
+    built.manifest.description =
+        "Like embedded_volume, with the image file in five fragments.".into();
     built.manifest.rules = ["D1", "D4", "D7"].map(String::from).to_vec();
     built
 }
@@ -585,8 +760,14 @@ pub fn embedded_volume_fragmented(seed: u64) -> Built {
 /// of the image so that a test can prove they are never read.
 pub fn old_volume_larger_than_range(seed: u64) -> Built {
     let size = 162 * MIB;
-    let first = Partition { offset: MIB, size: 96 * MIB };
-    let second = Partition { offset: 97 * MIB, size: 64 * MIB };
+    let first = Partition {
+        offset: MIB,
+        size: 96 * MIB,
+    };
+    let second = Partition {
+        offset: 97 * MIB,
+        size: 64 * MIB,
+    };
     let mut disk = Disk::new("old_volume_larger_than_range", seed, size);
     disk.describe(
         "160 MiB volume; a 96 MiB partition was formatted over its start and is the scan range, a data partition behind it.",
@@ -599,22 +780,42 @@ pub fn old_volume_larger_than_range(seed: u64) -> Built {
     let boundary = first.size / cs;
     let home = tree.folders[1];
     for (i, at) in [7000u64, 8000, 9000, 10_000].into_iter().enumerate() {
-        let name = if i == 0 { "entirely-outside.bin".to_string() } else { format!("also-outside-{i}.bin") };
-        let file = FileSpec::tagged(derive(seed, &name), 50 * cs).runs(vec![Run::at(boundary + at, 50)]);
+        let name = if i == 0 {
+            "entirely-outside.bin".to_string()
+        } else {
+            format!("also-outside-{i}.bin")
+        };
+        let file =
+            FileSpec::tagged(derive(seed, &name), 50 * cs).runs(vec![Run::at(boundary + at, 50)]);
         v.add_file(home, name.as_str(), file);
     }
     v.add_file(
         home,
         "straddles-the-end.bin",
-        FileSpec::tagged(derive(seed, "straddle"), 40 * cs - 5).runs(vec![Run::at(boundary - 20, 20), Run::at(boundary + 2000, 20)]),
+        FileSpec::tagged(derive(seed, "straddle"), 40 * cs - 5).runs(vec![
+            Run::at(boundary - 20, 20),
+            Run::at(boundary + 2000, 20),
+        ]),
     );
-    v.add_file(home, "entirely-inside.bin", FileSpec::tagged(derive(seed, "in"), 30 * cs).runs(vec![Run::at(boundary - 500, 30)]));
+    v.add_file(
+        home,
+        "entirely-inside.bin",
+        FileSpec::tagged(derive(seed, "in"), 30 * cs).runs(vec![Run::at(boundary - 500, 30)]),
+    );
     disk.render(old);
     let formatted = disk.volume_ref(old).clock() + time::DAY;
-    let new = disk.format(VolumeParams::new(first.offset, first.size).label("new").formatted_at(formatted).mft_capacity(256));
+    let new = disk.format(
+        VolumeParams::new(first.offset, first.size)
+            .label("new")
+            .formatted_at(formatted)
+            .mft_capacity(256),
+    );
     disk.render(new);
     let data = disk.format(
-        VolumeParams::new(second.offset, second.size).label("data").volume_name("Data").formatted_at(formatted + time::HOUR),
+        VolumeParams::new(second.offset, second.size)
+            .label("data")
+            .volume_name("Data")
+            .formatted_at(formatted + time::HOUR),
     );
     let v = disk.volume(data);
     let root = v.root();
@@ -647,16 +848,36 @@ pub fn whole_disk_two_volumes(seed: u64) -> Built {
         "MBR disk: partition 1 quick-formatted, a second NTFS volume behind it deleted and beheaded.",
         &["A2", "D8", "D9", "F2", "F5", "S2"],
     );
-    let first = Partition { offset: MIB, size: 64 * MIB };
-    let second = Partition { offset: 65 * MIB, size: 62 * MIB };
+    let first = Partition {
+        offset: MIB,
+        size: 64 * MIB,
+    };
+    let second = Partition {
+        offset: 65 * MIB,
+        size: 62 * MIB,
+    };
     let (old, _) = old_volume(
         &mut disk,
         VolumeParams::new(first.offset, first.size).label("old"),
-        &TreeSpec { files: 160, ..TreeSpec::default() },
+        &TreeSpec {
+            files: 160,
+            ..TreeSpec::default()
+        },
     );
     reformat(&mut disk, old);
-    let other = disk.format(VolumeParams::new(second.offset, second.size).label("other").volume_name("Archive"));
-    let tree = populate(disk.volume(other), &TreeSpec { files: 160, big_folder: 80, ..TreeSpec::default() });
+    let other = disk.format(
+        VolumeParams::new(second.offset, second.size)
+            .label("other")
+            .volume_name("Archive"),
+    );
+    let tree = populate(
+        disk.volume(other),
+        &TreeSpec {
+            files: 160,
+            big_folder: 80,
+            ..TreeSpec::default()
+        },
+    );
     let v = disk.volume(other);
     for d in 0..2 {
         let dir = v.mkdir(tree.folders[d], "Bulk");

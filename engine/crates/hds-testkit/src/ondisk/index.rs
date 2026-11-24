@@ -24,12 +24,22 @@ pub struct IndexEntry {
 impl IndexEntry {
     /// An ordinary leaf entry.
     pub fn new(child: FileRef, key: Vec<u8>) -> Self {
-        IndexEntry { child, key, subnode: None, last: false }
+        IndexEntry {
+            child,
+            key,
+            subnode: None,
+            last: false,
+        }
     }
 
     /// The end entry of a node, optionally pointing at a sub-node.
     pub fn end(subnode: Option<u64>) -> Self {
-        IndexEntry { child: FileRef::NONE, key: Vec::new(), subnode, last: true }
+        IndexEntry {
+            child: FileRef::NONE,
+            key: Vec::new(),
+            subnode,
+            last: true,
+        }
     }
 
     /// Encoded length: header, key padded to 8, sub-node VCN if any.
@@ -119,11 +129,21 @@ pub fn indx_capacity(index_block_size: u32) -> usize {
 }
 
 /// One `INDX` block, fixups applied. Panics if the entries do not fit.
-pub fn indx_block(index_block_size: u32, vcn: u64, lsn: u64, usn: u16, entries: &[IndexEntry]) -> Vec<u8> {
+pub fn indx_block(
+    index_block_size: u32,
+    vcn: u64,
+    lsn: u64,
+    usn: u16,
+    entries: &[IndexEntry],
+) -> Vec<u8> {
     let size = index_block_size as usize;
     let first = indx_entries_offset(index_block_size);
     let body = encode_entries(entries);
-    assert!(first + body.len() <= size, "index entries ({} bytes) do not fit the block", body.len());
+    assert!(
+        first + body.len() <= size,
+        "index entries ({} bytes) do not fit the block",
+        body.len()
+    );
     let mut b = vec![0u8; size];
     b[0..4].copy_from_slice(b"INDX");
     put_u16(&mut b, 0x04, 0x28);
@@ -182,20 +202,29 @@ pub fn build_tree(
     fill_percent: u32,
     force_blocks: bool,
 ) -> Tree {
-    assert!((1..=100).contains(&fill_percent), "fill_percent out of range");
+    assert!(
+        (1..=100).contains(&fill_percent),
+        "fill_percent out of range"
+    );
     const END: usize = 0x10;
     const END_WITH_SUBNODE: usize = 0x18;
     if !force_blocks && entries_len(&entries) + END <= root_capacity {
         let mut root = entries;
         root.push(IndexEntry::end(None));
-        return Tree { root, blocks: Vec::new() };
+        return Tree {
+            root,
+            blocks: Vec::new(),
+        };
     }
     let largest = entries.iter().map(IndexEntry::len).max().unwrap_or(0) + 8;
     assert!(
         2 * largest + END_WITH_SUBNODE <= block_capacity,
         "index entries of {largest} bytes are too large for blocks of {block_capacity}"
     );
-    assert!(END_WITH_SUBNODE <= root_capacity, "the index root has no room for its end entry");
+    assert!(
+        END_WITH_SUBNODE <= root_capacity,
+        "the index root has no room for its end entry"
+    );
     // A block is closed when the next entry would push it over this limit,
     // but it always accepts at least two entries.
     let limit = (block_capacity * fill_percent as usize / 100).max(2 * largest + END_WITH_SUBNODE);
@@ -219,7 +248,12 @@ pub fn build_tree(
         // would be left for the next leaf: then the last entry that did fit
         // moves up and this one starts the final leaf.
         let (separator, next) = if is_final {
-            (current.pop().expect("a closed leaf holds at least two entries"), Some(entry))
+            (
+                current
+                    .pop()
+                    .expect("a closed leaf holds at least two entries"),
+                Some(entry),
+            )
         } else {
             (entry, None)
         };
@@ -239,7 +273,8 @@ pub fn build_tree(
 
     // Index nodes, level by level, until the separators fit the root.
     loop {
-        let root_need: usize = separators.iter().map(|s| s.len() + 8).sum::<usize>() + END_WITH_SUBNODE;
+        let root_need: usize =
+            separators.iter().map(|s| s.len() + 8).sum::<usize>() + END_WITH_SUBNODE;
         if root_need <= root_capacity {
             break;
         }
@@ -261,7 +296,9 @@ pub fn build_tree(
             if is_final {
                 // Promote the last entry of the node instead; its child
                 // becomes the node's end pointer.
-                let mut promoted = node.pop().expect("a closed node holds at least two entries");
+                let mut promoted = node
+                    .pop()
+                    .expect("a closed node holds at least two entries");
                 let end_child = promoted.subnode.take().expect("node entries carry a child");
                 node.push(IndexEntry::end(Some(end_child)));
                 next_children.push(blocks.len());
@@ -318,7 +355,12 @@ mod tests {
 
     #[test]
     fn entry_layout() {
-        let e = IndexEntry { child: FileRef::new(36, 1), key: vec![0xAA; 0x52], subnode: Some(8), last: false };
+        let e = IndexEntry {
+            child: FileRef::new(36, 1),
+            key: vec![0xAA; 0x52],
+            subnode: Some(8),
+            last: false,
+        };
         let b = e.encode();
         // 0x10 header + 0x52 key = 0x62, padded to 0x68, plus the VCN
         assert_eq!(b.len(), 0x70);
@@ -361,15 +403,33 @@ mod tests {
         assert_eq!(u32_at(&b, 4), 1);
         assert_eq!(u32_at(&b, 8), 4096);
         assert_eq!(b[0x0C], 8, "clusters per block at 512-byte clusters");
-        assert_eq!(u32_at(&b, 0x10), 0x10, "first entry, relative to the node header");
+        assert_eq!(
+            u32_at(&b, 0x10),
+            0x10,
+            "first entry, relative to the node header"
+        );
         assert_eq!(u32_at(&b, 0x14), 0x10 + 0x60 + 0x10);
-        assert_eq!(u32_at(&b, 0x18), u32_at(&b, 0x14), "a resident index is never larger than needed");
+        assert_eq!(
+            u32_at(&b, 0x18),
+            u32_at(&b, 0x14),
+            "a resident index is never larger than needed"
+        );
         assert_eq!(b[0x1C], 0, "small index");
         assert_eq!(b.len(), 0x20 + 0x60 + 0x10);
         let large = index_root_value(0x30, 1, 4096, 65536, &[IndexEntry::end(Some(0))]);
-        assert_eq!(large[0x1C], 1, "large index: the end entry points at a block");
-        assert_eq!(large[0x0C], 8, "512-byte units when the cluster is larger than the block");
-        assert_eq!(large.len(), 0x38, "the 56 bytes of every freshly formatted root directory");
+        assert_eq!(
+            large[0x1C], 1,
+            "large index: the end entry points at a block"
+        );
+        assert_eq!(
+            large[0x0C], 8,
+            "512-byte units when the cluster is larger than the block"
+        );
+        assert_eq!(
+            large.len(),
+            0x38,
+            "the 56 bytes of every freshly formatted root directory"
+        );
         assert_eq!(index_root_value(0x30, 1, 4096, 4096, &entries)[0x0C], 1);
     }
 
@@ -386,7 +446,11 @@ mod tests {
         assert_eq!(u32_at(&b, 0x1C), 0x28 + 0x60 + 0x68 + 0x10);
         assert_eq!(u32_at(&b, 0x20), 0xFE8);
         assert_eq!(b[0x24], 0, "leaf");
-        assert_eq!(&b[0x40..0x48], &[0xE9, 0x03, 0, 0, 0, 0, 1, 0], "first entry: record 1001, sequence 1");
+        assert_eq!(
+            &b[0x40..0x48],
+            &[0xE9, 0x03, 0, 0, 0, 0, 1, 0],
+            "first entry: record 1001, sequence 1"
+        );
         for block in 0..8 {
             assert_eq!(u16_at(&b, block * 512 + 510), 9);
         }
@@ -397,13 +461,29 @@ mod tests {
 
     /// Reads a tree back in key order by walking it the way a driver does.
     fn in_order(tree: &Tree, step: u64) -> Vec<Vec<u8>> {
-        fn walk(tree: &Tree, node: &[IndexEntry], step: u64, out: &mut Vec<Vec<u8>>, depth: usize) -> usize {
+        fn walk(
+            tree: &Tree,
+            node: &[IndexEntry],
+            step: u64,
+            out: &mut Vec<Vec<u8>>,
+            depth: usize,
+        ) -> usize {
             let mut leaf_depth = None;
             for e in node {
                 if let Some(vcn) = e.subnode {
                     assert_eq!(vcn % step, 0);
-                    let d = walk(tree, &tree.blocks[(vcn / step) as usize], step, out, depth + 1);
-                    assert_eq!(*leaf_depth.get_or_insert(d), d, "all leaves at the same depth");
+                    let d = walk(
+                        tree,
+                        &tree.blocks[(vcn / step) as usize],
+                        step,
+                        out,
+                        depth + 1,
+                    );
+                    assert_eq!(
+                        *leaf_depth.get_or_insert(d),
+                        d,
+                        "all leaves at the same depth"
+                    );
                 } else {
                     assert_eq!(*leaf_depth.get_or_insert(depth), depth);
                 }
@@ -425,7 +505,11 @@ mod tests {
         let keys: Vec<Vec<u8>> = entries.iter().map(|e| e.key.clone()).collect();
         let capacity = indx_capacity(4096);
         let tree = build_tree(entries, root_capacity, capacity, 8, fill, force);
-        assert_eq!(in_order(&tree, 8), keys, "{count} entries: order and completeness");
+        assert_eq!(
+            in_order(&tree, 8),
+            keys,
+            "{count} entries: order and completeness"
+        );
         assert!(entries_len(&tree.root) <= root_capacity.max(0x18));
         for block in &tree.blocks {
             assert!(entries_len(block) <= capacity, "block overflow");
@@ -489,7 +573,10 @@ mod tests {
         }
         // 3000 entries: three levels with this root
         let tree = check(3000, 0x5A, 0x18 + 2 * 0x78, 100, false);
-        assert!(tree.leaf_blocks().count() < tree.blocks.len(), "index nodes exist");
+        assert!(
+            tree.leaf_blocks().count() < tree.blocks.len(),
+            "index nodes exist"
+        );
         // partially filled blocks need more of them
         let full = check(1000, 0x5A, 700, 100, false);
         let half = check(1000, 0x5A, 700, 50, false);

@@ -18,8 +18,9 @@ pub struct Partition {
 
 const NTFS_TYPE: u8 = 0x07;
 /// "Microsoft basic data", `EBD0A0A2-B9E5-4433-87C0-68B6B72699C7`.
-const BASIC_DATA: [u8; 16] =
-    [0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44, 0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7];
+const BASIC_DATA: [u8; 16] = [
+    0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44, 0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7,
+];
 
 fn mbr_entry(entry: &mut [u8], kind: u8, first_sector: u64, sectors: u64) {
     entry[0] = 0x00; // not bootable
@@ -36,10 +37,17 @@ fn mbr_entry(entry: &mut [u8], kind: u8, first_sector: u64, sectors: u64) {
 pub fn write_mbr(disk: &mut Disk, sector_size: u32, partitions: &[Partition]) {
     assert!(partitions.len() <= 4, "an MBR has four primary partitions");
     let mut sector = [0u8; 512];
-    sector[0x1B8..0x1BC].copy_from_slice(&(derive_n(disk.seed(), 0x4D42_5200) as u32).to_le_bytes());
+    sector[0x1B8..0x1BC]
+        .copy_from_slice(&(derive_n(disk.seed(), 0x4D42_5200) as u32).to_le_bytes());
     for (i, p) in partitions.iter().enumerate() {
-        assert!(p.offset.is_multiple_of(sector_size as u64) && p.size.is_multiple_of(sector_size as u64));
-        assert!(p.offset >= sector_size as u64 && p.offset + p.size <= disk.size(), "partition outside the disk");
+        assert!(
+            p.offset.is_multiple_of(sector_size as u64)
+                && p.size.is_multiple_of(sector_size as u64)
+        );
+        assert!(
+            p.offset >= sector_size as u64 && p.offset + p.size <= disk.size(),
+            "partition outside the disk"
+        );
         mbr_entry(
             &mut sector[0x1BE + 16 * i..0x1CE + 16 * i],
             NTFS_TYPE,
@@ -53,7 +61,12 @@ pub fn write_mbr(disk: &mut Disk, sector_size: u32, partitions: &[Partition]) {
     record(disk, partitions, "mbr", |_| format!("{NTFS_TYPE:02x}"));
 }
 
-fn record(disk: &mut Disk, partitions: &[Partition], table: &str, type_id: impl Fn(usize) -> String) {
+fn record(
+    disk: &mut Disk,
+    partitions: &[Partition],
+    table: &str,
+    type_id: impl Fn(usize) -> String,
+) {
     let mut sorted: Vec<(usize, &Partition)> = partitions.iter().enumerate().collect();
     sorted.sort_by_key(|(_, p)| p.offset);
     for (index, (i, p)) in sorted.into_iter().enumerate() {
@@ -91,9 +104,15 @@ pub fn write_gpt(disk: &mut Disk, sector_size: u32, partitions: &[Partition]) {
 
     let mut array = vec![0u8; ENTRIES * ENTRY_SIZE];
     for (i, p) in partitions.iter().enumerate() {
-        assert!(p.offset.is_multiple_of(ss) && p.size.is_multiple_of(ss), "partition not sector aligned");
+        assert!(
+            p.offset.is_multiple_of(ss) && p.size.is_multiple_of(ss),
+            "partition not sector aligned"
+        );
         let (first, last) = (p.offset / ss, (p.offset + p.size) / ss - 1);
-        assert!(first >= first_usable && last <= last_usable, "partition {i} is outside the usable area");
+        assert!(
+            first >= first_usable && last <= last_usable,
+            "partition {i} is outside the usable area"
+        );
         let e = &mut array[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE];
         e[..16].copy_from_slice(&BASIC_DATA);
         e[16..32].copy_from_slice(&guid(seed, 100 + i as u64));
@@ -132,8 +151,13 @@ pub fn write_gpt(disk: &mut Disk, sector_size: u32, partitions: &[Partition]) {
     disk.write(ss, &header(1, total_sectors - 1, 2));
     disk.write(2 * ss, &array);
     disk.write((last_usable + 1) * ss, &array);
-    disk.write((total_sectors - 1) * ss, &header(total_sectors - 1, 1, last_usable + 1));
-    record(disk, partitions, "gpt", |_| "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7".to_string());
+    disk.write(
+        (total_sectors - 1) * ss,
+        &header(total_sectors - 1, 1, last_usable + 1),
+    );
+    record(disk, partitions, "gpt", |_| {
+        "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7".to_string()
+    });
 }
 
 #[cfg(test)]
@@ -143,7 +167,20 @@ mod tests {
     #[test]
     fn mbr_layout() {
         let mut disk = Disk::new("t", 1, 64 << 20);
-        write_mbr(&mut disk, 512, &[Partition { offset: 1 << 20, size: 32 << 20 }, Partition { offset: 63 * 512 + (40 << 20), size: 8 << 20 }]);
+        write_mbr(
+            &mut disk,
+            512,
+            &[
+                Partition {
+                    offset: 1 << 20,
+                    size: 32 << 20,
+                },
+                Partition {
+                    offset: 63 * 512 + (40 << 20),
+                    size: 8 << 20,
+                },
+            ],
+        );
         let s = disk.image().read_vec(0, 512);
         assert_eq!(&s[510..], &[0x55, 0xAA]);
         assert_eq!(s[0x1BE + 4], 0x07);
@@ -158,23 +195,45 @@ mod tests {
     #[test]
     fn gpt_checksums_and_backup() {
         let mut disk = Disk::new("t", 1, 64 << 20);
-        write_gpt(&mut disk, 512, &[Partition { offset: 16 << 20, size: 32 << 20 }]);
+        write_gpt(
+            &mut disk,
+            512,
+            &[Partition {
+                offset: 16 << 20,
+                size: 32 << 20,
+            }],
+        );
         let image = disk.image();
         let primary = image.read_vec(512, 512);
         assert_eq!(&primary[..8], b"EFI PART");
         let mut copy = primary.clone();
         copy[16..20].fill(0);
-        assert_eq!(crc32(&copy[..92]), u32::from_le_bytes(primary[16..20].try_into().unwrap()));
+        assert_eq!(
+            crc32(&copy[..92]),
+            u32::from_le_bytes(primary[16..20].try_into().unwrap())
+        );
         let array = image.read_vec(1024, 128 * 128);
-        assert_eq!(crc32(&array), u32::from_le_bytes(primary[88..92].try_into().unwrap()));
+        assert_eq!(
+            crc32(&array),
+            u32::from_le_bytes(primary[88..92].try_into().unwrap())
+        );
         assert_eq!(&array[..16], &BASIC_DATA);
-        assert_eq!(u64::from_le_bytes(array[32..40].try_into().unwrap()), (16 << 20) / 512);
-        assert_eq!(u64::from_le_bytes(array[40..48].try_into().unwrap()), (48 << 20) / 512 - 1);
+        assert_eq!(
+            u64::from_le_bytes(array[32..40].try_into().unwrap()),
+            (16 << 20) / 512
+        );
+        assert_eq!(
+            u64::from_le_bytes(array[40..48].try_into().unwrap()),
+            (48 << 20) / 512 - 1
+        );
         // backup header in the last sector points back at the primary
         let total = (64u64 << 20) / 512;
         let backup = image.read_vec((total - 1) * 512, 512);
         assert_eq!(&backup[..8], b"EFI PART");
-        assert_eq!(u64::from_le_bytes(backup[24..32].try_into().unwrap()), total - 1);
+        assert_eq!(
+            u64::from_le_bytes(backup[24..32].try_into().unwrap()),
+            total - 1
+        );
         assert_eq!(u64::from_le_bytes(backup[32..40].try_into().unwrap()), 1);
         assert_eq!(image.read_vec((total - 33) * 512, 128 * 128), array);
         // protective MBR

@@ -303,7 +303,12 @@ pub(crate) fn name_fact(value: &[u8], attr_id: u16) -> Option<NameFact> {
         name_utf16: units,
         namespace: value[0x41],
         parent: FileRef::from_raw(u64_at(value, 0)),
-        times: [u64_at(value, 0x08), u64_at(value, 0x10), u64_at(value, 0x18), u64_at(value, 0x20)],
+        times: [
+            u64_at(value, 0x08),
+            u64_at(value, 0x10),
+            u64_at(value, 0x18),
+            u64_at(value, 0x20),
+        ],
         allocated_size: u64_at(value, 0x28),
         real_size: u64_at(value, 0x30),
         flags: u32_at(value, 0x38),
@@ -316,7 +321,13 @@ pub(crate) fn index_entry_facts(entries: &[IndexEntry]) -> Vec<IndexEntryFact> {
     entries
         .iter()
         .filter(|e| !e.last)
-        .filter_map(|e| Some(IndexEntryFact { child: e.child, key: name_fact(&e.key, 0)?, subnode: e.subnode }))
+        .filter_map(|e| {
+            Some(IndexEntryFact {
+                child: e.child,
+                key: name_fact(&e.key, 0)?,
+                subnode: e.subnode,
+            })
+        })
         .collect()
 }
 
@@ -366,9 +377,16 @@ pub(crate) fn record_fact(model: &RecordModel, bytes: &[u8]) -> RecordFact {
             non_resident,
         };
         match (&attr.body, attr.type_code) {
-            (AttrBody::Resident { value, .. }, attr_type::STANDARD_INFORMATION) if value.len() >= 36 => {
+            (AttrBody::Resident { value, .. }, attr_type::STANDARD_INFORMATION)
+                if value.len() >= 36 =>
+            {
                 fact.standard_information = Some((
-                    [u64_at(value, 0), u64_at(value, 8), u64_at(value, 16), u64_at(value, 24)],
+                    [
+                        u64_at(value, 0),
+                        u64_at(value, 8),
+                        u64_at(value, 16),
+                        u64_at(value, 24),
+                    ],
                     u32_at(value, 32),
                     value.len() as u32,
                 ));
@@ -380,18 +398,25 @@ pub(crate) fn record_fact(model: &RecordModel, bytes: &[u8]) -> RecordFact {
             }
             (AttrBody::Resident { value, .. }, attr_type::DATA) => {
                 let value_offset = attr_offset + attr.value_offset().expect("resident") as u32;
-                fact.data.push(stream(None, Some((value_offset, value.len() as u32))));
+                fact.data
+                    .push(stream(None, Some((value_offset, value.len() as u32))));
             }
             (AttrBody::Resident { value, .. }, attr_type::REPARSE_POINT) if value.len() >= 4 => {
                 fact.reparse_tag = Some(u32_at(value, 0));
             }
             (AttrBody::Resident { value, .. }, attr_type::ATTRIBUTE_LIST) => {
-                fact.attribute_list =
-                    Some(ListFact { resident: true, entries: list_entry_facts(value), runs: Vec::new() });
+                fact.attribute_list = Some(ListFact {
+                    resident: true,
+                    entries: list_entry_facts(value),
+                    runs: Vec::new(),
+                });
             }
             (AttrBody::NonResident(nr), attr_type::ATTRIBUTE_LIST) => {
-                fact.attribute_list =
-                    Some(ListFact { resident: false, entries: Vec::new(), runs: nr.runs.clone() });
+                fact.attribute_list = Some(ListFact {
+                    resident: false,
+                    entries: Vec::new(),
+                    runs: nr.runs.clone(),
+                });
             }
             (AttrBody::NonResident(nr), attr_type::DATA | attr_type::INDEX_ALLOCATION) => {
                 let extent = ExtentFact {
@@ -428,7 +453,9 @@ pub(crate) fn list_entry_facts(value: &[u8]) -> Vec<ListEntryFact> {
         if length < 0x1A || pos + length > value.len() || 0x1A + 2 * name_len > length {
             break;
         }
-        let units: Vec<u16> = (0..name_len).map(|i| u16_at(value, pos + 0x1A + 2 * i)).collect();
+        let units: Vec<u16> = (0..name_len)
+            .map(|i| u16_at(value, pos + 0x1A + 2 * i))
+            .collect();
         out.push(ListEntryFact {
             type_code: u32_at(value, pos),
             name: lossy(&units),

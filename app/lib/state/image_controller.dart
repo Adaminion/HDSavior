@@ -39,6 +39,11 @@ class ImageController
   int _seenSource = 0;
   bool _seenAttached = false;
   int _seenGuard = 0;
+  String? _jobDestination;
+
+  /// The image file the running (or last) job writes to, as given to
+  /// [start].
+  String? get jobDestination => _jobDestination;
 
   void _onSourceOrCatalogChanged() {
     final attached = _source.current?.attached ?? false;
@@ -105,6 +110,7 @@ class ImageController
     bool allowSameDisk = false,
     bool allowUnknownDisk = false,
   }) async {
+    if (!isActive) _jobDestination = dest;
     try {
       return await begin(
         () => api.imageStart(

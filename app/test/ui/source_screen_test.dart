@@ -4,7 +4,6 @@
 // states.
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hdsavior/engine/engine.dart';
-import 'package:hdsavior/engine/json.dart';
 import 'package:hdsavior/state/state.dart';
 import 'package:hdsavior/ui/screens/source_screen.dart';
 import 'package:hdsavior/ui/strings.dart';
@@ -91,7 +90,10 @@ void main() {
       (r) => r.command == 'check_destination' && r.args['purpose'] == 'session',
     );
     final path = check.args['path']! as String;
-    expect(path, startsWith('${fake.platform.defaultSessionDirectory}\\WDC WD40EZRZ-00GXCB0 WD-WCC7K0000000 at 1048576 '));
+    expect(
+      path,
+      startsWith('${fake.platform.defaultSessionDirectory}\\WDC WD40EZRZ-00GXCB0 WD-WCC7K0000000 at 1048576 '),
+    );
     expect(path, endsWith('.hdsc'));
     expect(fake.platform.createdDirectories, contains(fake.platform.defaultSessionDirectory));
     final partition = fake.app.source.current!.partitions.single;
@@ -117,7 +119,10 @@ void main() {
     expect(fake.commands, isNot(contains('scan_start')));
     expect(fake.platform.createdDirectories, isEmpty, reason: 'nothing is created where the guard refused');
     expect(find.text(S.sessionLocationTitle), findsOneWidget);
-    expect(find.textContaining(S.verdictHeadline(DestinationVerdict.overlapsSource, ProtectionReason.sessionRange)), findsOneWidget);
+    expect(
+      find.textContaining(S.verdictHeadline(DestinationVerdict.overlapsSource, ProtectionReason.sessionRange)),
+      findsOneWidget,
+    );
     final confirm = find.widgetWithText(FilledButton, S.sessionLocationConfirm);
     expect(tester.widget<FilledButton>(confirm).onPressed, isNull);
 
@@ -301,12 +306,14 @@ void main() {
   });
 
   test('orderDisks keeps ordinary disks first, by number', () {
-    Disk disk(int number, {bool system = false, int size = 1}) => Disk.fromJson(JsonObject.root({
-      'kind': 'disk', 'path': 'p$number', 'size': size, 'sector_size': 512, 'physical_sector_size': 512, //
-      'model': null, 'serial': null, 'disk_number': number, 'number': number, 'bus': '', 'removable': false,
-      'is_system': system, 'media': 'hdd', 'trim': false, 'flags': <Object?>[], 'table': 'gpt',
-      'partitions': <Object?>[],
-    }, 'Disk'));
+    Disk disk(int number, {bool system = false, int size = 1}) => Disk.fromJson(
+      JsonObject.root({
+        'kind': 'disk', 'path': 'p$number', 'size': size, 'sector_size': 512, 'physical_sector_size': 512, //
+        'model': null, 'serial': null, 'disk_number': number, 'number': number, 'bus': '', 'removable': false,
+        'is_system': system, 'media': 'hdd', 'trim': false, 'flags': <Object?>[], 'table': 'gpt',
+        'partitions': <Object?>[],
+      }, 'Disk'),
+    );
     final ordered = orderDisks([disk(3), disk(0, system: true), disk(2, size: 0), disk(1)]);
     expect([for (final d in ordered) d.number], [1, 3, 0, 2]);
   });

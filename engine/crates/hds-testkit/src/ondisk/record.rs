@@ -139,7 +139,10 @@ impl AttrModel {
             flags: 0,
             id: 0,
             unnamed_name_offset: None,
-            body: AttrBody::Resident { value, indexed: false },
+            body: AttrBody::Resident {
+                value,
+                indexed: false,
+            },
         }
     }
 
@@ -205,7 +208,11 @@ impl AttrModel {
                 b
             }
             AttrBody::NonResident(nr) => {
-                let header = if nr.compressed_size.is_some() { 0x48 } else { 0x40 };
+                let header = if nr.compressed_size.is_some() {
+                    0x48
+                } else {
+                    0x40
+                };
                 let runs_offset = align8(header + name.len());
                 let mut runs = encode_runlist(&nr.runs);
                 runs.extend_from_slice(&nr.tail);
@@ -293,7 +300,10 @@ pub enum EncodeError {
 impl std::fmt::Display for EncodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EncodeError::Overflow { needed, record_size } => {
+            EncodeError::Overflow {
+                needed,
+                record_size,
+            } => {
                 write!(f, "record needs {needed} bytes but has {record_size}")
             }
         }
@@ -306,7 +316,10 @@ impl RecordModel {
     /// An in-use base record without attributes.
     pub fn new(number: u64, sequence: u16, record_size: u32) -> Self {
         RecordModel {
-            header: HeaderForm::V31 { number: number as u32, number_high: (number >> 32) as u16 },
+            header: HeaderForm::V31 {
+                number: number as u32,
+                number_high: (number >> 32) as u16,
+            },
             record_size,
             lsn: 0,
             sequence,
@@ -340,16 +353,26 @@ impl RecordModel {
 
     /// Offset of attribute `index` inside the record.
     pub fn attr_offset(&self, index: usize) -> usize {
-        self.attrs_offset() + self.attrs[..index].iter().map(|a| a.encode().len()).sum::<usize>()
+        self.attrs_offset()
+            + self.attrs[..index]
+                .iter()
+                .map(|a| a.encode().len())
+                .sum::<usize>()
     }
 
     /// The record as it lies on disk, fixups applied.
     pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         let size = self.record_size as usize;
-        assert!(size >= 1024 && size.is_multiple_of(FIXUP_STRIDE), "unsupported record size {size}");
+        assert!(
+            size >= 1024 && size.is_multiple_of(FIXUP_STRIDE),
+            "unsupported record size {size}"
+        );
         let needed = self.bytes_in_use();
         if needed > size {
-            return Err(EncodeError::Overflow { needed, record_size: size });
+            return Err(EncodeError::Overflow {
+                needed,
+                record_size: size,
+            });
         }
         let usa_offset = self.header.usa_offset();
         let attrs_offset = self.attrs_offset();
@@ -366,7 +389,11 @@ impl RecordModel {
         put_u32(&mut b, 0x1C, size as u32);
         put_u64(&mut b, 0x20, self.base.raw());
         put_u16(&mut b, 0x28, self.next_attr_id);
-        if let HeaderForm::V31 { number, number_high } = self.header {
+        if let HeaderForm::V31 {
+            number,
+            number_high,
+        } = self.header
+        {
             put_u16(&mut b, 0x2A, number_high);
             put_u32(&mut b, 0x2C, number);
         }
@@ -383,7 +410,10 @@ impl RecordModel {
         b[pos..pos + slack].copy_from_slice(&self.slack[..slack]);
         apply_fixups(&mut b, usa_offset, self.usn);
         for &block in &self.torn_blocks {
-            assert!(block < size / FIXUP_STRIDE, "torn block {block} outside the record");
+            assert!(
+                block < size / FIXUP_STRIDE,
+                "torn block {block} outside the record"
+            );
             let tail = (block + 1) * FIXUP_STRIDE - 2;
             let stale = match self.usn.wrapping_sub(1) {
                 0 => 0xFFFE,
@@ -428,9 +458,14 @@ pub fn blank_model(
         BlankForm::Empty { sequence } => model.sequence = sequence,
         BlankForm::Mkntfs => {
             model.sequence = number as u16;
-            model.header = HeaderForm::V31 { number: 0, number_high: 0 };
+            model.header = HeaderForm::V31 {
+                number: 0,
+                number_high: 0,
+            };
             let si = super::attr::standard_information(&[time; 4], 0x06, None);
-            model.attrs.push(AttrModel::resident(attr_type::STANDARD_INFORMATION, si));
+            model
+                .attrs
+                .push(AttrModel::resident(attr_type::STANDARD_INFORMATION, si));
             model.next_attr_id = 1;
         }
     }
@@ -449,7 +484,9 @@ pub fn blank_record(
     time: u64,
     old_header: bool,
 ) -> Vec<u8> {
-    blank_model(form, number, record_size, lsn, time, old_header).encode().expect("a blank record always fits")
+    blank_model(form, number, record_size, lsn, time, old_header)
+        .encode()
+        .expect("a blank record always fits")
 }
 
 #[cfg(test)]
@@ -477,7 +514,12 @@ mod tests {
         let si = super::super::attr::standard_information(
             &[created, modified, modified, accessed],
             0x20,
-            Some(super::super::attr::SiV3 { owner_id: 0, security_id: 0x107, quota_charged: 0, usn: 0 }),
+            Some(super::super::attr::SiV3 {
+                owner_id: 0,
+                security_id: 0x107,
+                quota_charged: 0,
+                usn: 0,
+            }),
         );
         let name: Vec<u16> = "passwords.txt".encode_utf16().collect();
         let fname = super::super::attr::file_name(&super::super::attr::FileNameValue {
@@ -503,7 +545,10 @@ mod tests {
         let mut a1 = AttrModel::resident(attr_type::FILE_NAME, fname).with_id(2);
         a1.unnamed_name_offset = Some(0);
         a1.body = match a1.body {
-            AttrBody::Resident { value, .. } => AttrBody::Resident { value, indexed: true },
+            AttrBody::Resident { value, .. } => AttrBody::Resident {
+                value,
+                indexed: true,
+            },
             other => other,
         };
         let a2 = AttrModel::resident(attr_type::DATA, content.to_vec()).with_id(1);
@@ -511,25 +556,28 @@ mod tests {
         let b = model.encode().unwrap();
 
         let expected_head: [u8; 0x130] = [
-            0x46, 0x49, 0x4c, 0x45, 0x30, 0x00, 0x03, 0x00, 0xef, 0x63, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x01, 0x00, 0x01, 0x00, 0x38, 0x00, 0x01, 0x00, 0xb0, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x23, 0x00, 0x00, 0x00,
-            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x48, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
-            0x86, 0xa3, 0xf1, 0xef, 0xc2, 0x9f, 0xd6, 0x01, 0x3c, 0x29, 0xf3, 0xef, 0xc2, 0x9f, 0xd6, 0x01,
-            0x3c, 0x29, 0xf3, 0xef, 0xc2, 0x9f, 0xd6, 0x01, 0x07, 0x01, 0xf7, 0xef, 0xc2, 0x9f, 0xd6, 0x01,
-            0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x07, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x78, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x5c, 0x00, 0x00, 0x00, 0x18, 0x00, 0x01, 0x00,
-            0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x86, 0xa3, 0xf1, 0xef, 0xc2, 0x9f, 0xd6, 0x01,
-            0x86, 0xa3, 0xf1, 0xef, 0xc2, 0x9f, 0xd6, 0x01, 0x86, 0xa3, 0xf1, 0xef, 0xc2, 0x9f, 0xd6, 0x01,
-            0x86, 0xa3, 0xf1, 0xef, 0xc2, 0x9f, 0xd6, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x0d, 0x00, 0x70, 0x00, 0x61, 0x00, 0x73, 0x00, 0x73, 0x00, 0x77, 0x00, 0x6f, 0x00, 0x72, 0x00,
-            0x64, 0x00, 0x73, 0x00, 0x2e, 0x00, 0x74, 0x00, 0x78, 0x00, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x80, 0x00, 0x00, 0x00, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x01, 0x00,
-            0x7e, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x70, 0x6c, 0x61, 0x63, 0x65, 0x2c, 0x75, 0x73,
+            0x46, 0x49, 0x4c, 0x45, 0x30, 0x00, 0x03, 0x00, 0xef, 0x63, 0x10, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x38, 0x00, 0x01, 0x00, 0xb0, 0x01, 0x00, 0x00,
+            0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
+            0x00, 0x00, 0x23, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x10, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x48, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x86, 0xa3, 0xf1, 0xef,
+            0xc2, 0x9f, 0xd6, 0x01, 0x3c, 0x29, 0xf3, 0xef, 0xc2, 0x9f, 0xd6, 0x01, 0x3c, 0x29,
+            0xf3, 0xef, 0xc2, 0x9f, 0xd6, 0x01, 0x07, 0x01, 0xf7, 0xef, 0xc2, 0x9f, 0xd6, 0x01,
+            0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00,
+            0x00, 0x00, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
+            0x5c, 0x00, 0x00, 0x00, 0x18, 0x00, 0x01, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x05, 0x00, 0x86, 0xa3, 0xf1, 0xef, 0xc2, 0x9f, 0xd6, 0x01, 0x86, 0xa3, 0xf1, 0xef,
+            0xc2, 0x9f, 0xd6, 0x01, 0x86, 0xa3, 0xf1, 0xef, 0xc2, 0x9f, 0xd6, 0x01, 0x86, 0xa3,
+            0xf1, 0xef, 0xc2, 0x9f, 0xd6, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x0d, 0x00, 0x70, 0x00, 0x61, 0x00, 0x73, 0x00, 0x73, 0x00, 0x77, 0x00,
+            0x6f, 0x00, 0x72, 0x00, 0x64, 0x00, 0x73, 0x00, 0x2e, 0x00, 0x74, 0x00, 0x78, 0x00,
+            0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x98, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x01, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x18, 0x00,
+            0x00, 0x00, 0x70, 0x6c, 0x61, 0x63, 0x65, 0x2c, 0x75, 0x73,
         ];
         assert_eq!(&b[..0x130], &expected_head[..]);
         // end marker with the Windows tail directly behind the data attribute
@@ -545,7 +593,11 @@ mod tests {
         assert_eq!(&b[..4], b"FILE");
         assert_eq!(u16_at(&b, 4), 0x30);
         assert_eq!(u16_at(&b, 6), 9, "4096-byte record: 8 fixups + the number");
-        assert_eq!(u16_at(&b, 0x14), 0x48, "first attribute behind the 18-byte array");
+        assert_eq!(
+            u16_at(&b, 0x14),
+            0x48,
+            "first attribute behind the 18-byte array"
+        );
         assert_eq!(u32_at(&b, 0x18), 0x50);
         assert_eq!(u32_at(&b, 0x1C), 4096);
         assert_eq!(u16_at(&b, 0x2A), 1, "high part of the record number");
@@ -558,10 +610,18 @@ mod tests {
         let mut old = RecordModel::new(99, 3, 1024);
         old.header = HeaderForm::V30;
         let b = old.encode().unwrap();
-        assert_eq!(u16_at(&b, 4), 0x2A, "pre-3.1 header: array directly behind the 42-byte header");
+        assert_eq!(
+            u16_at(&b, 4),
+            0x2A,
+            "pre-3.1 header: array directly behind the 42-byte header"
+        );
         assert_eq!(u16_at(&b, 6), 3);
         assert_eq!(u16_at(&b, 0x14), 0x30);
-        assert_eq!(u16_at(&b, 0x2A), 1, "the array starts where 3.1 has its reserved field");
+        assert_eq!(
+            u16_at(&b, 0x2A),
+            1,
+            "the array starts where 3.1 has its reserved field"
+        );
         assert_eq!(u32_at(&b, 0x30), 0xFFFF_FFFF);
         assert_eq!(u32_at(&b, 0x18), 0x38);
     }
@@ -591,7 +651,9 @@ mod tests {
         assert_eq!(&plain[0x40..0x45], &[0x21, 0x10, 0xE8, 0x03, 0x00]);
         // named $I30: name at 0x40, runs at 0x48 (notes section 4)
         let i30: Vec<u16> = "$I30".encode_utf16().collect();
-        let named = AttrModel::non_resident(attr_type::INDEX_ALLOCATION, body.clone()).named(&i30).encode();
+        let named = AttrModel::non_resident(attr_type::INDEX_ALLOCATION, body.clone())
+            .named(&i30)
+            .encode();
         assert_eq!(named[0x09], 4);
         assert_eq!(u16_at(&named, 0x0A), 0x40);
         assert_eq!(u16_at(&named, 0x20), 0x48);
@@ -600,7 +662,9 @@ mod tests {
         let mut sparse_body = body.clone();
         sparse_body.compressed_size = Some(4096);
         sparse_body.compression_unit = 4;
-        let sparse = AttrModel::non_resident(attr_type::DATA, sparse_body).with_flags(ATTR_SPARSE).encode();
+        let sparse = AttrModel::non_resident(attr_type::DATA, sparse_body)
+            .with_flags(ATTR_SPARSE)
+            .encode();
         assert_eq!(u16_at(&sparse, 0x0A), 0x48);
         assert_eq!(u16_at(&sparse, 0x20), 0x48);
         assert_eq!(u64_at(&sparse, 0x40), 4096);
@@ -608,13 +672,18 @@ mod tests {
         assert_eq!(u16_at(&sparse, 0x0C), 0x8000);
         // a 9-character stream name: name 0x40, runs 0x58 ("bigstream")
         let nine: Vec<u16> = "bigstream".encode_utf16().collect();
-        let stream = AttrModel::non_resident(attr_type::DATA, body.clone()).named(&nine).encode();
+        let stream = AttrModel::non_resident(attr_type::DATA, body.clone())
+            .named(&nine)
+            .encode();
         assert_eq!(u16_at(&stream, 0x20), 0x58);
         // garbage behind the terminator stays inside the padding
         let mut tail_body = body;
         tail_body.tail = vec![0xFF];
         let tail = AttrModel::non_resident(attr_type::DATA, tail_body).encode();
-        assert_eq!(&tail[0x40..0x48], &[0x21, 0x10, 0xE8, 0x03, 0x00, 0xFF, 0x00, 0x00]);
+        assert_eq!(
+            &tail[0x40..0x48],
+            &[0x21, 0x10, 0xE8, 0x03, 0x00, 0xFF, 0x00, 0x00]
+        );
         assert_eq!(tail.len(), 0x48);
     }
 
@@ -648,10 +717,14 @@ mod tests {
         assert_eq!(u32_at(&b, 0x10), 3);
         assert_eq!(b.len(), 0x20);
         let i30: Vec<u16> = "$I30".encode_utf16().collect();
-        let b = AttrModel::resident(attr_type::INDEX_ROOT, vec![0; 48]).named(&i30).encode();
+        let b = AttrModel::resident(attr_type::INDEX_ROOT, vec![0; 48])
+            .named(&i30)
+            .encode();
         assert_eq!(u16_at(&b, 0x14), 0x20);
         let fifteen: Vec<u16> = "Zone.Identifier".encode_utf16().collect();
-        let b = AttrModel::resident(attr_type::DATA, vec![0; 5]).named(&fifteen).encode();
+        let b = AttrModel::resident(attr_type::DATA, vec![0; 5])
+            .named(&fifteen)
+            .encode();
         assert_eq!(u16_at(&b, 0x14), 0x38);
         assert_eq!(u16_at(&b, 0x0A), 0x18);
         assert_eq!(b[0x09], 15);
@@ -660,13 +733,19 @@ mod tests {
     #[test]
     fn overflow_is_reported_not_truncated() {
         let mut m = RecordModel::new(1, 1, 1024);
-        m.attrs.push(AttrModel::resident(attr_type::DATA, vec![0xAB; 1024 - 0x38 - 0x18 - 8]));
+        m.attrs.push(AttrModel::resident(
+            attr_type::DATA,
+            vec![0xAB; 1024 - 0x38 - 0x18 - 8],
+        ));
         assert_eq!(m.free_bytes(), 0);
         assert!(m.encode().is_ok());
         m.attrs[0] = AttrModel::resident(attr_type::DATA, vec![0xAB; 1024 - 0x38 - 0x18 - 8 + 1]);
         assert_eq!(
             m.encode(),
-            Err(EncodeError::Overflow { needed: 1032, record_size: 1024 })
+            Err(EncodeError::Overflow {
+                needed: 1032,
+                record_size: 1024
+            })
         );
     }
 
@@ -675,7 +754,8 @@ mod tests {
         let mut m = RecordModel::new(1, 1, 1024);
         m.usn = 0x7788;
         let value: Vec<u8> = (0..700u32).map(|i| (i % 250 + 1) as u8).collect();
-        m.attrs.push(AttrModel::resident(attr_type::DATA, value.clone()));
+        m.attrs
+            .push(AttrModel::resident(attr_type::DATA, value.clone()));
         let b = m.encode().unwrap();
         let value_at = 0x38 + 0x18;
         let under_fixup = 510 - value_at;
@@ -702,11 +782,22 @@ mod tests {
     #[test]
     fn blank_records_in_the_known_forms() {
         // Windows 7 era: FILE, flags 0, sequence 1, no attributes, number kept
-        let b = blank_record(BlankForm::Empty { sequence: 1 }, 200, 1024, 0x1234, 0, false);
+        let b = blank_record(
+            BlankForm::Empty { sequence: 1 },
+            200,
+            1024,
+            0x1234,
+            0,
+            false,
+        );
         assert_eq!(&b[..4], b"FILE");
         assert_eq!(u16_at(&b, 0x10), 1);
         assert_eq!(u16_at(&b, 0x16), 0);
-        assert_eq!(u32_at(&b, 0x18), 0x40, "bytes in use: header and end marker");
+        assert_eq!(
+            u32_at(&b, 0x18),
+            0x40,
+            "bytes in use: header and end marker"
+        );
         assert_eq!(u32_at(&b, 0x2C), 200);
         assert_eq!(u32_at(&b, 0x38), 0xFFFF_FFFF);
         assert_eq!(u64_at(&b, 8), 0x1234);

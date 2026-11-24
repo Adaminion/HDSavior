@@ -96,10 +96,46 @@ pub struct Tree {
 }
 
 const FOLDER_NAMES: [&str; 40] = [
-    "Photos", "Documents", "Music", "Videos", "Projects", "Backup", "Work", "Invoices", "Taxes", "Holiday 2019",
-    "Scans", "Recipes", "School", "Letters", "Downloads", "Archive", "Family", "Wedding", "Garden", "House",
-    "Car", "Insurance", "Bank", "Travel", "Books", "Games", "Software", "Drivers", "Manuals", "Presentations",
-    "Accounting", "Clients", "Contracts", "Designs", "Drafts", "Exports", "Notes", "Old PC", "Phone", "Camera",
+    "Photos",
+    "Documents",
+    "Music",
+    "Videos",
+    "Projects",
+    "Backup",
+    "Work",
+    "Invoices",
+    "Taxes",
+    "Holiday 2019",
+    "Scans",
+    "Recipes",
+    "School",
+    "Letters",
+    "Downloads",
+    "Archive",
+    "Family",
+    "Wedding",
+    "Garden",
+    "House",
+    "Car",
+    "Insurance",
+    "Bank",
+    "Travel",
+    "Books",
+    "Games",
+    "Software",
+    "Drivers",
+    "Manuals",
+    "Presentations",
+    "Accounting",
+    "Clients",
+    "Contracts",
+    "Designs",
+    "Drafts",
+    "Exports",
+    "Notes",
+    "Old PC",
+    "Phone",
+    "Camera",
 ];
 
 const MEDIA: [(ContentKind, &str); 6] = [
@@ -125,7 +161,10 @@ pub fn folder_name(i: usize) -> String {
 pub fn media_file(seed: u64, i: usize, min_len: u64) -> (String, FileSpec) {
     let (kind, stem) = MEDIA[i % MEDIA.len()];
     let name = format!("{stem}_{:04}.{}", i, kind.extension().expect("media kind"));
-    (name, FileSpec::media(kind, derive_n(seed, i as u64), min_len).non_resident())
+    (
+        name,
+        FileSpec::media(kind, derive_n(seed, i as u64), min_len).non_resident(),
+    )
 }
 
 /// Creates folders and files in `v` below its root, in the order a disk
@@ -137,19 +176,35 @@ pub fn populate(v: &mut Volume, spec: &TreeSpec) -> Tree {
     let mut tree = Tree::default();
 
     for i in 0..spec.folders {
-        tree.folders.push(v.mkdir(root, folder_name(i + spec.name_shift).as_str()));
+        tree.folders
+            .push(v.mkdir(root, folder_name(i + spec.name_shift).as_str()));
     }
-    let top = |tree: &Tree, i: usize| if tree.folders.is_empty() { root } else { tree.folders[i % tree.folders.len()] };
+    let top = |tree: &Tree, i: usize| {
+        if tree.folders.is_empty() {
+            root
+        } else {
+            tree.folders[i % tree.folders.len()]
+        }
+    };
     for i in 0..spec.early_media {
         let (name, file) = media_file(derive(seed, "early"), i, 20_000 + rng.below(60_000));
         let parent = top(&tree, i % 4);
-        tree.early_media.push(v.add_file(parent, format!("first_{name}").as_str(), file));
+        tree.early_media
+            .push(v.add_file(parent, format!("first_{name}").as_str(), file));
     }
     for i in 0..spec.subfolders {
         let parent = top(&tree, i);
-        tree.subfolders.push(v.mkdir(parent, format!("{} {:02}", ["Set", "Part", "Year", "Box"][i % 4], i).as_str()));
+        tree.subfolders.push(v.mkdir(
+            parent,
+            format!("{} {:02}", ["Set", "Part", "Year", "Box"][i % 4], i).as_str(),
+        ));
     }
-    let mut homes: Vec<NodeId> = tree.folders.iter().chain(&tree.subfolders).copied().collect();
+    let mut homes: Vec<NodeId> = tree
+        .folders
+        .iter()
+        .chain(&tree.subfolders)
+        .copied()
+        .collect();
     if homes.is_empty() {
         homes.push(root);
     }
@@ -164,7 +219,8 @@ pub fn populate(v: &mut Volume, spec: &TreeSpec) -> Tree {
         };
         let ext = ["dat", "bin", "db", "log"][i % 4];
         let file = FileSpec::tagged(derive_n(seed, 1_000_000 + i as u64), len);
-        tree.files.push(v.add_file(parent, format!("file-{i:04}.{ext}").as_str(), file));
+        tree.files
+            .push(v.add_file(parent, format!("file-{i:04}.{ext}").as_str(), file));
     }
     for i in 0..spec.media {
         let parent = homes[rng.below(homes.len() as u64) as usize];
@@ -174,14 +230,19 @@ pub fn populate(v: &mut Volume, spec: &TreeSpec) -> Tree {
     if spec.big_folder > 0 {
         let big = v.mkdir(root, "Many files");
         for i in 0..spec.big_folder {
-            let file = FileSpec::tagged(derive_n(seed, 2_000_000 + i as u64), 200 + rng.below(3000));
-            tree.big_files.push(v.add_file(big, format!("item {i:05}.dat").as_str(), file));
+            let file =
+                FileSpec::tagged(derive_n(seed, 2_000_000 + i as u64), 200 + rng.below(3000));
+            tree.big_files
+                .push(v.add_file(big, format!("item {i:05}.dat").as_str(), file));
         }
         tree.big_folder = Some(big);
     }
     for i in 0..spec.deleted {
         let parent = homes[rng.below(homes.len() as u64) as usize];
-        let file = FileSpec::tagged(derive_n(seed, 3_000_000 + i as u64), 5_000 + rng.below(40_000));
+        let file = FileSpec::tagged(
+            derive_n(seed, 3_000_000 + i as u64),
+            5_000 + rng.below(40_000),
+        );
         let node = v.add_file(parent, format!("deleted-{i:02}.tmp").as_str(), file);
         tree.deleted.push(node);
     }

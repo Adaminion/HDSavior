@@ -442,13 +442,18 @@ impl Entry {
 
     /// The logical content, when it can be regenerated.
     pub fn content_bytes(&self) -> Option<Vec<u8>> {
-        self.content.as_ref().filter(|c| c.is_available()).map(ContentSpec::to_vec)
+        self.content
+            .as_ref()
+            .filter(|c| c.is_available())
+            .map(ContentSpec::to_vec)
     }
 
     /// `true` when a recovery of this file must be bit-identical to
     /// `sha256`: its records and its content are intact.
     pub fn must_recover_exactly(&self) -> bool {
-        self.kind == EntryKind::File && self.truth.record_intact && self.truth.content_intact == Some(true)
+        self.kind == EntryKind::File
+            && self.truth.record_intact
+            && self.truth.content_intact == Some(true)
     }
 }
 
@@ -736,7 +741,9 @@ impl Manifest {
     /// Like [`Manifest::entry`], `None` when there is no such entry.
     pub fn find_entry(&self, label: &str, path: &str) -> Option<&Entry> {
         let id = self.instance(label).id;
-        self.entries.iter().find(|e| e.instance == id && e.path == path)
+        self.entries
+            .iter()
+            .find(|e| e.instance == id && e.path == path)
     }
 
     /// Mutable access to an entry, for scenario-specific expectations.
@@ -750,7 +757,9 @@ impl Manifest {
 
     /// The files of all instances that are not system files.
     pub fn user_files(&self) -> impl Iterator<Item = &Entry> + '_ {
-        self.entries.iter().filter(|e| !e.system && e.kind == EntryKind::File)
+        self.entries
+            .iter()
+            .filter(|e| !e.system && e.kind == EntryKind::File)
     }
 
     /// The `FILE` records of one instance that can still be found, damaged
@@ -765,7 +774,10 @@ impl Manifest {
     }
 
     /// The catalog instances of one kind.
-    pub fn catalog_of_kind(&self, kind: InstanceKind) -> impl Iterator<Item = &CatalogInstance> + '_ {
+    pub fn catalog_of_kind(
+        &self,
+        kind: InstanceKind,
+    ) -> impl Iterator<Item = &CatalogInstance> + '_ {
         self.catalog.iter().filter(move |c| c.kind == kind)
     }
 
@@ -784,6 +796,7 @@ impl Manifest {
             .filter(|e| e.instance == id && e.expect.presence == Presence::Shown)
             .map(|e| e.expect.instance);
         let first = ids.next()??;
-        ids.all(|i| i == Some(first)).then(|| &self.catalog[first as usize])
+        ids.all(|i| i == Some(first))
+            .then(|| &self.catalog[first as usize])
     }
 }

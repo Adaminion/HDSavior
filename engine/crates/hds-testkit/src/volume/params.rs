@@ -154,8 +154,14 @@ impl VolumeParams {
     /// records that fills `partition_bytes` at `offset`, with room for 1024
     /// MFT records in one fragment.
     pub fn new(offset: u64, partition_bytes: u64) -> Self {
-        assert!(offset.is_multiple_of(512), "volume offset must be sector aligned");
-        assert!(partition_bytes.is_multiple_of(512), "partition size must be whole sectors");
+        assert!(
+            offset.is_multiple_of(512),
+            "volume offset must be sector aligned"
+        );
+        assert!(
+            partition_bytes.is_multiple_of(512),
+            "partition size must be whole sectors"
+        );
         VolumeParams {
             label: "volume".into(),
             volume_name: "Data".into(),
@@ -169,7 +175,10 @@ impl VolumeParams {
             serial: None,
             flavor: Flavor::Win10,
             format_time: time::ymd(2021, 3, 14),
-            mft: vec![MftFragment { lcn: None, records: 1024 }],
+            mft: vec![MftFragment {
+                lcn: None,
+                records: 1024,
+            }],
             mft_initialized_records: None,
             mft_attribute_list: None,
             mftmirr_lcn: None,
@@ -200,8 +209,14 @@ impl VolumeParams {
     /// Sets the sector size, keeping the partition's byte size.
     pub fn sector_size(mut self, bytes: u32) -> Self {
         let partition_bytes = self.partition_sectors * self.bytes_per_sector as u64;
-        assert!(bytes == 512 || bytes == 4096, "sector size must be 512 or 4096");
-        assert!(partition_bytes.is_multiple_of(bytes as u64), "partition is not whole {bytes}-byte sectors");
+        assert!(
+            bytes == 512 || bytes == 4096,
+            "sector size must be 512 or 4096"
+        );
+        assert!(
+            partition_bytes.is_multiple_of(bytes as u64),
+            "partition is not whole {bytes}-byte sectors"
+        );
         self.bytes_per_sector = bytes;
         self.partition_sectors = partition_bytes / bytes as u64;
         self
@@ -233,14 +248,20 @@ impl VolumeParams {
 
     /// One MFT fragment at `lcn` with room for `records`.
     pub fn mft_at(mut self, lcn: u64, records: u64) -> Self {
-        self.mft = vec![MftFragment { lcn: Some(lcn), records }];
+        self.mft = vec![MftFragment {
+            lcn: Some(lcn),
+            records,
+        }];
         self
     }
 
     /// One MFT fragment at the flavour's default place with room for
     /// `records`.
     pub fn mft_capacity(mut self, records: u64) -> Self {
-        self.mft = vec![MftFragment { lcn: self.mft[0].lcn, records }];
+        self.mft = vec![MftFragment {
+            lcn: self.mft[0].lcn,
+            records,
+        }];
         self
     }
 
@@ -305,7 +326,9 @@ impl VolumeParams {
         self.blank_slots.unwrap_or(match self.flavor {
             Flavor::Win10 => BlankSlots::Zeros,
             Flavor::WinXp => BlankSlots::Blank(BlankForm::Empty { sequence: 0 }),
-            Flavor::Win2000 | Flavor::Win7 | Flavor::Mkntfs => BlankSlots::Blank(BlankForm::Empty { sequence: 1 }),
+            Flavor::Win2000 | Flavor::Win7 | Flavor::Mkntfs => {
+                BlankSlots::Blank(BlankForm::Empty { sequence: 1 })
+            }
         })
     }
 
@@ -323,7 +346,9 @@ impl VolumeParams {
         let bps = self.bytes_per_sector;
         assert!(bps == 512 || bps == 4096, "sector size must be 512 or 4096");
         assert!(
-            self.cluster_size.is_power_of_two() && self.cluster_size >= bps && self.cluster_size <= 2 << 20,
+            self.cluster_size.is_power_of_two()
+                && self.cluster_size >= bps
+                && self.cluster_size <= 2 << 20,
             "cluster size {} must be a power of two from the sector size to 2 MiB",
             self.cluster_size
         );
@@ -331,16 +356,32 @@ impl VolumeParams {
             self.record_size == 1024 || self.record_size == 4096,
             "record size must be 1024 or 4096"
         );
-        assert!(self.record_size >= bps, "a record cannot be smaller than a sector");
-        assert!(self.index_block_size == 4096, "index block size must be 4096");
-        assert!(self.offset.is_multiple_of(512), "volume offset must be a multiple of 512");
+        assert!(
+            self.record_size >= bps,
+            "a record cannot be smaller than a sector"
+        );
+        assert!(
+            self.index_block_size == 4096,
+            "index block size must be 4096"
+        );
+        assert!(
+            self.offset.is_multiple_of(512),
+            "volume offset must be a multiple of 512"
+        );
         assert!(!self.mft.is_empty(), "the MFT needs at least one fragment");
-        assert!(self.mft[0].records >= 64, "the first MFT fragment must hold at least 64 records");
+        assert!(
+            self.mft[0].records >= 64,
+            "the first MFT fragment must hold at least 64 records"
+        );
         assert!(self.total_clusters() >= 1024, "volume too small");
-        assert!(self.log_bytes.is_multiple_of(4096) && self.log_bytes >= 64 << 10, "bad $LogFile size");
+        assert!(
+            self.log_bytes.is_multiple_of(4096) && self.log_bytes >= 64 << 10,
+            "bad $LogFile size"
+        );
         for fragment in &self.mft {
             assert!(
-                (fragment.records * self.record_size as u64).is_multiple_of(self.cluster_size as u64),
+                (fragment.records * self.record_size as u64)
+                    .is_multiple_of(self.cluster_size as u64),
                 "an MFT fragment of {} records is not a whole number of clusters",
                 fragment.records
             );

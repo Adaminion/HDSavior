@@ -19,7 +19,9 @@ mod records;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::image::Image;
-use crate::manifest::{FragmentFact, InstanceKind, InstanceRole, Manifest, RecordClass, WarningExpect};
+use crate::manifest::{
+    FragmentFact, InstanceKind, InstanceRole, Manifest, RecordClass, WarningExpect,
+};
 
 /// The time the manifest assumes the scan takes place at: 2026-11-24
 /// 00:00 UTC as FILETIME. ALGORITHMS D2 calls a change time "timed" when it
@@ -45,12 +47,19 @@ pub(crate) fn signature_matches(head: &[u8], ext: &str) -> bool {
         "png" => head.starts_with(b"\x89PNG\r\n\x1a\n"),
         "gif" => head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a"),
         "bmp" => head.starts_with(b"BM"),
-        "pdf" => head[..head.len().min(1024)].windows(5).any(|w| w == b"%PDF-"),
+        "pdf" => head[..head.len().min(1024)]
+            .windows(5)
+            .any(|w| w == b"%PDF-"),
         "zip" | "docx" | "xlsx" | "pptx" => {
-            head.len() >= 4 && head[0] == b'P' && head[1] == b'K' && matches!((head[2], head[3]), (3, 4) | (5, 6) | (7, 8))
+            head.len() >= 4
+                && head[0] == b'P'
+                && head[1] == b'K'
+                && matches!((head[2], head[3]), (3, 4) | (5, 6) | (7, 8))
         }
         "wav" => {
-            head.len() >= 12 && matches!(&head[..4], b"RIFF" | b"RF64" | b"BW64" | b"RIFX") && &head[8..12] == b"WAVE"
+            head.len() >= 12
+                && matches!(&head[..4], b"RIFF" | b"RF64" | b"BW64" | b"RIFX")
+                && &head[8..12] == b"WAVE"
         }
         _ => false,
     }
@@ -70,7 +79,11 @@ fn stray_node(m: &Manifest, analysis: &records::Analysis, i: usize) -> bool {
 /// holds the instance kinds a scenario states for physical instances; they
 /// settle what the rules leave open and must agree with what the rules
 /// decide. Returns what remains undecided (the scenario must say).
-pub(crate) fn derive(m: &mut Manifest, image: &Image, kind_override: &BTreeMap<u32, InstanceKind>) -> Vec<String> {
+pub(crate) fn derive(
+    m: &mut Manifest,
+    image: &Image,
+    kind_override: &BTreeMap<u32, InstanceKind>,
+) -> Vec<String> {
     let current = records::current_mfts(m);
     let classes = records::classify(m, &current);
     let overwritten = records::overwritten_set(m, &current, &classes);
@@ -80,12 +93,20 @@ pub(crate) fn derive(m: &mut Manifest, image: &Image, kind_override: &BTreeMap<u
     // where its file system wrote them (copies elsewhere are not part of it)
     let mut entry_records: Vec<Vec<usize>> = vec![Vec::new(); m.entries.len()];
     for (i, e) in record_entry.iter().enumerate() {
-        let own = matches!(m.records[i].role, crate::facts::RecordRole::Base | crate::facts::RecordRole::Extension);
+        let own = matches!(
+            m.records[i].role,
+            crate::facts::RecordRole::Base | crate::facts::RecordRole::Extension
+        );
         if let (Some(e), true) = (e, own) {
             entry_records[*e as usize].push(i);
         }
     }
-    let by_offset: HashMap<u64, usize> = m.records.iter().enumerate().map(|(i, r)| (r.offset, i)).collect();
+    let by_offset: HashMap<u64, usize> = m
+        .records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.offset, i))
+        .collect();
     let base_record: Vec<Option<usize>> = m
         .entries
         .iter()
@@ -111,14 +132,20 @@ pub(crate) fn derive(m: &mut Manifest, image: &Image, kind_override: &BTreeMap<u
     // repeat an entry's record (stale copies).
     let shown: Vec<bool> = (0..catalog.instances.len() as u32)
         .map(|c| {
-            expects.iter().any(|x| x.presence == crate::manifest::Presence::Shown && x.instance == Some(c))
+            expects
+                .iter()
+                .any(|x| x.presence == crate::manifest::Presence::Shown && x.instance == Some(c))
                 || (catalog.instances[c as usize].kind == InstanceKind::Strays
-                    && (0..m.records.len()).any(|i| catalog.of_record[i] == Some(c) && stray_node(m, &analysis, i)))
+                    && (0..m.records.len())
+                        .any(|i| catalog.of_record[i] == Some(c) && stray_node(m, &analysis, i)))
         })
         .collect();
     let mut remap: Vec<Option<u32>> = vec![None; catalog.instances.len()];
     let mut kept = Vec::new();
-    for (c, mut inst) in std::mem::take(&mut catalog.instances).into_iter().enumerate() {
+    for (c, mut inst) in std::mem::take(&mut catalog.instances)
+        .into_iter()
+        .enumerate()
+    {
         if shown[c] {
             remap[c] = Some(kept.len() as u32);
             inst.id = kept.len() as u32;
@@ -130,14 +157,25 @@ pub(crate) fn derive(m: &mut Manifest, image: &Image, kind_override: &BTreeMap<u
     for c in &mut catalog.of_record {
         *c = renumber(*c);
     }
-    catalog.of_segment = catalog.of_segment.iter().filter_map(|(&k, &c)| Some((k, remap[c as usize]?))).collect();
+    catalog.of_segment = catalog
+        .of_segment
+        .iter()
+        .filter_map(|(&k, &c)| Some((k, remap[c as usize]?)))
+        .collect();
     for x in &mut expects {
         x.instance = renumber(x.instance);
     }
     let marked: Vec<Option<bool>> = (0..m.records.len())
-        .map(|i| (classes[i] == Some(RecordClass::Old)).then(|| analysis.marked(i)).flatten())
+        .map(|i| {
+            (classes[i] == Some(RecordClass::Old))
+                .then(|| analysis.marked(i))
+                .flatten()
+        })
         .collect();
-    let mixed = analysis.fragments.iter().any(|f| !f.uncertain && !f.marked.is_empty());
+    let mixed = analysis
+        .fragments
+        .iter()
+        .any(|f| !f.uncertain && !f.marked.is_empty());
     let uncertain = analysis.fragments.iter().any(|f| f.uncertain);
     let fragments: Vec<FragmentFact> = analysis
         .fragments
@@ -153,7 +191,9 @@ pub(crate) fn derive(m: &mut Manifest, image: &Image, kind_override: &BTreeMap<u
             ),
             contradictions: frag.contradictions.clone(),
             cuts: frag.cuts.clone(),
-            segment_instances: (0..frag.segments()).map(|s| catalog.of_segment.get(&(f, s)).copied()).collect(),
+            segment_instances: (0..frag.segments())
+                .map(|s| catalog.of_segment.get(&(f, s)).copied())
+                .collect(),
         })
         .collect();
     let undecided = catalog.undecided.clone();
@@ -174,8 +214,14 @@ pub(crate) fn derive(m: &mut Manifest, image: &Image, kind_override: &BTreeMap<u
             let mut kinds = m
                 .entries
                 .iter()
-                .filter(|e| e.instance == inst.id && e.expect.presence == crate::manifest::Presence::Shown)
-                .map(|e| e.expect.instance.map(|c| catalog.instances[c as usize].kind));
+                .filter(|e| {
+                    e.instance == inst.id && e.expect.presence == crate::manifest::Presence::Shown
+                })
+                .map(|e| {
+                    e.expect
+                        .instance
+                        .map(|c| catalog.instances[c as usize].kind)
+                });
             match kinds.next() {
                 Some(Some(first)) if kinds.all(|k| k == Some(first)) => Some(first),
                 _ => None,
@@ -186,7 +232,10 @@ pub(crate) fn derive(m: &mut Manifest, image: &Image, kind_override: &BTreeMap<u
     m.catalog = catalog.instances;
     m.fragments = fragments;
     m.warnings = if mixed || !uncertain {
-        vec![WarningExpect { code: "mixed_generations".into(), raised: mixed }]
+        vec![WarningExpect {
+            code: "mixed_generations".into(),
+            raised: mixed,
+        }]
     } else {
         Vec::new()
     };

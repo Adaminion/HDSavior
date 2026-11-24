@@ -105,10 +105,9 @@ void main() {
         }
       }
       // The three reasons of overlaps_source are told apart.
-      expect(
-        {for (final r in ProtectionReason.values) S.verdictHeadline(DestinationVerdict.overlapsSource, r)},
-        hasLength(3),
-      );
+      expect({
+        for (final r in ProtectionReason.values) S.verdictHeadline(DestinationVerdict.overlapsSource, r),
+      }, hasLength(3));
     });
   });
 }

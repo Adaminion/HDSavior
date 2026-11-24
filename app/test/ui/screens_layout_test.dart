@@ -84,7 +84,7 @@ final Map<String, Scenario> scenarios = {
   },
   'results-geometry': (tester, fake) async {
     await _scanned(tester, fake);
-    await tester.tap(find.textContaining('Disk layout').first);
+    await tester.tap(find.byType(ActionChip));
     await settle(tester);
   },
   'recover-form': (tester, fake) async {

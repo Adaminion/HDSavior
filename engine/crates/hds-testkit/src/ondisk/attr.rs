@@ -71,7 +71,11 @@ pub struct FileNameValue {
 
 /// `$FILE_NAME` value: 0x42 bytes plus the name.
 pub fn file_name(v: &FileNameValue) -> Vec<u8> {
-    assert!(v.name.len() <= 255, "file name of {} units cannot be stored", v.name.len());
+    assert!(
+        v.name.len() <= 255,
+        "file name of {} units cannot be stored",
+        v.name.len()
+    );
     let mut b = vec![0u8; 0x42 + 2 * v.name.len()];
     put_u64(&mut b, 0x00, v.parent.raw());
     for (i, &t) in v.times.iter().enumerate() {
@@ -162,19 +166,31 @@ mod tests {
         let times = [1, 2, 3, 4];
         let short = standard_information(&times, 0x26, None);
         assert_eq!(short.len(), 48);
-        assert_eq!(&short[0x10..0x18], &3u64.to_le_bytes(), "MFT change time is the third");
+        assert_eq!(
+            &short[0x10..0x18],
+            &3u64.to_le_bytes(),
+            "MFT change time is the third"
+        );
         assert_eq!(&short[0x20..0x24], &[0x26, 0, 0, 0]);
         let long = standard_information(
             &times,
             0x20,
-            Some(SiV3 { owner_id: 9, security_id: 0x107, quota_charged: 5, usn: 0x1122 }),
+            Some(SiV3 {
+                owner_id: 9,
+                security_id: 0x107,
+                quota_charged: 5,
+                usn: 0x1122,
+            }),
         );
         assert_eq!(long.len(), 72);
-        assert_eq!(&long[..0x24], &{
-            let mut v = short[..0x24].to_vec();
-            v[0x20] = 0x20;
-            v
-        }[..]);
+        assert_eq!(
+            &long[..0x24],
+            &{
+                let mut v = short[..0x24].to_vec();
+                v[0x20] = 0x20;
+                v
+            }[..]
+        );
         assert_eq!(&long[0x30..0x34], &9u32.to_le_bytes());
         assert_eq!(&long[0x34..0x38], &0x107u32.to_le_bytes());
         assert_eq!(&long[0x38..0x40], &5u64.to_le_bytes());
@@ -212,9 +228,27 @@ mod tests {
     fn attribute_list_entries() {
         let i30: Vec<u16> = "$I30".encode_utf16().collect();
         let b = attribute_list(&[
-            ListEntry { type_code: 0x10, name: vec![], lowest_vcn: 0, holder: FileRef::new(100, 2), id: 0 },
-            ListEntry { type_code: 0x80, name: vec![], lowest_vcn: 468, holder: FileRef::new(101, 1), id: 0 },
-            ListEntry { type_code: 0xA0, name: i30, lowest_vcn: 134, holder: FileRef::new(102, 3), id: 4 },
+            ListEntry {
+                type_code: 0x10,
+                name: vec![],
+                lowest_vcn: 0,
+                holder: FileRef::new(100, 2),
+                id: 0,
+            },
+            ListEntry {
+                type_code: 0x80,
+                name: vec![],
+                lowest_vcn: 468,
+                holder: FileRef::new(101, 1),
+                id: 0,
+            },
+            ListEntry {
+                type_code: 0xA0,
+                name: i30,
+                lowest_vcn: 134,
+                holder: FileRef::new(102, 3),
+                id: 4,
+            },
         ]);
         // unnamed entries are 0x20 bytes, a $I30 entry 0x28 (notes section 8)
         assert_eq!(b.len(), 0x20 + 0x20 + 0x28);
@@ -232,7 +266,10 @@ mod tests {
 
     #[test]
     fn volume_information_and_reparse_point() {
-        assert_eq!(volume_information(3, 1, 0), [0, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0, 0]);
+        assert_eq!(
+            volume_information(3, 1, 0),
+            [0, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0, 0]
+        );
         // notes section 11: a symbolic link value starts "0C 00 00 A0 80 00 00 00"
         let b = reparse_point(reparse_tag::SYMLINK, &[0x55; 0x80]);
         assert_eq!(&b[..8], &[0x0C, 0x00, 0x00, 0xA0, 0x80, 0x00, 0x00, 0x00]);

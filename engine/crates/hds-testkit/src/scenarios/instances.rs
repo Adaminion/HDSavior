@@ -65,12 +65,21 @@ pub fn generations_by_references(seed: u64) -> Built {
         i += 1;
         v.add_tagged(early, format!("early-{i:03}.dat").as_str(), 100 + i);
     }
-    let folders: Vec<_> =
-        (0..4u64).map(|k| v.mkdir_with(root, format!("Old folder {k}").as_str(), DirSpec::new().record(300 + k))).collect();
+    let folders: Vec<_> = (0..4u64)
+        .map(|k| {
+            v.mkdir_with(
+                root,
+                format!("Old folder {k}").as_str(),
+                DirSpec::new().record(300 + k),
+            )
+        })
+        .collect();
     let mut record = 600;
     for (k, &dir) in folders.iter().enumerate() {
         for j in 0..10u64 {
-            let file = FileSpec::tagged(derive(seed, "kept") + 10 * k as u64 + j, 200 + j).resident().record(record);
+            let file = FileSpec::tagged(derive(seed, "kept") + 10 * k as u64 + j, 200 + j)
+                .resident()
+                .record(record);
             v.add_file(dir, format!("kept-{k}-{j}.txt").as_str(), file);
             record += 1;
         }
@@ -83,23 +92,46 @@ pub fn generations_by_references(seed: u64) -> Built {
         FileSpec::tagged(derive(seed, "split"), 8 * cs - 100)
             .runs(runs)
             .record(304)
-            .multi(MultiSpec::new(ListForm::Resident).data(&[(1, 0)]).extension_records(&[700])),
+            .multi(
+                MultiSpec::new(ListForm::Resident)
+                    .data(&[(1, 0)])
+                    .extension_records(&[700]),
+            ),
     );
     disk.render(gen1);
 
     let gen2 = generation(&mut disk, "gen2", 2020, 512);
     let v = disk.volume(gen2);
     let root = v.root();
-    v.add_file(root, "a file now.dat", FileSpec::tagged(derive(seed, "file 300"), 5000).record(300));
+    v.add_file(
+        root,
+        "a file now.dat",
+        FileSpec::tagged(derive(seed, "file 300"), 5000).record(300),
+    );
     let short = v.mkdir_with(root, "Short-lived", DirSpec::new().record(301));
     v.delete(short);
     v.mkdir_with(root, "Second life", DirSpec::new().record(301));
     v.mkdir_with(root, "Same number 302", DirSpec::new().record(302));
     v.mkdir_with(root, "Same number 303", DirSpec::new().record(303));
-    let temp = v.add_file(root, "temp.dat", FileSpec::tagged(derive(seed, "temp"), 100).record(304));
+    let temp = v.add_file(
+        root,
+        "temp.dat",
+        FileSpec::tagged(derive(seed, "temp"), 100).record(304),
+    );
     v.delete(temp);
-    v.add_file(root, "second life.dat", FileSpec::tagged(derive(seed, "file 304"), 7000).record(304));
-    populate(v, &TreeSpec { files: 130, name_shift: 7, ..TreeSpec::default() });
+    v.add_file(
+        root,
+        "second life.dat",
+        FileSpec::tagged(derive(seed, "file 304"), 7000).record(304),
+    );
+    populate(
+        v,
+        &TreeSpec {
+            files: 130,
+            name_shift: 7,
+            ..TreeSpec::default()
+        },
+    );
     disk.render(gen2);
 
     let current = generation(&mut disk, "current", 2023, 256);
@@ -142,17 +174,40 @@ pub fn generation_cut_dropped(seed: u64) -> Built {
         v.add_tagged(early, format!("early-{i:03}.dat").as_str(), 100 + i);
     }
     let shared = vec![Run::at(v.total_clusters() - 4000, 6)];
-    v.add_file(root, "stale.bin", FileSpec::tagged(derive(seed, "stale"), 6 * cs).runs(shared.clone()).record(512));
+    v.add_file(
+        root,
+        "stale.bin",
+        FileSpec::tagged(derive(seed, "stale"), 6 * cs)
+            .runs(shared.clone())
+            .record(512),
+    );
     for j in 0..20u64 {
-        v.add_file(root, format!("left-behind-{j:02}.txt").as_str(), FileSpec::tagged(derive(seed, "left") + j, 300 + j).resident());
+        v.add_file(
+            root,
+            format!("left-behind-{j:02}.txt").as_str(),
+            FileSpec::tagged(derive(seed, "left") + j, 300 + j).resident(),
+        );
     }
     disk.render(gen1);
 
     let gen2 = generation(&mut disk, "gen2", 2020, 512);
     let v = disk.volume(gen2);
     let root = v.root();
-    v.add_file(root, "fresh.bin", FileSpec::tagged(derive(seed, "fresh"), 6 * cs - 1).runs(shared).record(300));
-    populate(v, &TreeSpec { files: 130, name_shift: 7, ..TreeSpec::default() });
+    v.add_file(
+        root,
+        "fresh.bin",
+        FileSpec::tagged(derive(seed, "fresh"), 6 * cs - 1)
+            .runs(shared)
+            .record(300),
+    );
+    populate(
+        v,
+        &TreeSpec {
+            files: 130,
+            name_shift: 7,
+            ..TreeSpec::default()
+        },
+    );
     disk.render(gen2);
 
     let current = generation(&mut disk, "current", 2023, 256);
@@ -184,7 +239,11 @@ pub fn copies_of_mft_blocks(seed: u64) -> Built {
         "Copies of MFT blocks in free space and inside a deleted file: copy sets, merged into the strays.",
         &["D1", "D4", "D6", "D7"],
     );
-    let (old, _) = old_volume(&mut disk, VolumeParams::new(0, 96 * MIB).label("old"), &TreeSpec::default());
+    let (old, _) = old_volume(
+        &mut disk,
+        VolumeParams::new(0, 96 * MIB).label("old"),
+        &TreeSpec::default(),
+    );
     let v = disk.volume_ref(old);
     let total = v.total_clusters();
     let spare = v.lcn_to_offset(total - 3000);
@@ -245,29 +304,47 @@ pub fn extensions_in_free_slots(seed: u64) -> Built {
     let v = disk.volume(old);
     let root = v.root();
     let cs = v.cluster_size();
-    let multi = |ext: u64| MultiSpec::new(ListForm::Resident).data(&[(1, 0)]).extension_records(&[ext]);
+    let multi = |ext: u64| {
+        MultiSpec::new(ListForm::Resident)
+            .data(&[(1, 0)])
+            .extension_records(&[ext])
+    };
     let orphaned = v.add_file(
         root,
         "orphaned-by-the-new-volume.bin",
-        FileSpec::tagged(derive(seed, "orphaned"), 6 * cs).fragments(3).multi(multi(130)),
+        FileSpec::tagged(derive(seed, "orphaned"), 6 * cs)
+            .fragments(3)
+            .multi(multi(130)),
     );
-    assert_eq!(v.reference(orphaned).number, 38, "the first user record of the old volume");
+    assert_eq!(
+        v.reference(orphaned).number,
+        38,
+        "the first user record of the old volume"
+    );
     let deleted = v.add_file(
         root,
         "deleted-in-free-slots.bin",
-        FileSpec::tagged(derive(seed, "deleted"), 6 * cs - 17).fragments(3).record(40).multi(multi(131)),
+        FileSpec::tagged(derive(seed, "deleted"), 6 * cs - 17)
+            .fragments(3)
+            .record(40)
+            .multi(multi(131)),
     );
     v.add_file(
         root,
         "alive-in-free-slots.bin",
-        FileSpec::tagged(derive(seed, "alive"), 6 * cs - 33).fragments(3).record(41).multi(multi(132)),
+        FileSpec::tagged(derive(seed, "alive"), 6 * cs - 33)
+            .fragments(3)
+            .record(41)
+            .multi(multi(132)),
     );
     let runs = v.runs(orphaned);
     v.delete(orphaned);
     let reuser = v.add_file(
         root,
         "reused-the-clusters.bin",
-        FileSpec::tagged(derive(seed, "reuser"), total_clusters(&runs) * cs).runs(runs).record(42),
+        FileSpec::tagged(derive(seed, "reuser"), total_clusters(&runs) * cs)
+            .runs(runs)
+            .record(42),
     );
     v.delete(reuser);
     v.delete(deleted);
@@ -276,7 +353,11 @@ pub fn extensions_in_free_slots(seed: u64) -> Built {
     let new = disk.format(disk.reformat_params(old).blank_slots(BlankSlots::Untouched));
     let v = disk.volume(new);
     let root = v.root();
-    let first = v.add_file(root, "first new file.txt", FileSpec::tagged(derive(seed, "new"), 300).resident());
+    let first = v.add_file(
+        root,
+        "first new file.txt",
+        FileSpec::tagged(derive(seed, "new"), 300).resident(),
+    );
     assert_eq!(v.reference(first).number, 38);
     disk.render(new);
     disk.finish()

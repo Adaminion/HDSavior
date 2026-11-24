@@ -74,9 +74,9 @@ class _ImageScreenState extends State<ImageScreen> {
   String _suggestedName(SourceInfo info) {
     final base = info.kind == SourceKind.disk
         ? [?info.model, ?info.serial].where((s) => s.trim().isNotEmpty).join(' ')
-        : 'Copy of ${info.path.split(RegExp(r'[\\/]')).last}';
+        : S.imageCopyName(info.path.split(RegExp(r'[\\/]')).last);
     final safe = base.replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1f]'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
-    return '${safe.isEmpty ? 'Disk' : safe}.img';
+    return '${safe.isEmpty ? S.imageDefaultName : safe}.img';
   }
 
   Future<void> _start(OpenedSource source) async {
@@ -371,9 +371,7 @@ class _Progress extends StatelessWidget {
         const SizedBox(height: 12),
         Row(
           children: [
-            Expanded(
-              child: Text(S.imageDestinationLine(image.checkedDestination ?? ''), style: theme.textTheme.bodySmall),
-            ),
+            Expanded(child: Text(S.imageDestinationLine(image.jobDestination ?? ''), style: theme.textTheme.bodySmall)),
             const SizedBox(width: 16),
             OutlinedButton.icon(
               onPressed: image.phase == JobPhase.running || image.phase == JobPhase.starting
@@ -409,7 +407,7 @@ class _Outcome extends StatelessWidget {
     final image = app.image;
     final done = image.result;
     final status = image.status;
-    final path = done?.path ?? image.checkedDestination;
+    final path = done?.path ?? image.jobDestination;
     final Widget headline = switch (status) {
       JobStatus.completed => Notice(
         level: (done?.badBytes ?? 0) > 0 ? NoticeLevel.caution : NoticeLevel.good,

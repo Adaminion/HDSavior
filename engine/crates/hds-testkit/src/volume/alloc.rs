@@ -13,7 +13,11 @@ pub struct Allocator {
 impl Allocator {
     /// An allocator for `total` free clusters.
     pub fn new(total: u64) -> Self {
-        Allocator { bits: vec![0; total.div_ceil(64) as usize], total, cursor: 0 }
+        Allocator {
+            bits: vec![0; total.div_ceil(64) as usize],
+            total,
+            cursor: 0,
+        }
     }
 
     /// Number of clusters of the volume.
@@ -23,13 +27,18 @@ impl Allocator {
 
     /// `true` when cluster `lcn` is allocated.
     pub fn is_used(&self, lcn: u64) -> bool {
-        assert!(lcn < self.total, "cluster {lcn} is outside the volume ({} clusters)", self.total);
+        assert!(
+            lcn < self.total,
+            "cluster {lcn} is outside the volume ({} clusters)",
+            self.total
+        );
         self.bits[(lcn / 64) as usize] >> (lcn % 64) & 1 == 1
     }
 
     /// `true` when all `len` clusters from `lcn` exist and are free.
     pub fn is_free(&self, lcn: u64, len: u64) -> bool {
-        lcn.checked_add(len).is_some_and(|end| end <= self.total) && (lcn..lcn + len).all(|c| !self.is_used(c))
+        lcn.checked_add(len).is_some_and(|end| end <= self.total)
+            && (lcn..lcn + len).all(|c| !self.is_used(c))
     }
 
     fn set(&mut self, lcn: u64, len: u64, used: bool) {
@@ -117,7 +126,10 @@ impl Allocator {
     /// left between consecutive fragments, so that they can never be merged
     /// into one run.
     pub fn alloc_fragmented(&mut self, len: u64, pieces: u64) -> Vec<Run> {
-        assert!(pieces >= 1 && pieces <= len, "cannot cut {len} clusters into {pieces} fragments");
+        assert!(
+            pieces >= 1 && pieces <= len,
+            "cannot cut {len} clusters into {pieces} fragments"
+        );
         let base = len / pieces;
         let extra = len % pieces;
         let mut runs = Vec::with_capacity(pieces as usize);
@@ -231,7 +243,10 @@ mod tests {
     fn fragments_never_touch() {
         let mut a = Allocator::new(1000);
         let runs = a.alloc_fragmented(10, 4);
-        assert_eq!(runs, [Run::at(0, 3), Run::at(4, 3), Run::at(8, 2), Run::at(11, 2)]);
+        assert_eq!(
+            runs,
+            [Run::at(0, 3), Run::at(4, 3), Run::at(8, 2), Run::at(11, 2)]
+        );
         assert_eq!(runs.iter().map(|r| r.len).sum::<u64>(), 10);
         // the gap clusters stay free for later files
         assert!(a.is_free(3, 1) && a.is_free(7, 1) && a.is_free(10, 1));

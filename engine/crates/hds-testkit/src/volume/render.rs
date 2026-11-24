@@ -4,8 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::content::fill_tagged;
 use crate::facts::{
-    index_entry_facts, record_fact, ArtifactState, BootFact, IndexBlockFact, ListEntryFact, RecordFact, RecordRole,
+    index_entry_facts, record_fact, ArtifactState, BootFact, IndexBlockFact, ListEntryFact,
+    RecordFact, RecordRole,
 };
+use crate::ondisk::align8;
 use crate::ondisk::attr::{file_name, FileNameValue, FN_DIRECTORY, FN_VIEW_INDEX};
 use crate::ondisk::attrdef::attrdef_table;
 use crate::ondisk::boot::{encode_boot_sector, BootParams};
@@ -13,7 +15,6 @@ use crate::ondisk::index::{build_tree, indx_block, indx_capacity, vcn_step, Inde
 use crate::ondisk::record::{blank_model, BlankForm, FLAG_VIEW_INDEX};
 use crate::ondisk::runlist::{total_clusters, Run};
 use crate::ondisk::upcase::{collate, upcase_table};
-use crate::ondisk::align8;
 
 use super::params::{BlankSlots, Flavor, ListForm};
 use super::{NameLink, Node, NodeId, ParentRef, Slot, Source, Stream, SystemData, Volume};
@@ -61,10 +62,23 @@ impl Volume {
     fn index_entry(&self, node: &Node, link: &NameLink, parent: NodeId) -> IndexEntry {
         let cs = self.cluster_size();
         let (allocated_size, real_size) = match node.data() {
-            Some(Stream { runs: Some(runs), real_size, .. }) => {
-                (runs.iter().filter(|r| r.lcn.is_some()).map(|r| r.len).sum::<u64>() * cs, *real_size)
-            }
-            Some(Stream { runs: None, real_size, .. }) => (align8(*real_size as usize) as u64, *real_size),
+            Some(Stream {
+                runs: Some(runs),
+                real_size,
+                ..
+            }) => (
+                runs.iter()
+                    .filter(|r| r.lcn.is_some())
+                    .map(|r| r.len)
+                    .sum::<u64>()
+                    * cs,
+                *real_size,
+            ),
+            Some(Stream {
+                runs: None,
+                real_size,
+                ..
+            }) => (align8(*real_size as usize) as u64, *real_size),
             None => (0, 0),
         };
         let mut flags = node.file_attributes;
@@ -90,7 +104,10 @@ impl Volume {
 
     pub(crate) fn ensure_list_allocated(&mut self, id: NodeId) {
         let node = self.node(id);
-        let wanted = node.multi.as_ref().is_some_and(|m| m.list == ListForm::NonResident);
+        let wanted = node
+            .multi
+            .as_ref()
+            .is_some_and(|m| m.list == ListForm::NonResident);
         if !wanted || !node.list_runs.is_empty() || node.superseded || !node.in_use {
             return;
         }
@@ -117,7 +134,10 @@ impl Volume {
         for node in self.nodes.iter().filter(|n| n.in_use && !n.superseded) {
             for link in &node.names {
                 if let (ParentRef::Node(parent), true) = (link.parent, link.indexed) {
-                    children.entry(parent.0).or_default().push((link.name.clone(), self.index_entry(node, link, parent)));
+                    children
+                        .entry(parent.0)
+                        .or_default()
+                        .push((link.name.clone(), self.index_entry(node, link, parent)));
                 }
             }
         }
@@ -136,7 +156,14 @@ impl Volume {
             let dir = self.nodes[d].dir.as_ref().expect("filtered");
             let step = vcn_step(ibs, cs as u32);
             let (fill, force, fragment) = (dir.fill_percent, dir.force_blocks, dir.fragment);
-            let mut tree = build_tree(entries.clone(), small, indx_capacity(ibs), step, fill, force);
+            let mut tree = build_tree(
+                entries.clone(),
+                small,
+                indx_capacity(ibs),
+                step,
+                fill,
+                force,
+            );
             if !tree.blocks.is_empty() {
                 tree = build_tree(entries, large, indx_capacity(ibs), step, fill, true);
             }
@@ -157,7 +184,12 @@ impl Volume {
                 } else {
                     vec![self.alloc.alloc(more)]
                 };
-                self.nodes[d].dir.as_mut().expect("filtered").runs.extend(new_runs);
+                self.nodes[d]
+                    .dir
+                    .as_mut()
+                    .expect("filtered")
+                    .runs
+                    .extend(new_runs);
             }
             self.trees.insert(d, tree);
             self.fit_or_split(NodeId(d));
@@ -176,7 +208,10 @@ impl Volume {
             let len = run.len * cs;
             if position < start + len {
                 let lcn = run.lcn?;
-                return Some((self.lcn_to_offset(lcn) + (position - start), start + len - position));
+                return Some((
+                    self.lcn_to_offset(lcn) + (position - start),
+                    start + len - position,
+                ));
             }
             start += len;
         }
@@ -211,7 +246,12 @@ impl Volume {
         }
     }
 
-    fn system_bytes(&self, data: SystemData, size: u64, slots_in_use: &BTreeSet<u64>) -> Option<Vec<u8>> {
+    fn system_bytes(
+        &self,
+        data: SystemData,
+        size: u64,
+        slots_in_use: &BTreeSet<u64>,
+    ) -> Option<Vec<u8>> {
         Some(match data {
             SystemData::Mft | SystemData::MftMirr => return None,
             SystemData::MftBitmap => {
@@ -239,7 +279,12 @@ impl Volume {
         })
     }
 
-    fn write_stream(&self, stream: &Stream, sink: &mut dyn RenderSink, slots_in_use: &BTreeSet<u64>) {
+    fn write_stream(
+        &self,
+        stream: &Stream,
+        sink: &mut dyn RenderSink,
+        slots_in_use: &BTreeSet<u64>,
+    ) {
         let Some(runs) = &stream.runs else {
             return;
         };
@@ -259,7 +304,11 @@ impl Volume {
                 });
             }
             Source::Spec(content) => {
-                let valid = if stream.garbage { 0 } else { stream.initialized.min(stream.real_size) };
+                let valid = if stream.garbage {
+                    0
+                } else {
+                    stream.initialized.min(stream.real_size)
+                };
                 let tag: &[u8; 4] = if stream.garbage { b"lz1:" } else { b"old:" };
                 // Stale bytes are written for at most 64 KiB behind the
                 // content (rounded up to 4 KiB): enough to catch a reader
@@ -278,7 +327,12 @@ impl Volume {
                         content.read_at(pos, &mut buf[..content_len]);
                     }
                     if content_len < buf.len() {
-                        fill_tagged(tag, stream.stale_seed, pos + content_len as u64, &mut buf[content_len..]);
+                        fill_tagged(
+                            tag,
+                            stream.stale_seed,
+                            pos + content_len as u64,
+                            &mut buf[content_len..],
+                        );
                     }
                 });
             }
@@ -296,7 +350,9 @@ impl Volume {
             mftmirr_lcn: self.plan.mftmirr.lcn.expect("allocated"),
             record_size: p.record_size,
             index_block_size: p.index_block_size,
-            hidden_sectors: p.hidden_sectors.unwrap_or((p.offset / p.bytes_per_sector as u64) as u32),
+            hidden_sectors: p
+                .hidden_sectors
+                .unwrap_or((p.offset / p.bytes_per_sector as u64) as u32),
             serial: self.serial,
         }
     }
@@ -333,7 +389,10 @@ impl Volume {
         let cs = self.cluster_size();
         let ibs = self.params.index_block_size;
         let initialized = self.mft_initialized_records();
-        let mut rendered = Rendered { used_ranges: self.alloc.used_ranges(), ..Rendered::default() };
+        let mut rendered = Rendered {
+            used_ranges: self.alloc.used_ranges(),
+            ..Rendered::default()
+        };
 
         // Everything is assembled before anything is written, so that a
         // record overflow cannot leave half a volume behind.
@@ -350,7 +409,9 @@ impl Volume {
                 fact.slot = a.slot;
                 fact.role = a.role;
                 fact.index_root = a.index_root.as_deref().map(index_entry_facts);
-                if let (Some((entries, list_bytes)), Some(list)) = (&a.list, fact.attribute_list.as_mut()) {
+                if let (Some((entries, list_bytes)), Some(list)) =
+                    (&a.list, fact.attribute_list.as_mut())
+                {
                     if !list.resident {
                         list.entries = entries
                             .iter()
@@ -363,16 +424,25 @@ impl Volume {
                             })
                             .collect();
                         let runs = &self.nodes[i].list_runs;
-                        let (offset, _) = self.stream_position(runs, 0).expect("the list has clusters");
+                        let (offset, _) = self
+                            .stream_position(runs, 0)
+                            .expect("the list has clusters");
                         rendered.lists.push((i, offset, list_bytes.clone()));
                     }
                 }
-                assert!(a.slot < initialized, "record {} lies beyond the initialized part of the MFT", a.slot);
+                assert!(
+                    a.slot < initialized,
+                    "record {} lies beyond the initialized part of the MFT",
+                    a.slot
+                );
                 records.insert(a.slot, (bytes, fact, Some(i)));
             }
         }
         for (&slot, raw) in &self.raw {
-            let bytes = raw.model.encode().unwrap_or_else(|e| panic!("raw record {slot}: {e}"));
+            let bytes = raw
+                .model
+                .encode()
+                .unwrap_or_else(|e| panic!("raw record {slot}: {e}"));
             let mut fact = record_fact(&raw.model, &bytes);
             fact.offset = self.record_offset(slot);
             fact.instance = instance;
@@ -393,7 +463,9 @@ impl Volume {
                 rendered.slots_in_use.insert(slot);
             }
         }
-        rendered.slots_in_use.extend(self.extra_bitmap_slots.iter().copied());
+        rendered
+            .slots_in_use
+            .extend(self.extra_bitmap_slots.iter().copied());
 
         // Stream contents in creation order: where a later file reuses the
         // clusters of a deleted one, the later bytes win, as on a real disk.
@@ -412,7 +484,10 @@ impl Volume {
 
         // Boot sectors (the primary is part of $Boot's clusters, written above).
         let boot = encode_boot_sector(&self.boot_params()).to_vec();
-        sink.boot_sector(boot.clone(), self.boot_fact(instance, self.params.offset, false));
+        sink.boot_sector(
+            boot.clone(),
+            self.boot_fact(instance, self.params.offset, false),
+        );
         if self.params.backup_boot {
             let at = self.backup_boot_offset();
             sink.boot_sector(boot, self.boot_fact(instance, at, true));
@@ -429,7 +504,9 @@ impl Volume {
                 let bytes = indx_block(ibs, vcn, dir.lsn, dir.usn, entries);
                 let (offset, contiguous) = self
                     .stream_position(&dir.runs, i as u64 * ibs as u64)
-                    .unwrap_or_else(|| panic!("index block {i} of record {} has no clusters", node.record));
+                    .unwrap_or_else(|| {
+                        panic!("index block {i} of record {} has no clusters", node.record)
+                    });
                 assert!(
                     contiguous >= ibs as u64,
                     "index block {i} of record {} is split over two runs; give index runs in whole blocks",
@@ -459,7 +536,11 @@ impl Volume {
         // The MFT, slot by slot.
         let blank = self.params.effective_blank_slots();
         let old_header = self.params.flavor == Flavor::Win2000;
-        let blank_lsn = if self.params.flavor == Flavor::Win7 { self.lsn / 2 } else { 0 };
+        let blank_lsn = if self.params.flavor == Flavor::Win7 {
+            self.lsn / 2
+        } else {
+            0
+        };
         let mut mirror: Vec<Option<(Vec<u8>, RecordFact)>> = Vec::new();
         for slot in 0..initialized {
             let offset = self.record_offset(slot);
@@ -467,7 +548,12 @@ impl Volume {
                 Some((bytes, fact, node)) => {
                     rendered.records.insert(
                         slot,
-                        RenderedRecord { offset, bytes: bytes.clone(), node, fact: fact.clone() },
+                        RenderedRecord {
+                            offset,
+                            bytes: bytes.clone(),
+                            node,
+                            fact: fact.clone(),
+                        },
                     );
                     sink.record(bytes.clone(), fact.clone());
                     Some((bytes, fact))
@@ -487,7 +573,14 @@ impl Volume {
                         } else {
                             form
                         };
-                        let model = blank_model(form, slot, rs, blank_lsn, self.params.format_time, old_header);
+                        let model = blank_model(
+                            form,
+                            slot,
+                            rs,
+                            blank_lsn,
+                            self.params.format_time,
+                            old_header,
+                        );
                         let bytes = model.encode().expect("a blank record always fits");
                         let mut fact = record_fact(&model, &bytes);
                         fact.offset = offset;
@@ -526,6 +619,8 @@ impl Volume {
 
     /// `true` when `slot` was marked in use by the last render.
     pub fn slot_in_bitmap(&self, slot: u64) -> bool {
-        self.rendered.as_ref().is_some_and(|r| r.slots_in_use.contains(&slot))
+        self.rendered
+            .as_ref()
+            .is_some_and(|r| r.slots_in_use.contains(&slot))
     }
 }

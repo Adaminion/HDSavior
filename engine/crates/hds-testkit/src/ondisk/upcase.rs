@@ -56,7 +56,10 @@ pub fn upcase_table() -> Vec<u8> {
 /// ignoring case (possible in the POSIX namespace) are ordered by their raw
 /// units so that the order is total.
 pub fn collate(a: &[u16], b: &[u16]) -> Ordering {
-    let upper = a.iter().map(|&u| upcase(u)).cmp(b.iter().map(|&u| upcase(u)));
+    let upper = a
+        .iter()
+        .map(|&u| upcase(u))
+        .cmp(b.iter().map(|&u| upcase(u)));
     upper.then_with(|| a.cmp(b))
 }
 
@@ -99,7 +102,11 @@ mod tests {
         // '$' (0x24) sorts before '.', digits before letters, 'a' with 'A'
         assert_eq!(collate(&n("$MFT"), &n(".")), Ordering::Less);
         assert_eq!(collate(&n("b"), &n("A")), Ordering::Greater);
-        assert_eq!(collate(&n("a_file"), &n("another_file")), Ordering::Greater, "'_' (0x5F) > 'N' (0x4E)");
+        assert_eq!(
+            collate(&n("a_file"), &n("another_file")),
+            Ordering::Greater,
+            "'_' (0x5F) > 'N' (0x4E)"
+        );
         assert_eq!(collate(&n("abc"), &n("ABD")), Ordering::Less);
         assert_eq!(collate(&n("abc"), &n("abcd")), Ordering::Less);
         // equal ignoring case: still a total order, upper case first

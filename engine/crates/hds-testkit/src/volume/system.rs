@@ -13,7 +13,10 @@ use crate::time;
 use super::alloc::Allocator;
 use super::params::{Flavor, VolumeParams};
 use super::spec::Quirks;
-use super::{DirState, MftExtent, NameLink, Node, NodeId, ParentRef, Plan, Slot, Source, Stream, SystemData, Volume};
+use super::{
+    DirState, MftExtent, NameLink, Node, NodeId, ParentRef, Plan, Slot, Source, Stream, SystemData,
+    Volume,
+};
 
 /// Collation rules of the view indexes (`layout.h` `COLLATION_RULES`).
 const COLLATION_ULONG: u32 = 16;
@@ -53,7 +56,12 @@ impl Volume {
         let first_clusters = first.records * rs / cs;
         let first_lcn = first.lcn.unwrap_or(default_mft_lcn);
         alloc.alloc_at(first_lcn, first_clusters);
-        mft.push(MftExtent { lcn: first_lcn, clusters: first_clusters, first_record, records: first.records });
+        mft.push(MftExtent {
+            lcn: first_lcn,
+            clusters: first_clusters,
+            first_record,
+            records: first.records,
+        });
         first_record += first.records;
 
         // $MFTMirr: byte 8192 on Windows 7 and later (LCN 2 with large
@@ -128,11 +136,25 @@ impl Volume {
             first_record += fragment.records;
         }
         // user data starts behind the front area
-        let data_start = (0..total).find(|&c| c >= front_cursor && !alloc.is_used(c)).unwrap_or(front_cursor);
+        let data_start = (0..total)
+            .find(|&c| c >= front_cursor && !alloc.is_used(c))
+            .unwrap_or(front_cursor);
         alloc.set_cursor(data_start);
 
-        let plan = Plan { total_clusters: total, mft, mftmirr, mirror_records, logfile, bitmap, mft_bitmap, boot, root_index };
-        let serial = params.serial.unwrap_or_else(|| derive(seed, "serial") | 0x0100_0000_0000_0000);
+        let plan = Plan {
+            total_clusters: total,
+            mft,
+            mftmirr,
+            mirror_records,
+            logfile,
+            bitmap,
+            mft_bitmap,
+            boot,
+            root_index,
+        };
+        let serial = params
+            .serial
+            .unwrap_or_else(|| derive(seed, "serial") | 0x0100_0000_0000_0000);
         let first_user_record = params.first_user_record.unwrap_or(match params.flavor {
             Flavor::Win2000 => 24,
             Flavor::WinXp => 28,
@@ -182,7 +204,11 @@ impl Volume {
         // $STANDARD_INFORMATION and a security descriptor of their own
         // (notes section 6; seen on mkntfs and Windows 10 alike).
         let old_style = matches!(record, 5 | 7 | 12..=15);
-        let seq = if (1..16).contains(&record) { record as u16 } else { 1 };
+        let seq = if (1..16).contains(&record) {
+            record as u16
+        } else {
+            1
+        };
         self.slot_seq.insert(record, seq);
         let namespace = if record < 16 || !windows { 3 } else { 0 };
         Node {
@@ -195,7 +221,10 @@ impl Volume {
             header_flags: 0,
             names: name
                 .map(|(name, parent)| NameLink {
-                    parent: ParentRef::Raw(crate::ondisk::FileRef::new(parent, if parent < 16 { parent as u16 } else { 1 })),
+                    parent: ParentRef::Raw(crate::ondisk::FileRef::new(
+                        parent,
+                        if parent < 16 { parent as u16 } else { 1 },
+                    )),
                     name: utf16(name),
                     namespace,
                     times: [time; 4],
@@ -238,7 +267,13 @@ impl Volume {
         id
     }
 
-    fn system_stream(&self, name: &str, size: u64, runs: Option<Vec<Run>>, data: SystemData) -> Stream {
+    fn system_stream(
+        &self,
+        name: &str,
+        size: u64,
+        runs: Option<Vec<Run>>,
+        data: SystemData,
+    ) -> Stream {
         Stream {
             type_code: attr_type::DATA,
             name: utf16(name),
@@ -261,25 +296,42 @@ impl Volume {
 
         // 0 $MFT
         let mut mft = self.system_node(0, Some(("$MFT", 5)), false);
-        let mft_runs: Vec<Run> = self.plan.mft.iter().map(|e| Run::at(e.lcn, e.clusters)).collect();
-        let mut data = self.system_stream("", self.mft_records() * rs, Some(mft_runs), SystemData::Mft);
+        let mft_runs: Vec<Run> = self
+            .plan
+            .mft
+            .iter()
+            .map(|e| Run::at(e.lcn, e.clusters))
+            .collect();
+        let mut data =
+            self.system_stream("", self.mft_records() * rs, Some(mft_runs), SystemData::Mft);
         data.initialized = self.mft_initialized_records() * rs;
         mft.streams.push(data);
         let bitmap_bytes = self.mft_records().div_ceil(8).div_ceil(8) * 8;
-        let mut mft_bitmap =
-            self.system_stream("", bitmap_bytes, Some(vec![self.plan.mft_bitmap]), SystemData::MftBitmap);
+        let mut mft_bitmap = self.system_stream(
+            "",
+            bitmap_bytes,
+            Some(vec![self.plan.mft_bitmap]),
+            SystemData::MftBitmap,
+        );
         mft_bitmap.type_code = attr_type::BITMAP;
         mft.streams.push(mft_bitmap);
         if let Some(form) = self.params.mft_attribute_list {
             // first fragment in record 0, everything else in record 15
             let fragments = self.plan.mft.len();
-            assert!(fragments >= 2, "an $MFT with an attribute list needs at least two fragments");
+            assert!(
+                fragments >= 2,
+                "an $MFT with an attribute list needs at least two fragments"
+            );
             mft.multi = Some(
                 super::spec::MultiSpec::new(form)
                     .data(&[(0, 1), (1, fragments - 1)])
                     .extension_records(&[15]),
             );
-            mft.extensions.push(super::ExtRecord { record: 15, seq: 15, superseded: false });
+            mft.extensions.push(super::ExtRecord {
+                record: 15,
+                seq: 15,
+                superseded: false,
+            });
         }
         let mft_id = self.push_system(mft);
         if self.params.mft_attribute_list.is_some() {
@@ -311,16 +363,28 @@ impl Volume {
         let mut node = self.system_node(3, Some(("$Volume", 5)), false);
         let label = utf16(&self.params.volume_name);
         if !label.is_empty() {
-            node.extra_attrs.push(AttrModel::resident(attr_type::VOLUME_NAME, crate::ondisk::utf16_bytes(&label)));
+            node.extra_attrs.push(AttrModel::resident(
+                attr_type::VOLUME_NAME,
+                crate::ondisk::utf16_bytes(&label),
+            ));
         }
-        let (major, minor) = if self.params.flavor == Flavor::Win2000 { (3, 0) } else { (3, 1) };
-        node.extra_attrs.push(AttrModel::resident(attr_type::VOLUME_INFORMATION, volume_information(major, minor, 0)));
-        node.streams.push(self.system_stream("", 0, None, SystemData::Fill(0)));
+        let (major, minor) = if self.params.flavor == Flavor::Win2000 {
+            (3, 0)
+        } else {
+            (3, 1)
+        };
+        node.extra_attrs.push(AttrModel::resident(
+            attr_type::VOLUME_INFORMATION,
+            volume_information(major, minor, 0),
+        ));
+        node.streams
+            .push(self.system_stream("", 0, None, SystemData::Fill(0)));
         self.push_system(node);
 
         // 4 $AttrDef
         let mut node = self.system_node(4, Some(("$AttrDef", 5)), false);
-        node.streams.push(self.system_stream("", 2560, Some(vec![attrdef]), SystemData::AttrDef));
+        node.streams
+            .push(self.system_stream("", 2560, Some(vec![attrdef]), SystemData::AttrDef));
         self.push_system(node);
 
         // 5 the root directory: named ".", its own parent, listed in itself
@@ -350,19 +414,35 @@ impl Volume {
         // 6 $Bitmap
         let mut node = self.system_node(6, Some(("$Bitmap", 5)), false);
         let bytes = total.div_ceil(8).div_ceil(8) * 8;
-        node.streams.push(self.system_stream("", bytes, Some(vec![self.plan.bitmap]), SystemData::Bitmap));
+        node.streams.push(self.system_stream(
+            "",
+            bytes,
+            Some(vec![self.plan.bitmap]),
+            SystemData::Bitmap,
+        ));
         self.adopt_by_root(node, root);
 
         // 7 $Boot
         let mut node = self.system_node(7, Some(("$Boot", 5)), false);
-        node.streams.push(self.system_stream("", 8192, Some(vec![self.plan.boot]), SystemData::Boot));
+        node.streams.push(self.system_stream(
+            "",
+            8192,
+            Some(vec![self.plan.boot]),
+            SystemData::Boot,
+        ));
         self.adopt_by_root(node, root);
 
         // 8 $BadClus: an empty unnamed stream and the sparse $Bad stream
         // covering the volume, initialized size 0 (notes section 4)
         let mut node = self.system_node(8, Some(("$BadClus", 5)), false);
-        node.streams.push(self.system_stream("", 0, None, SystemData::Fill(0)));
-        let mut bad = self.system_stream("$Bad", total * cs, Some(vec![Run::hole(total)]), SystemData::Fill(0));
+        node.streams
+            .push(self.system_stream("", 0, None, SystemData::Fill(0)));
+        let mut bad = self.system_stream(
+            "$Bad",
+            total * cs,
+            Some(vec![Run::hole(total)]),
+            SystemData::Fill(0),
+        );
         bad.initialized = 0;
         bad.source = Source::Unwritten;
         node.streams.push(bad);
@@ -372,7 +452,12 @@ impl Volume {
         let mut node = self.system_node(9, Some(("$Secure", 5)), false);
         node.header_flags = FLAG_VIEW_INDEX;
         node.file_attributes = 0x2000_0006;
-        node.streams.push(self.system_stream("$SDS", SDS_BYTES, Some(vec![secure_sds]), SystemData::Filler(*b"sds:")));
+        node.streams.push(self.system_stream(
+            "$SDS",
+            SDS_BYTES,
+            Some(vec![secure_sds]),
+            SystemData::Filler(*b"sds:"),
+        ));
         for (name, collation) in [("$SDH", COLLATION_SECURITY_HASH), ("$SII", COLLATION_ULONG)] {
             node.extra_attrs.push(
                 AttrModel::resident(
@@ -386,7 +471,8 @@ impl Volume {
 
         // 10 $UpCase
         let mut node = self.system_node(10, Some(("$UpCase", 5)), false);
-        node.streams.push(self.system_stream("", 131_072, Some(vec![upcase]), SystemData::UpCase));
+        node.streams
+            .push(self.system_stream("", 131_072, Some(vec![upcase]), SystemData::UpCase));
         self.adopt_by_root(node, root);
 
         // 11 $Extend
@@ -399,7 +485,8 @@ impl Volume {
                 continue;
             }
             let mut node = self.system_node(record, None, false);
-            node.streams.push(self.system_stream("", 0, None, SystemData::Fill(0)));
+            node.streams
+                .push(self.system_stream("", 0, None, SystemData::Fill(0)));
             self.push_system(node);
         }
 
@@ -407,7 +494,11 @@ impl Volume {
         // (name and collation rule of each)
         type Views<'a> = &'a [(&'a str, u32)];
         let views: [(u64, &str, Views); 3] = [
-            (24, "$Quota", &[("$O", COLLATION_SID), ("$Q", COLLATION_ULONG)]),
+            (
+                24,
+                "$Quota",
+                &[("$O", COLLATION_SID), ("$Q", COLLATION_ULONG)],
+            ),
             (25, "$ObjId", &[("$O", COLLATION_ULONGS)]),
             (26, "$Reparse", &[("$R", COLLATION_ULONGS)]),
         ];
@@ -452,8 +543,13 @@ impl Volume {
         let mut node = self.system_node(record, Some((name, 0)), is_dir);
         for &(stream, size, tag) in streams {
             let resident = size <= 64;
-            let runs = if resident { None } else { Some(vec![self.alloc.alloc(size.div_ceil(cs))]) };
-            node.streams.push(self.system_stream(stream, size, runs, SystemData::Filler(tag)));
+            let runs = if resident {
+                None
+            } else {
+                Some(vec![self.alloc.alloc(size.div_ceil(cs))])
+            };
+            node.streams
+                .push(self.system_stream(stream, size, runs, SystemData::Filler(tag)));
         }
         self.adopt(node, parent)
     }
@@ -473,13 +569,37 @@ impl Volume {
             }
             Flavor::Win7 => {
                 let rm = self.system_file(27, "$RmMetadata", extend, true, &[]);
-                self.system_file(28, "$Repair", rm, false, &[("", 0, *b"rep:"), ("$Config", 8, *b"cfg:")]);
+                self.system_file(
+                    28,
+                    "$Repair",
+                    rm,
+                    false,
+                    &[("", 0, *b"rep:"), ("$Config", 8, *b"cfg:")],
+                );
                 let log = self.system_file(29, "$TxfLog", rm, true, &[]);
                 self.system_file(30, "$Txf", rm, true, &[]);
-                self.system_file(31, "$Tops", log, false, &[("", 100, *b"top:"), ("$T", 1 << 20, *b"tpt:")]);
+                self.system_file(
+                    31,
+                    "$Tops",
+                    log,
+                    false,
+                    &[("", 100, *b"top:"), ("$T", 1 << 20, *b"tpt:")],
+                );
                 self.system_file(32, "$TxfLog.blf", log, false, &[("", 65_536, *b"blf:")]);
-                self.system_file(33, "$TxfLogContainer00000000000000000001", log, false, &[("", txf, *b"tx1:")]);
-                self.system_file(34, "$TxfLogContainer00000000000000000002", log, false, &[("", txf, *b"tx2:")]);
+                self.system_file(
+                    33,
+                    "$TxfLogContainer00000000000000000001",
+                    log,
+                    false,
+                    &[("", txf, *b"tx1:")],
+                );
+                self.system_file(
+                    34,
+                    "$TxfLogContainer00000000000000000002",
+                    log,
+                    false,
+                    &[("", txf, *b"tx2:")],
+                );
             }
             Flavor::Win10 => {
                 let rm = self.system_file(27, "$RmMetadata", extend, true, &[]);
@@ -488,15 +608,38 @@ impl Volume {
                     "$Repair",
                     rm,
                     false,
-                    &[("", 0, *b"rep:"), ("$Config", 8, *b"cfg:"), ("$Corrupt", 2 << 20, *b"cor:"), ("$Verify", 300 << 10, *b"ver:")],
+                    &[
+                        ("", 0, *b"rep:"),
+                        ("$Config", 8, *b"cfg:"),
+                        ("$Corrupt", 2 << 20, *b"cor:"),
+                        ("$Verify", 300 << 10, *b"ver:"),
+                    ],
                 );
                 self.system_file(29, "$Deleted", extend, true, &[]);
                 let log = self.system_file(30, "$TxfLog", rm, true, &[]);
                 self.system_file(31, "$Txf", rm, true, &[]);
-                self.system_file(32, "$Tops", log, false, &[("", 100, *b"top:"), ("$T", 1 << 20, *b"tpt:")]);
+                self.system_file(
+                    32,
+                    "$Tops",
+                    log,
+                    false,
+                    &[("", 100, *b"top:"), ("$T", 1 << 20, *b"tpt:")],
+                );
                 self.system_file(33, "$TxfLog.blf", log, false, &[("", 65_536, *b"blf:")]);
-                self.system_file(34, "$TxfLogContainer00000000000000000001", log, false, &[("", txf, *b"tx1:")]);
-                self.system_file(35, "$TxfLogContainer00000000000000000002", log, false, &[("", txf, *b"tx2:")]);
+                self.system_file(
+                    34,
+                    "$TxfLogContainer00000000000000000001",
+                    log,
+                    false,
+                    &[("", txf, *b"tx1:")],
+                );
+                self.system_file(
+                    35,
+                    "$TxfLogContainer00000000000000000002",
+                    log,
+                    false,
+                    &[("", txf, *b"tx2:")],
+                );
                 let svi = self.user_visible_dir(36, "System Volume Information", root);
                 let mut node = self.system_node(37, Some(("WPSettings.dat", 0)), false);
                 node.file_attributes = 0x20;

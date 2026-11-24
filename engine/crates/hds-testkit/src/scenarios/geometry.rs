@@ -15,15 +15,32 @@ use super::{old_volume, reformat, MIB};
 
 /// Old volume with `cluster` bytes per cluster, four folders with index
 /// blocks, quick-formatted with the same geometry.
-fn cluster_scenario(name: &str, seed: u64, cluster: u32, size: u64, big_folder: usize, records: u64) -> Built {
+fn cluster_scenario(
+    name: &str,
+    seed: u64,
+    cluster: u32,
+    size: u64,
+    big_folder: usize,
+    records: u64,
+) -> Built {
     let mut disk = Disk::new(name, seed, size);
     disk.describe(
         &format!("Volume with {cluster}-byte clusters, quick-formatted with the same geometry."),
         &["F1", "F2", "F6", "H7"],
     );
-    let params = VolumeParams::new(0, size).label("old").cluster_size(cluster).mft_capacity(records);
+    let params = VolumeParams::new(0, size)
+        .label("old")
+        .cluster_size(cluster)
+        .mft_capacity(records);
     let old = disk.format(params);
-    let tree = populate(disk.volume(old), &TreeSpec { big_folder, files: 200, ..TreeSpec::default() });
+    let tree = populate(
+        disk.volume(old),
+        &TreeSpec {
+            big_folder,
+            files: 200,
+            ..TreeSpec::default()
+        },
+    );
     // three more folders with index blocks, created late so that their
     // records survive: with the big one, four directories vote (F2, F6)
     let v = disk.volume(old);
@@ -103,7 +120,10 @@ pub fn cluster_2m(seed: u64) -> Built {
         "Volume with 2 MiB clusters (4096 MFT records in two clusters), quick-formatted with the same geometry.",
         &["F1", "H7"],
     );
-    let params = VolumeParams::new(0, size).label("old").cluster_size(2 << 20).mft_capacity(4096);
+    let params = VolumeParams::new(0, size)
+        .label("old")
+        .cluster_size(2 << 20)
+        .mft_capacity(4096);
     let old = disk.format(params);
     let v = disk.volume(old);
     let root = v.root();
@@ -113,7 +133,11 @@ pub fn cluster_2m(seed: u64) -> Built {
         folders.push(v.mkdir(root, format!("Folder {d:02}").as_str()));
     }
     for i in 0..2100usize {
-        v.add_tagged(folders[i % 30], format!("small-{i:04}.dat").as_str(), 40 + (i as u64 % 500));
+        v.add_tagged(
+            folders[i % 30],
+            format!("small-{i:04}.dat").as_str(),
+            40 + (i as u64 % 500),
+        );
     }
     // these get records above 2047: they survive, with real clusters
     let late = v.mkdir(root, "Late");
@@ -124,7 +148,11 @@ pub fn cluster_2m(seed: u64) -> Built {
     for i in 0..60 {
         v.add_tagged(late, format!("late-{i:02}.dat").as_str(), 100 + 50 * i);
     }
-    v.add_file(late, "two-clusters.bin", FileSpec::tagged(derive(seed, "big"), (2 << 20) + 12345));
+    v.add_file(
+        late,
+        "two-clusters.bin",
+        FileSpec::tagged(derive(seed, "big"), (2 << 20) + 12345),
+    );
     disk.render(old);
     reformat(&mut disk, old);
     disk.finish()
@@ -143,7 +171,9 @@ pub fn records_4k(seed: u64) -> Built {
         "Volume with 4096-byte MFT records on 512-byte sectors, quick-formatted likewise.",
         &["A3", "D1"],
     );
-    let params = VolumeParams::new(0, 96 * MIB).label("old").record_size(4096);
+    let params = VolumeParams::new(0, 96 * MIB)
+        .label("old")
+        .record_size(4096);
     let (old, _) = old_volume(&mut disk, params, &TreeSpec::default());
     reformat(&mut disk, old);
     disk.finish()
@@ -162,7 +192,10 @@ pub fn sector_4k(seed: u64) -> Built {
         "4Kn disk: volume with 4096-byte sectors and 4096-byte MFT records, quick-formatted likewise.",
         &["A3", "D1", "F2"],
     );
-    let params = VolumeParams::new(0, 96 * MIB).label("old").sector_size(4096).record_size(4096);
+    let params = VolumeParams::new(0, 96 * MIB)
+        .label("old")
+        .sector_size(4096)
+        .record_size(4096);
     let (old, _) = old_volume(&mut disk, params, &TreeSpec::default());
     reformat(&mut disk, old);
     disk.finish()
@@ -187,16 +220,30 @@ pub fn partition_at_sector_63(seed: u64) -> Built {
         &["A3", "F2"],
     );
     // record k is at 32256 + lcn * 4096 + k * 1024; lcn 1900 puts record 560 at 8 MiB - 512
-    let old = disk.format(VolumeParams::new(offset, size).label("old").mft_at(1900, 1024));
+    let old = disk.format(
+        VolumeParams::new(offset, size)
+            .label("old")
+            .mft_at(1900, 1024),
+    );
     let v = disk.volume(old);
     assert_eq!(v.record_offset(560), 8 * MIB - 512);
     // keep the cluster for the index block free while the tree is built
     v.allocator().alloc_at(4088, 1);
-    populate(v, &TreeSpec { big_folder: 0, ..TreeSpec::default() });
+    populate(
+        v,
+        &TreeSpec {
+            big_folder: 0,
+            ..TreeSpec::default()
+        },
+    );
     let root = v.root();
     // an index block at lcn 4088 begins at 16 MiB - 512
     v.allocator().free(4088, 1);
-    let big = v.mkdir_with(root, "Many files", DirSpec::new().index_runs(vec![Run::at(4088, 1)]));
+    let big = v.mkdir_with(
+        root,
+        "Many files",
+        DirSpec::new().index_runs(vec![Run::at(4088, 1)]),
+    );
     assert_eq!(v.lcn_to_offset(4088), 16 * MIB - 512);
     for i in 0..150 {
         v.add_tagged(big, format!("item {i:05}.dat").as_str(), 400 + 3 * i);
@@ -233,15 +280,36 @@ pub fn fragmented_mft(seed: u64) -> Built {
     let mut params = VolumeParams::new(0, 96 * MIB).label("old");
     let far = params.total_clusters() * 2 / 3;
     params.mft = vec![
-        MftFragment { lcn: None, records: 256 },
-        MftFragment { lcn: Some(far), records: 256 },
-        MftFragment { lcn: Some(2000), records: 4608 },
-        MftFragment { lcn: Some(1200), records: 256 },
+        MftFragment {
+            lcn: None,
+            records: 256,
+        },
+        MftFragment {
+            lcn: Some(far),
+            records: 256,
+        },
+        MftFragment {
+            lcn: Some(2000),
+            records: 4608,
+        },
+        MftFragment {
+            lcn: Some(1200),
+            records: 256,
+        },
     ];
     let old = disk.format(params);
-    let tree = populate(disk.volume(old), &TreeSpec { files: 560, ..TreeSpec::default() });
+    let tree = populate(
+        disk.volume(old),
+        &TreeSpec {
+            files: 560,
+            ..TreeSpec::default()
+        },
+    );
     let v = disk.volume(old);
-    assert!((v.record_offset(5120) as i64) < 5120 * 1024, "the last fragment has a negative origin");
+    assert!(
+        (v.record_offset(5120) as i64) < 5120 * 1024,
+        "the last fragment has a negative origin"
+    );
     let root = v.root();
     let late = v.mkdir_with(root, "Late arrivals", DirSpec::new().record(5120));
     for i in 0..60u64 {
@@ -253,9 +321,17 @@ pub fn fragmented_mft(seed: u64) -> Built {
         let file = FileSpec::tagged(derive(seed, "addendum") + i, 1500 + 40 * i).record(5200 + i);
         v.add_file(many, format!("addendum {i:02}.dat").as_str(), file);
     }
-    let movers: Vec<_> =
-        tree.files.iter().copied().filter(|&f| (256..296).contains(&v.reference(f).number)).collect();
-    assert_eq!(movers.len(), 40, "forty files with records in the second fragment");
+    let movers: Vec<_> = tree
+        .files
+        .iter()
+        .copied()
+        .filter(|&f| (256..296).contains(&v.reference(f).number))
+        .collect();
+    assert_eq!(
+        movers.len(),
+        40,
+        "forty files with records in the second fragment"
+    );
     for file in movers {
         v.set_parent(file, late);
     }
@@ -285,7 +361,9 @@ pub fn old_mft_elsewhere(seed: u64) -> Built {
         "Old volume with its MFT at three fifths of the volume; the quick format destroys none of its records.",
         &["F2", "E5", "E9", "D6", "D8"],
     );
-    let mut params = VolumeParams::new(0, 96 * MIB).label("old").flavor(Flavor::WinXp);
+    let mut params = VolumeParams::new(0, 96 * MIB)
+        .label("old")
+        .flavor(Flavor::WinXp);
     let lcn = params.total_clusters() * 3 / 5;
     params = params.mft_at(lcn, 1024);
     let (old, _) = old_volume(&mut disk, params, &TreeSpec::default());
@@ -317,13 +395,21 @@ pub fn old_volume_larger_whole_disk(seed: u64) -> Built {
     let v = disk.volume(old);
     let cs = v.cluster_size();
     for (i, mib) in [100u64, 104, 108, 112].into_iter().enumerate() {
-        let name = if i == 0 { "behind-the-new-partition.bin".to_string() } else { format!("also-behind-{i}.bin") };
-        let file = FileSpec::tagged(derive(seed, &name), 64 * cs).runs(vec![Run::at(mib * MIB / cs, 64)]);
+        let name = if i == 0 {
+            "behind-the-new-partition.bin".to_string()
+        } else {
+            format!("also-behind-{i}.bin")
+        };
+        let file =
+            FileSpec::tagged(derive(seed, &name), 64 * cs).runs(vec![Run::at(mib * MIB / cs, 64)]);
         v.add_file(tree.folders[1], name.as_str(), file);
     }
     disk.render(old);
     let new = disk.format(
-        VolumeParams::new(0, 96 * MIB).label("new").formatted_at(disk.volume_ref(old).clock() + time::DAY).mft_capacity(256),
+        VolumeParams::new(0, 96 * MIB)
+            .label("new")
+            .formatted_at(disk.volume_ref(old).clock() + time::DAY)
+            .mft_capacity(256),
     );
     disk.render(new);
     disk.finish()
@@ -345,18 +431,30 @@ pub fn only_resident_survivors(seed: u64) -> Built {
         "8 KiB-cluster volume where every surviving record is resident: no attribute to derive the cluster size from.",
         &["F1", "H7"],
     );
-    let old = disk.format(VolumeParams::new(0, 96 * MIB).label("old").cluster_size(8192));
+    let old = disk.format(
+        VolumeParams::new(0, 96 * MIB)
+            .label("old")
+            .cluster_size(8192),
+    );
     let v = disk.volume(old);
     let root = v.root();
     let first = v.mkdir(root, "First things");
     for i in 0..217 {
-        v.add_file(first, format!("early-{i:03}.bin").as_str(), FileSpec::tagged(derive(seed, "early") + i, 9000 + 100 * i));
+        v.add_file(
+            first,
+            format!("early-{i:03}.bin").as_str(),
+            FileSpec::tagged(derive(seed, "early") + i, 9000 + 100 * i),
+        );
     }
     assert_eq!(v.reference(first).number + 217, 255);
     for d in 0..60u64 {
         let dir = v.mkdir(root, format!("Notes {d:02}").as_str());
         for i in 0..4u64 {
-            v.add_file(dir, format!("note-{i}.txt").as_str(), FileSpec::tagged(derive(seed, "note") + 4 * d + i, 100 + 37 * i + d).resident());
+            v.add_file(
+                dir,
+                format!("note-{i}.txt").as_str(),
+                FileSpec::tagged(derive(seed, "note") + 4 * d + i, 100 + 37 * i + d).resident(),
+            );
         }
     }
     disk.render(old);
@@ -396,26 +494,48 @@ pub fn signature_anchors(seed: u64) -> Built {
     let root = v.root();
     let first = v.mkdir(root, "First things");
     // takes the clusters that the new volume's system files will land on
-    v.add_file(first, "spacer.bin", FileSpec::tagged(derive(seed, "spacer"), 6 * MIB));
+    v.add_file(
+        first,
+        "spacer.bin",
+        FileSpec::tagged(derive(seed, "spacer"), 6 * MIB),
+    );
     for i in 0..216 {
-        v.add_file(first, format!("tiny-{i:03}.txt").as_str(), FileSpec::tagged(derive(seed, "tiny") + i, 200).resident());
+        v.add_file(
+            first,
+            format!("tiny-{i:03}.txt").as_str(),
+            FileSpec::tagged(derive(seed, "tiny") + i, 200).resident(),
+        );
     }
     for d in 0..14 {
         let dir = v.mkdir(root, format!("Album {d:02}").as_str());
         for i in 0..3 {
-            let (name, file) = media_file(derive(seed, "album"), d * 3 + i, 24_000 + 3000 * (d * 3 + i) as u64);
+            let (name, file) = media_file(
+                derive(seed, "album"),
+                d * 3 + i,
+                24_000 + 3000 * (d * 3 + i) as u64,
+            );
             v.add_file(dir, name.as_str(), file);
         }
     }
     disk.render(old);
     let new = disk.format(
-        VolumeParams::new(MIB, size - MIB).label("new").formatted_at(disk.volume_ref(old).clock() + time::DAY).mft_capacity(256),
+        VolumeParams::new(MIB, size - MIB)
+            .label("new")
+            .formatted_at(disk.volume_ref(old).clock() + time::DAY)
+            .mft_capacity(256),
     );
     disk.render(new);
     // the first 256 KiB of the old MFT did not survive either
     let old_mft = disk.volume_ref(old).record_offset(0);
     disk.fill(old_mft, 256 * 1024, 0);
-    write_mbr(&mut disk, 512, &[Partition { offset: MIB, size: size - MIB }]);
+    write_mbr(
+        &mut disk,
+        512,
+        &[Partition {
+            offset: MIB,
+            size: size - MIB,
+        }],
+    );
     disk.set_scan_range(MIB, size);
     disk.expect_kind(old, InstanceKind::Main);
     disk.finish()

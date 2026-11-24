@@ -91,7 +91,7 @@ class TechnicalDetailsButton extends StatelessWidget {
           actions: [
             TextButton(
               onPressed: () => Clipboard.setData(ClipboardData(text: description.technical)),
-              child: const Text('Copy'),
+              child: const Text(S.copy),
             ),
             TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text(S.close)),
           ],

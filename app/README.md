@@ -6,18 +6,48 @@ in JSON lines, as specified in [docs/PROTOCOL.md](../docs/PROTOCOL.md). The
 overall design is in [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) (sections
 2, 4 and 6 concern the UI).
 
-This directory currently holds the **foundation** of the app: the project and
-Windows runner, the engine layer, the application state, a fake engine for
-tests, and a shell with placeholders for the five screens. The screens
-themselves are the next step; everything they need is described below.
+It holds the project and Windows runner, the engine layer, the application
+state, the five screens, a fake engine for tests, and the tests.
 
+![The Results screen](docs/screenshots/results-file-details-wide-light.png)
+
+- [The screens](#the-screens)
 - [Build and run](#build-and-run)
 - [Running without the real engine](#running-without-the-real-engine)
 - [Architecture](#architecture)
 - [Engine layer](#engine-layer-libengine)
 - [State layer](#state-layer-libstate)
+- [UI layer](#ui-layer-libui)
 - [Tests](#tests)
+- [Screenshots](#screenshots)
 - [Dependencies](#dependencies)
+
+## The screens
+
+One window: the permanent safety notice on top, the navigation rail on the
+left (a dot marks the screen whose job is running), the screen on the right.
+Every screen works down to the smallest window (960 x 600 including the
+frame, about 944 x 561 for the app) without clipping text.
+
+| screen | what the user does there |
+|---|---|
+| **Source** | Disk cards from `list_disks` (model, size, bus, the volumes Windows shows, badges for the system disk, TRIM, SSD, removable, virtual, Storage Spaces, dynamic, no medium), ordinary disks first. "Choose this disk" opens it read-only (`open_source`): the real partition table and the engine's warnings in plain words (red for what can cost files: TRIM, system disk, page file, the app on the source, a source that reads as zeros; amber for the rest), then "Scan this partition", "Scan the whole disk" or "Create disk image…". "Open disk image…", "Open saved scan…" (`session_load`; without its disk: a browse-only banner and "Attach the disk…"), refresh, the last session after an engine crash, empty states for no disks / not elevated / not Windows. |
+| **Scan** | The three phases as steps, progress, speed, time left, elapsed, position, counters, unreadable bytes, warnings as they arrive, the hint once the phase changes to `sweep`, "Stop and show results" with what stopping means (disabled while the folders are rebuilt). The session file is chosen automatically in the app's session directory (model, serial, range start, local time) and checked with purpose `session`; if the guard refuses it, the user picks a folder (with the consents) or scans without saving. A scan that ends with results shows the Results screen; `source_lost` offers "Reconnect and continue" (attach, then resume). |
+| **Results** | Left the file systems (main first and open; older, other volumes, inside an image file, stray records, each labelled) as a lazily paged tree; the paged file table (name, size, modified, condition; fixed row height; loading placeholders); the details pane (path, sizes, dates, every flag explained, record facts, preview: pictures, text or hex). Search (sent after a pause in typing, results with their folder, tickable), filters (deleted files, file types, condition), the disk-layout chip (evidence, candidates, manual setting), "this is the one I want" / "treat as a separate volume" / "undo my choice", "Find more files by signature" with progress, the notices of the catalog with their actions (continue the scan, scan the whole disk, attach the disk, save the scan elsewhere), and the selection bar ("17 files, 1.24 MB, 5 damaged" and "Recover…"). Keyboard: arrows, Page Up/Down, Home/End, Space ticks, Enter opens; in the tree Right/Left open and close. |
+| **Recover** | What will be recovered (from `selection_summary`), the options (deleted files, skip damaged, what to do with existing files), the destination (picker or typed, UNC included; the hint that mapped drive letters are invisible to an elevated program) with the engine's live verdict, the lost files at that location, free space and the FAT32 file-size limit; separate consent dialogs for `same_disk` and `unknown_disk` (a tick box, the safe button as default, void when the path changes); the start button always in view with the reason why it is disabled; progress with the current file and counts by outcome; the outcome with "Open folder" and "Open report" (if no program can be started, the path is shown with "Copy path"). |
+| **Image** | Whole disk, one partition, or the scanned area; the image file (save dialog with a suggested name) with the guard's verdict and consents; an existing file is never overwritten, continuing it is offered; progress with unreadable bytes; "Rescue from this image" when done. |
+
+Errors are shown in plain language with the engine's own message and a
+"Technical details" button (code, request, message, copyable). An engine
+that dies replaces the screens with an explanation and "Start the engine
+again"; long requests (`session_load`, `geometry_set`) show their progress
+over the screens.
+
+| | |
+|---|---|
+| ![Source](docs/screenshots/source-opened-wide-light.png) | ![Scan](docs/screenshots/scan-running-wide-light.png) |
+| ![Results, dark](docs/screenshots/results-wide-dark.png) | ![Recover, same-disk verdict](docs/screenshots/recover-same-disk-wide-light.png) |
+| ![Recover at the smallest window, dark](docs/screenshots/recover-form-minimum-dark.png) | ![Image](docs/screenshots/image-running-wide-light.png) |
 
 ## Build and run
 
@@ -117,6 +147,7 @@ useful entries:
 | destination on `S:\` / `U:\`               | `same_disk` / `unknown_disk` (consent)   |
 | destination on `Q:\`, `R:\`, `relative`    | `not_found`, `not_writable`, `invalid_path` |
 | destination on `T:\` / `K:\`               | only 1 MiB free / FAT32 (4 GiB limit)    |
+| `FakeScript.scanBadBytesPerStep`, `scanWarnings` | unreadable bytes and warnings in `scan_progress` |
 | the image file that is the source          | `overlaps_source`, reason `source_image` |
 | scan disk 2's `D:`, then a destination on `F:` | the old volume reached into `F:`: `lost_volume` |
 | image file `...\missing.img`, `denied.img` | `not_found`, `access_denied`             |
@@ -160,7 +191,7 @@ lib/
   engine/              the protocol as Dart types; no Flutter imports
   state/               application state: ChangeNotifiers on top of the engine layer
   platform/            PlatformServices (OS-specific bits) and FilePickers (dialogs), both interfaces
-  ui/                  the shell (navigation, permanent notice, engine status) and screens
+  ui/                  the shell, the five screens, strings, formats, theme (see "UI layer")
 test/
   fake_engine/         the fake engine (pure Dart) and its transport
   support/             FakeApp (state layer on the fake), ScriptedTransport (byte-level),
@@ -227,10 +258,7 @@ try {
 ```
 
 `AppController.screen` (a `ValueNotifier<AppScreen>`) says which of the five
-screens the shell shows. The shell (`lib/ui/app_shell.dart`) already provides
-the navigation rail, the permanent safety notice (`SafetyNotice`, on every
-screen) and the view for an engine that is starting, failed or incompatible.
-The files in `lib/ui/screens/` are placeholders to be replaced one by one.
+screens the shell shows (see [UI layer](#ui-layer-libui)).
 
 ## Engine layer (`lib/engine`)
 
@@ -284,19 +312,19 @@ everything; its fields are the public surface for the screens.
 | field | class | what it holds |
 |---|---|---|
 | `engine` | `EngineController` | `status` (`stopped`, `starting`, `ready`, `incompatible`, `failed`), `hello`, `error`, `lastExit` (with the tail of the engine's log); `start`, `restart`, `shutdown`. |
-| `source` | `SourceController` | `disks` / `refreshDisks`; `current` (`OpenedSource`: info, table, partitions, warnings, `attached`, `attachError`), `revision`; `openDisk`, `openImage`, `close`, `loadSession`, `attachSource`, `saveSession`; `sessionPath`; `appDataCheck`, `canWriteAppData`, `ensureSessionDirectory`, `suggestSessionPath`. |
+| `source` | `SourceController` | `disks` / `refreshDisks`; `current` (`OpenedSource`: info, table, partitions, warnings, `attached`, `attachError`), `revision`; `openDisk`, `openImage`, `close`, `loadSession`, `attachSource`, `saveSession`; `sessionPath`; `appDataCheck`, `canWriteAppData`, `ensureSessionDirectory`, `suggestSessionPath({range, now})` (model, serial, range start, local time), `prepareSessionFile({range})` (checks the proposed file with purpose `session` and creates the session directory only on `ok`), `checkSessionFile(path)`. |
 | `catalog` | `CatalogController` | `info` (`CatalogInfo`), `epoch`, `sourceAttached`, `protectedRanges`, `guardRevision`, `epochChanges`; `refresh`, `guarded`, `nodeInfo`, `readContent`, `setGeometry`, `setInstanceKind`; owns `selection` and `rows`. |
 | `selection` | `SelectionModel` | The include/exclude sets: `setChecked`, `toggle`, `stateOf`, `isSelected`, `clear`, `include`, `exclude`, `spec`. |
 | `catalog.rows` | `RowCache` | `open(RowQuery)` -> `PagedRows`. |
 | `browse` | `BrowseController` | `folder` (`FolderLocation`), `filters` (`ViewFilters`), `sort`, `descending`, `sortBy`, `open`, `openRoot`; `rows` (the table), `folders(node)` (the tree), `ancestorsOf(row)`. |
-| `scan` | `ScanController` | `start`, `resume`, `stop`; `scanPhase`, `canStop`; plus the job members below. |
-| `recover` | `RecoverController` | `options` (`RecoverOptions`), `summary` (follows the selection), `destination` (a `DestinationChecker`; also as `checkDestination`, `checkedDestination`, `destinationCheck`, `destinationError`, `isCheckingDestination`), `allows`, `readyToStart`, `start`; plus the job members. |
+| `scan` | `ScanController` | `start`, `resume`, `stop`; `scanPhase`, `canStop`, `warnings` (those of the progress events, each once); plus the job members below. |
+| `recover` | `RecoverController` | `options` (`RecoverOptions`), `summary` (follows the selection), `destination` (a `DestinationChecker`; also as `checkDestination`, `checkedDestination`, `destinationCheck`, `destinationError`, `isCheckingDestination`), `allows`, `readyToStart`, `start`, `jobDestination`; plus the job members. |
 | `carve` | `CarveController` | `hasCarveHits`, `start(kinds)`; plus the job members. |
-| `image` | `ImageController` | `destination` (a `DestinationChecker`, with the same shortcuts), `allows`, `start`; plus the job members. |
+| `image` | `ImageController` | `destination` (a `DestinationChecker`, with the same shortcuts), `allows`, `start`, `jobDestination`; plus the job members. |
 | `jobs` | `JobTracker` | `value`: which job is active (`JobKind?`); the engine runs one at a time. |
 | `task` | `ValueNotifier<TaskProgress?>` | Progress of a long plain request (`session_load`, `geometry_set`). |
 | `screen` | `ValueNotifier<AppScreen>` | The screen the shell shows. |
-| `platform` | `PlatformServices` | `defaultSessionDirectory`, `createDirectory`, `openFolder` (show the recovered files in Explorer). |
+| `platform` | `PlatformServices` | `defaultSessionDirectory`, `createDirectory`, `openFolder` (show the recovered files in Explorer), `openFile` (open the report with its program). |
 | `pickers` | `FilePickers` | The open, save and folder dialogs. |
 | `api`, `client` | `EngineApi`, `EngineClient` | Direct access to the engine for what no controller wraps (for example `checkDestination` with purpose `session`), and the `log` events (`app.log`). |
 
@@ -452,6 +480,46 @@ source, catalog, selection and rows are reset (the engine's state died with
 it). `app.restartEngine()` starts a fresh one; `source.sessionPath` still
 names the last session file, which can be loaded again.
 
+## UI layer (`lib/ui`)
+
+```
+app_shell.dart        navigation rail, SafetyNotice, TaskOverlay, EngineStatusView; a scan with results shows Results
+strings.dart          S: every text the user sees (functions for texts with values), for translation later
+format.dart           Formats: sizes in binary units as Explorer shows them, counts, local dates, durations
+theme.dart            AppTheme (Material 3, light and dark from one seed), StatusColors, NoticeLevel
+flows.dart            startScan (automatic session file, purpose "session", else the user's folder), resumeScan,
+                      openImageFile, openSessionFile, saveSessionElsewhere, attachSourceFlow, confirm, openPath
+widgets/common.dart   ScreenFrame (title, purpose, actions, sticky footer), Notice, EmptyState, Section, Figure(s),
+                      FactRow, StatusChip
+widgets/errors.dart   ErrorDescription, ErrorNotice, TechnicalDetailsButton, showErrorDialog, attempt
+widgets/destination.dart  DestinationField, VerdictView, Consents, askSameDiskConsent, askUnknownDiskConsent
+results/              folder_tree.dart (FolderTree: the paged tree flattened to fixed-height lines), results_model.dart
+                      (what the Results screen remembers), tree_view.dart, file_table.dart, details_pane.dart
+                      (with FilePreview), geometry_dialog.dart, file_types.dart (type groups and icons)
+screens/              source_screen.dart, scan_screen.dart, results_screen.dart, recover_screen.dart, image_screen.dart
+```
+
+Conventions:
+
+- **Texts** come from `S` only; a widget contains no English literal.
+  Engine messages are shown as the engine wrote them, after a headline of
+  ours (`S.errorHeadline`, `S.warningHeadline`, `S.verdictHeadline`).
+- **Dates and numbers** use the user's regional format (`main.dart` loads
+  it with `Formats.forLocale`); widget tests use `en_US`.
+- **The Results screen keeps its state** (tree expansions, the file in the
+  details pane, the search text) in a `ResultsModel` owned by the shell, so
+  leaving the screen and coming back finds it as it was. What belongs to an
+  old epoch is dropped with it.
+- **Long lists** (tree and table) are `ListView.builder`s with a fixed item
+  extent over `PagedRows`; nothing is fetched for rows that are not on
+  screen. A click selects at once; a second click within 500 ms opens.
+- **The engine decides**: the screens never judge a destination themselves;
+  they show the verdict and offer only the consent the verdict allows.
+  Consents belong to one path and are withdrawn when it changes.
+- **Ticking deleted files**: turning on "Deleted files" in the Results
+  filters also turns on "Include files that were deleted before the format"
+  for the recovery (the Recover screen shows and can change it).
+
 ## Tests
 
 ```sh
@@ -472,7 +540,15 @@ flutter test           # must pass; three tests report "skipped" until the real 
 | `test/fake_engine/fake_engine_test.dart` | The fake itself: the errors-by-state table, epochs, sort order, filters, aggregates, selection semantics against brute force, jobs, `instance_set`, protected ranges and the guard's reasons. |
 | `test/state/*` | The selection model against a naive model on random trees; the row cache; the destination checker; every controller and job against the fake engine, step by step (including `instance_set`, re-checks when the catalog changes, and a cancel that must not overtake its start). |
 | `test/platform/*` | Session directory, opening a folder, the dialogs. |
-| `test/ui/app_shell_test.dart` | The shell: notice, navigation, engine failure, clean shutdown on exit. |
+| `test/ui/app_shell_test.dart` | The shell: notice, navigation, engine failure, a scan with results showing Results (a failed one staying), the progress of long requests, clean shutdown on exit. |
+| `test/ui/source_screen_test.dart` | Disk cards, their order and badges; opening a disk (table, warnings, gravest first); a scan with the automatic session file; a refused session place leading to the user's folder with the same-disk consent; scanning without saving; a refused `scan_start`; not elevated; no disks; a failed disk list; images; saved scans, browse only, attaching (also forced); the last session after a crash. |
+| `test/ui/scan_screen_test.dart` | Progress, phases, counters; bad sectors and warnings as they arrive; stop and show results; reconnect and resume after `source_lost`; other failures; the idle states; resuming a stopped session. |
+| `test/ui/results_screen_test.dart` | The tree and its labels; tri-state ticks in tree, table and selection bar; sorting; opening folders by double click, path and "up"; details and flag texts; previews (picture, text, hex) and the text/hex decision; filters; the narrow type menu; the debounced search and ticking a result; the disk layout dialog (a candidate, a manual value checked); overruling a file system; carving with progress and result; no signature hits; the notices and their actions; scanning the whole disk; browse only; keyboard in table and tree; **a folder of one million files** (only visible pages fetched, cache bounded); a failed page and retry; a stale catalog; details over the table at the smallest window. |
+| `test/ui/recover_screen_test.dart` | Summary and options; a good destination checked live and the job with its options, progress and outcome, opening folder and report; a file manager that cannot start; every refusal; the two consents and their voiding; space and FAT32 limits; the folder dialog; re-checks when the catalog changes; stopping; a failed job; browse only; the start button in view at the smallest window. |
+| `test/ui/image_screen_test.dart` | Range and destination (the guard asked with the size, the job with the range); progress with unreadable sectors and rescuing from the image; an existing file and resuming; the guard and the same-disk consent; FAT32; stopping and continuing; a lost disk. |
+| `test/ui/folder_tree_test.dart` | The tree model: lines and their ancestors, nested expansions, a folder with thousands of subfolders paged, a new epoch, "show deleted", a listing that changed under an expansion, a failed listing and retry. |
+| `test/ui/format_and_strings_test.dart` | Sizes as Explorer shows them, counts, durations, local dates (en_US, de); a headline for every error code; text for every warning, flag, rating and verdict. |
+| `test/ui/screens_layout_test.dart` | Eighteen states of the five screens at 1400 x 900 and at the smallest window: nothing overflows. It runs with the test font, whose glyphs are much wider than real ones, which leaves room for longer translations. With `HDSAVIOR_SCREENSHOTS` set it renders them with real fonts in light and dark (see [Screenshots](#screenshots)). |
 
 To run the conformance conversation against the real engine (Linux or
 Windows):
@@ -510,11 +586,25 @@ testWidgets('...', (tester) async {
 });
 ```
 
+## Screenshots
+
+`test/ui/screens_layout_test.dart` renders every important state with the
+SDK's Roboto (standing in for Segoe UI) and the Material icons, at 1400 x 900
+and at the smallest window, light and dark:
+
+```sh
+HDSAVIOR_SCREENSHOTS=/tmp/hdsavior-shots flutter test test/ui/screens_layout_test.dart
+```
+
+A few of them are in `docs/screenshots/` (reduced to 1000 pixels wide).
+
 ## Dependencies
 
 - `material_ui`: the Material library as a package. `package:flutter/material.dart`
   is deprecated in its favour since Flutter 3.47, and the project template of
   this SDK depends on it.
+- `intl` (already a dependency of `material_ui`): dates and numbers in the
+  user's regional format.
 - `file_selector` 1.1.0 (the current version; requires Dart 3.9 / Flutter
   3.35 or newer): the official plugin for the open, save and folder dialogs,
   used by `SystemFilePickers`. Its Windows implementation is

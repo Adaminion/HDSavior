@@ -34,7 +34,9 @@ use crate::time;
 
 use alloc::Allocator;
 use params::{Flavor, NamePolicy, VolumeParams};
-use spec::{DirSpec, FileSpec, MultiSpec, Name, NameSpec, Piece, Placement, Quirks, StorageSpec, Times};
+use spec::{
+    DirSpec, FileSpec, MultiSpec, Name, NameSpec, Piece, Placement, Quirks, StorageSpec, Times,
+};
 
 pub(crate) use render::{RenderSink, Rendered};
 
@@ -314,7 +316,10 @@ impl Volume {
 
     /// Slots covered by the `$MFT`'s initialized size.
     pub fn mft_initialized_records(&self) -> u64 {
-        self.params.mft_initialized_records.unwrap_or_else(|| self.mft_records()).min(self.mft_records())
+        self.params
+            .mft_initialized_records
+            .unwrap_or_else(|| self.mft_records())
+            .min(self.mft_records())
     }
 
     /// Absolute byte offset of cluster `lcn`.
@@ -338,7 +343,12 @@ impl Volume {
             .mft
             .iter()
             .find(|e| (e.first_record..e.first_record + e.records).contains(&number))
-            .unwrap_or_else(|| panic!("record {number} is outside the MFT ({} records)", self.mft_records()));
+            .unwrap_or_else(|| {
+                panic!(
+                    "record {number} is outside the MFT ({} records)",
+                    self.mft_records()
+                )
+            });
         self.lcn_to_offset(extent.lcn) + (number - extent.first_record) * self.record_size()
     }
 
@@ -433,7 +443,11 @@ impl Volume {
 
     /// Record numbers of the extension records of `node`.
     pub fn extension_records(&self, node: NodeId) -> Vec<u64> {
-        self.node(node).extensions.iter().map(|e| e.record).collect()
+        self.node(node)
+            .extensions
+            .iter()
+            .map(|e| e.record)
+            .collect()
     }
 
     /// `true` until the node is deleted.
@@ -444,12 +458,19 @@ impl Volume {
     /// The runs of the unnamed `$DATA` of `node` (empty when resident or
     /// absent).
     pub fn runs(&self, node: NodeId) -> Vec<Run> {
-        self.node(node).data().and_then(|s| s.runs.clone()).unwrap_or_default()
+        self.node(node)
+            .data()
+            .and_then(|s| s.runs.clone())
+            .unwrap_or_default()
     }
 
     /// The runs of the index allocation of a folder, as of the last render.
     pub fn index_runs(&self, node: NodeId) -> Vec<Run> {
-        self.node(node).dir.as_ref().map(|d| d.runs.clone()).unwrap_or_default()
+        self.node(node)
+            .dir
+            .as_ref()
+            .map(|d| d.runs.clone())
+            .unwrap_or_default()
     }
 
     /// Absolute byte ranges `(offset, length)` of the allocated runs of the
@@ -457,7 +478,10 @@ impl Volume {
     pub fn byte_ranges(&self, node: NodeId) -> Vec<(u64, u64)> {
         self.runs(node)
             .iter()
-            .filter_map(|r| r.lcn.map(|lcn| (self.lcn_to_offset(lcn), r.len * self.cluster_size())))
+            .filter_map(|r| {
+                r.lcn
+                    .map(|lcn| (self.lcn_to_offset(lcn), r.len * self.cluster_size()))
+            })
             .collect()
     }
 
@@ -474,7 +498,10 @@ impl Volume {
 
     /// All user files and folders (not the system files), in creation order.
     pub fn user_nodes(&self) -> Vec<NodeId> {
-        (0..self.nodes.len()).filter(|&i| !self.nodes[i].system).map(NodeId).collect()
+        (0..self.nodes.len())
+            .filter(|&i| !self.nodes[i].system)
+            .map(NodeId)
+            .collect()
     }
 
     /// The children of a folder that are in use, in creation order.
@@ -536,7 +563,10 @@ impl Volume {
         let capacity = self.mft_records();
         let number = match explicit {
             Some(n) => {
-                assert!(n < capacity, "record {n} is outside the MFT ({capacity} records)");
+                assert!(
+                    n < capacity,
+                    "record {n} is outside the MFT ({capacity} records)"
+                );
                 assert!(self.slot_is_free(n), "record {n} is in use");
                 n
             }
@@ -546,7 +576,9 @@ impl Volume {
             None => {
                 let n = (self.next_record..capacity)
                     .find(|n| !self.slots.contains_key(n))
-                    .unwrap_or_else(|| panic!("the MFT is full ({capacity} records); raise its capacity"));
+                    .unwrap_or_else(|| {
+                        panic!("the MFT is full ({capacity} records); raise its capacity")
+                    });
                 self.next_record = n + 1;
                 n
             }
@@ -566,7 +598,11 @@ impl Volume {
         for k in self.node(node).extensions.len()..count {
             let (record, seq) = self.take_record(explicit.get(k).copied().flatten());
             self.slots.insert(record, Slot::Ext(node, k));
-            self.node_mut(node).extensions.push(ExtRecord { record, seq, superseded: false });
+            self.node_mut(node).extensions.push(ExtRecord {
+                record,
+                seq,
+                superseded: false,
+            });
         }
     }
 
@@ -595,7 +631,10 @@ impl Volume {
                     && n.names.iter().any(|l| {
                         l.parent == ParentRef::Node(parent)
                             && l.name.len() == candidate.len()
-                            && l.name.iter().zip(candidate).all(|(a, b)| ascii_upper(*a) == ascii_upper(*b))
+                            && l.name
+                                .iter()
+                                .zip(candidate)
+                                .all(|(a, b)| ascii_upper(*a) == ascii_upper(*b))
                     })
             })
         };
@@ -615,16 +654,27 @@ impl Volume {
         let names: Vec<(Vec<u16>, u8)> = match explicit {
             Some(list) => {
                 assert!(!list.is_empty(), "an explicit name list must not be empty");
-                list.iter().map(|n| (n.name.0.clone(), n.namespace)).collect()
+                list.iter()
+                    .map(|n| (n.name.0.clone(), n.namespace))
+                    .collect()
             }
             None => self.default_names(parent, name),
         };
         names
             .into_iter()
             .map(|(name, namespace)| {
-                assert!((1..=255).contains(&name.len()), "a name has 1 to 255 UTF-16 units");
+                assert!(
+                    (1..=255).contains(&name.len()),
+                    "a name has 1 to 255 UTF-16 units"
+                );
                 assert!(namespace <= 3, "namespace {namespace} does not exist");
-                NameLink { parent: ParentRef::Node(parent), name, namespace, times: [created; 4], indexed: true }
+                NameLink {
+                    parent: ParentRef::Node(parent),
+                    name,
+                    namespace,
+                    times: [created; 4],
+                    indexed: true,
+                }
             })
             .collect()
     }
@@ -722,7 +772,11 @@ impl Volume {
         });
         node.quirks = spec.quirks;
         let extension_count = spec.multi.as_ref().map_or(0, MultiSpec::highest_holder);
-        let explicit = spec.multi.as_ref().map(|m| m.extension_records.clone()).unwrap_or_default();
+        let explicit = spec
+            .multi
+            .as_ref()
+            .map(|m| m.extension_records.clone())
+            .unwrap_or_default();
         node.multi = spec.multi;
         let id = self.push_node(node);
         self.take_extensions(id, extension_count, &explicit);
@@ -789,7 +843,11 @@ impl Volume {
                 None
             } else {
                 let need = s.content.len.div_ceil(cs);
-                Some(if need > 0 { vec![self.alloc.alloc(need)] } else { Vec::new() })
+                Some(if need > 0 {
+                    vec![self.alloc.alloc(need)]
+                } else {
+                    Vec::new()
+                })
             };
             node.streams.push(Stream {
                 type_code: crate::ondisk::record::attr_type::DATA,
@@ -806,7 +864,11 @@ impl Volume {
         }
 
         let extension_count = spec.multi.as_ref().map_or(0, MultiSpec::highest_holder);
-        let explicit = spec.multi.as_ref().map(|m| m.extension_records.clone()).unwrap_or_default();
+        let explicit = spec
+            .multi
+            .as_ref()
+            .map(|m| m.extension_records.clone())
+            .unwrap_or_default();
         node.multi = spec.multi.clone();
         let id = self.push_node(node);
         self.take_extensions(id, extension_count, &explicit);
@@ -816,7 +878,11 @@ impl Volume {
         if resident_auto && self.assemble(id, None).is_err() {
             let stream = self.non_resident_stream(&spec, stale_seed);
             let node = self.node_mut(id);
-            let at = node.streams.iter().position(Stream::is_unnamed_data).expect("just added");
+            let at = node
+                .streams
+                .iter()
+                .position(Stream::is_unnamed_data)
+                .expect("just added");
             node.streams[at] = stream;
         }
         self.fit_or_split(id);
@@ -894,7 +960,10 @@ impl Volume {
             let mut vcn = 0;
             for run in &runs {
                 if run.lcn.is_none() {
-                    content = content.with_zero_range(vcn * cs, (run.len * cs).min(len.saturating_sub(vcn * cs)));
+                    content = content.with_zero_range(
+                        vcn * cs,
+                        (run.len * cs).min(len.saturating_sub(vcn * cs)),
+                    );
                 }
                 vcn += run.len;
             }
@@ -942,7 +1011,10 @@ impl Volume {
             while left > 0 {
                 *holder += 1;
                 let take = left.min(per_piece);
-                pieces.push(Piece { holder: *holder, runs: take });
+                pieces.push(Piece {
+                    holder: *holder,
+                    runs: take,
+                });
                 left -= take;
             }
             pieces
@@ -961,18 +1033,30 @@ impl Volume {
         self.node_mut(node).multi = Some(multi);
         self.take_extensions(node, holder, &[]);
         if let Err(overflow) = self.assemble(node, self.trees.get(&node.0)) {
-            panic!("record {} still overflows after splitting: {overflow}", overflow.slot);
+            panic!(
+                "record {} still overflows after splitting: {overflow}",
+                overflow.slot
+            );
         }
     }
 
     // ------------------------------------------------------- modifications
 
     /// Adds another name (hard link) for `node` in `parent`.
-    pub fn hard_link(&mut self, node: NodeId, parent: NodeId, name: impl Into<Name>, namespace: u8) {
+    pub fn hard_link(
+        &mut self,
+        node: NodeId,
+        parent: NodeId,
+        name: impl Into<Name>,
+        namespace: u8,
+    ) {
         self.assert_dir(parent);
         let now = self.tick();
         let name = name.into();
-        assert!((1..=255).contains(&name.0.len()) && namespace <= 3, "bad link name");
+        assert!(
+            (1..=255).contains(&name.0.len()) && namespace <= 3,
+            "bad link name"
+        );
         self.node_mut(node).names.push(NameLink {
             parent: ParentRef::Node(parent),
             name: name.0,
@@ -1069,17 +1153,28 @@ impl Volume {
     /// The `$STANDARD_INFORMATION` times of `node`.
     pub fn times(&self, node: NodeId) -> Times {
         let t = self.node(node).times;
-        Times { created: t[0], modified: t[1], mft_changed: t[2], accessed: t[3] }
+        Times {
+            created: t[0],
+            modified: t[1],
+            mft_changed: t[2],
+            accessed: t[3],
+        }
     }
 
     /// Deletes a file or an empty folder: the record stays, not in use, with
     /// its sequence number bumped; clusters and the slot become free.
     pub fn delete(&mut self, node: NodeId) {
-        assert!(self.children(node).is_empty(), "the folder is not empty; use delete_tree");
+        assert!(
+            self.children(node).is_empty(),
+            "the folder is not empty; use delete_tree"
+        );
         let now = self.tick();
         let n = self.node(node);
         assert!(n.in_use, "record {} is already deleted", n.record);
-        assert!(!n.system || n.record >= 24, "system files cannot be deleted");
+        assert!(
+            !n.system || n.record >= 24,
+            "system files cannot be deleted"
+        );
         let mut freed: Vec<Run> = n.list_runs.clone();
         for s in &n.streams {
             freed.extend(s.runs.iter().flatten().copied());
@@ -1088,7 +1183,12 @@ impl Volume {
             freed.extend(d.runs.iter().copied());
         }
         let slots: Vec<(u64, u16)> = std::iter::once((n.record, n.seq))
-            .chain(n.extensions.iter().filter(|e| !e.superseded).map(|e| (e.record, e.seq)))
+            .chain(
+                n.extensions
+                    .iter()
+                    .filter(|e| !e.superseded)
+                    .map(|e| (e.record, e.seq)),
+            )
             .collect();
         let parents: Vec<NodeId> = n
             .names
@@ -1123,9 +1223,16 @@ impl Volume {
     /// Places a hand-made record in slot `number`. With `in_bitmap` the
     /// slot counts as in use for the MFT bitmap.
     pub fn put_raw_record(&mut self, number: u64, model: RecordModel, in_bitmap: bool) {
-        assert!(number < self.mft_records(), "record {number} is outside the MFT");
+        assert!(
+            number < self.mft_records(),
+            "record {number} is outside the MFT"
+        );
         assert!(self.slot_is_free(number), "record {number} is in use");
-        assert_eq!(model.record_size as u64, self.record_size(), "wrong record size");
+        assert_eq!(
+            model.record_size as u64,
+            self.record_size(),
+            "wrong record size"
+        );
         match self.slots.get(&number).copied() {
             Some(Slot::Base(old)) => self.node_mut(old).superseded = true,
             Some(Slot::Ext(old, k)) => self.node_mut(old).extensions[k].superseded = true,
@@ -1191,7 +1298,12 @@ impl Volume {
             if n.record == ROOT_RECORD {
                 break;
             }
-            let Some(link) = n.names.iter().find(|l| l.namespace != 2).or(n.names.first()) else {
+            let Some(link) = n
+                .names
+                .iter()
+                .find(|l| l.namespace != 2)
+                .or(n.names.first())
+            else {
                 break;
             };
             parts.push(String::from_utf16_lossy(&link.name));
@@ -1251,7 +1363,13 @@ pub(crate) fn dos_alias_candidate(long: &[u16], n: u32) -> Vec<u16> {
         _ => (long, &long[..0]),
     };
     let clean = |units: &[u16], max: usize| -> Vec<u16> {
-        units.iter().copied().filter(|&u| is_dos_char(u)).map(ascii_upper).take(max).collect()
+        units
+            .iter()
+            .copied()
+            .filter(|&u| is_dos_char(u))
+            .map(ascii_upper)
+            .take(max)
+            .collect()
     };
     let suffix: Vec<u16> = format!("~{n}").encode_utf16().collect();
     let mut alias = clean(base, 8 - suffix.len().min(7));
@@ -1277,20 +1395,47 @@ mod tests {
 
     #[test]
     fn dos_names_and_aliases() {
-        for valid in ["README.TXT", "readme.txt", "A", "12345678.123", "$MFT", "BOOT.INI", "a_b-c~1.x"] {
+        for valid in [
+            "README.TXT",
+            "readme.txt",
+            "A",
+            "12345678.123",
+            "$MFT",
+            "BOOT.INI",
+            "a_b-c~1.x",
+        ] {
             assert!(is_dos_name(&u(valid)), "{valid}");
         }
-        for invalid in ["", "123456789", "a.b.c", "long name.txt", "a.html", ".hidden", "Übung.txt", "a+b.txt", "name."] {
+        for invalid in [
+            "",
+            "123456789",
+            "a.b.c",
+            "long name.txt",
+            "a.html",
+            ".hidden",
+            "Übung.txt",
+            "a+b.txt",
+            "name.",
+        ] {
             assert!(!is_dos_name(&u(invalid)), "{invalid}");
         }
-        assert_eq!(dos_alias_candidate(&u("System Volume Information"), 1), u("SYSTEM~1"));
+        assert_eq!(
+            dos_alias_candidate(&u("System Volume Information"), 1),
+            u("SYSTEM~1")
+        );
         assert_eq!(dos_alias_candidate(&u("Program Files"), 2), u("PROGRA~2"));
-        assert_eq!(dos_alias_candidate(&u("holiday photo.jpeg"), 1), u("HOLIDA~1.JPE"));
+        assert_eq!(
+            dos_alias_candidate(&u("holiday photo.jpeg"), 1),
+            u("HOLIDA~1.JPE")
+        );
         assert_eq!(dos_alias_candidate(&u("a.b.c"), 1), u("AB~1.C"));
         assert_eq!(dos_alias_candidate(&u("日本語.txt"), 1), u("_~1.TXT"));
         assert_eq!(dos_alias_candidate(&u("longfilename"), 12), u("LONGF~12"));
         for n in [1, 9, 10, 99, 100, 9999] {
-            assert!(is_dos_name(&dos_alias_candidate(&u("Some long name.extension"), n)));
+            assert!(is_dos_name(&dos_alias_candidate(
+                &u("Some long name.extension"),
+                n
+            )));
         }
     }
 

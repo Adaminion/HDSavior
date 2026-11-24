@@ -11,6 +11,8 @@ import 'package:flutter/widgets.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:intl/intl.dart';
 
+import 'strings.dart';
+
 /// Formatting for one locale. Obtain it with [Formats.of].
 final class Formats {
   Formats(String locale) : locale = _supported(locale) {
@@ -59,14 +61,14 @@ final class Formats {
   /// A count with digit grouping: `12,345`.
   String count(int value) => _number.format(value);
 
-  static const List<String> _units = ['KB', 'MB', 'GB', 'TB', 'PB', 'EB'];
+  static const List<String> _units = S.sizeUnits;
 
   /// A size in binary units as Windows Explorer shows it: three significant
   /// digits, cut off rather than rounded up (Windows never shows a file as
   /// bigger than it is): `0 bytes`, `1 byte`, `512 bytes`, `1.00 KB`,
   /// `12.3 MB`, `3.63 TB`.
   String bytes(int value) {
-    if (value < 1024) return value == 1 ? '1 byte' : '${count(value)} bytes';
+    if (value < 1024) return S.bytesCount(count(value), value);
     var unit = 0;
     var scaled = value / 1024;
     while (scaled >= 1000 && unit < _units.length - 1) {
@@ -82,11 +84,11 @@ final class Formats {
     } else {
       text = _decimal2.format((scaled * 100).floor() / 100);
     }
-    return '$text ${_units[unit]}';
+    return S.size(text, _units[unit]);
   }
 
   /// A transfer speed: `120 MB/s`.
-  String speed(int bytesPerSecond) => '${bytes(bytesPerSecond)}/s';
+  String speed(int bytesPerSecond) => S.perSecond(bytes(bytesPerSecond));
 
   /// A local date: `11/24/2026`.
   String date(DateTime? time) => time == null ? '' : _date.format(time.toLocal());
@@ -98,19 +100,19 @@ final class Formats {
   /// `2 h 05 min`, `3 d 4 h`.
   String duration(int seconds) {
     if (seconds < 0) seconds = 0;
-    if (seconds < 60) return '$seconds s';
+    if (seconds < 60) return S.seconds(seconds);
     final minutes = seconds ~/ 60;
-    if (minutes < 60) return '$minutes min ${(seconds % 60).toString().padLeft(2, '0')} s';
+    if (minutes < 60) return S.minutesSeconds(minutes, (seconds % 60).toString().padLeft(2, '0'));
     final hours = minutes ~/ 60;
-    if (hours < 48) return '$hours h ${(minutes % 60).toString().padLeft(2, '0')} min';
-    return '${hours ~/ 24} d ${hours % 24} h';
+    if (hours < 48) return S.hoursMinutes(hours, (minutes % 60).toString().padLeft(2, '0'));
+    return S.daysHours(hours ~/ 24, hours % 24);
   }
 
   /// A fraction as a whole percentage, never showing 100 % before the end:
   /// `42 %`.
   String percent(double fraction) {
     final value = (fraction.clamp(0, 1) * 100).floor();
-    return '${count(value)} %';
+    return S.percent(count(value));
   }
 
   /// A byte offset as an exact count with its size in binary units, for the

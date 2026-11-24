@@ -2,8 +2,6 @@
 // ticks, sorting, filters, the debounced search, the details pane with its
 // preview, the disk layout, the user's say about file systems, carving,
 // the notices, keyboard navigation, and the million-file paging path.
-import 'dart:typed_data';
-
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hdsavior/engine/engine.dart';
@@ -83,10 +81,12 @@ void main() {
     // Opening the older one lists its folders (dirs only), lazily.
     fake.engine.requests.clear();
     final older = inTree(find.text(S.instanceName(instances[1])));
-    await tester.tap(find.descendant(
-      of: find.ancestor(of: older, matching: find.byType(InkWell)).first,
-      matching: find.byIcon(Icons.chevron_right),
-    ));
+    await tester.tap(
+      find.descendant(
+        of: find.ancestor(of: older, matching: find.byType(InkWell)).first,
+        matching: find.byIcon(Icons.chevron_right),
+      ),
+    );
     await settle(tester);
     final listing = fake.engine.requests.firstWhere((r) => r.command == 'list_children');
     expect(listing.args['node'], instances[1].root);
@@ -100,10 +100,12 @@ void main() {
     final recover = find.widgetWithText(FilledButton, S.recoverAction);
     expect(tester.widget<FilledButton>(recover).onPressed, isNull);
 
-    await tester.tap(find.descendant(
-      of: find.ancestor(of: inTable(find.text('Documents')), matching: find.byType(InkWell)).first,
-      matching: find.byType(Checkbox),
-    ));
+    await tester.tap(
+      find.descendant(
+        of: find.ancestor(of: inTable(find.text('Documents')), matching: find.byType(InkWell)).first,
+        matching: find.byType(Checkbox),
+      ),
+    );
     await settle(tester);
     expect(fake.app.selection.include, [fake.landmarks.documents]);
     expect(checkboxOf(tester, find.byType(FileTable), 'Documents').value, isTrue);
@@ -112,7 +114,10 @@ void main() {
     expect(checkboxOf(tester, find.byType(FolderTreeView), 'Documents').value, isTrue);
 
     final summary = fake.app.recover.summary!;
-    expect(find.text(S.selectionSummary(en.count(summary.files), summary.files, en.bytes(summary.bytes))), findsOneWidget);
+    expect(
+      find.text(S.selectionSummary(en.count(summary.files), summary.files, en.bytes(summary.bytes))),
+      findsOneWidget,
+    );
     expect(tester.widget<FilledButton>(recover).onPressed, isNotNull);
     await tester.tap(recover);
     await tester.pump();
@@ -171,7 +176,10 @@ void main() {
     // The engine's explanation of the flag, behind our name for it.
     final details = inDetails(find.byType(RichText));
     expect(
-      tester.widgetList<RichText>(details).map((t) => t.text.toPlainText()).where((t) => t.startsWith('${S.flagName(FileFlag.overwritten, 'overwritten')}: ')),
+      tester
+          .widgetList<RichText>(details)
+          .map((t) => t.text.toPlainText())
+          .where((t) => t.startsWith('${S.flagName(FileFlag.overwritten, 'overwritten')}: ')),
       isNotEmpty,
     );
     expect(inDetails(find.text(S.rating(Rating.damaged))), findsOneWidget);
@@ -218,6 +226,10 @@ void main() {
     expect(previewHexDump(Uint8List.fromList(List.generate(20, (i) => i + 0x41))).split('\n'), [
       '0000  41 42 43 44 45 46 47 48 49 4a 4b 4c 4d 4e 4f 50  ABCDEFGHIJKLMNOP',
       '0010  51 52 53 54                                      QRST',
+    ]);
+    expect(previewHexDump(Uint8List.fromList(List.generate(10, (i) => i + 0x41)), perLine: 8).split('\n'), [
+      '0000  41 42 43 44 45 46 47 48  ABCDEFGH',
+      '0008  49 4a                    IJ',
     ]);
   });
 
@@ -276,13 +288,18 @@ void main() {
     // A result shows its folder, and ticking it marks its folders partial.
     final first = rows.peek(0)!;
     expect(inTable(find.text(first.path!)), findsOneWidget);
-    await tester.tap(find.descendant(
-      of: find.ancestor(of: inTable(find.text(first.name)).first, matching: find.byType(InkWell)).first,
-      matching: find.byType(Checkbox),
-    ));
+    await tester.tap(
+      find.descendant(
+        of: find.ancestor(of: inTable(find.text(first.name)).first, matching: find.byType(InkWell)).first,
+        matching: find.byType(Checkbox),
+      ),
+    );
     await settle(tester);
     expect(fake.app.selection.include, [first.id]);
-    expect(fake.app.selection.stateOf(first.ancestorIds!.last, first.ancestorIds!.sublist(0, first.ancestorIds!.length - 1)), CheckState.partial);
+    expect(
+      fake.app.selection.stateOf(first.ancestorIds!.last, first.ancestorIds!.sublist(0, first.ancestorIds!.length - 1)),
+      CheckState.partial,
+    );
     // Clearing the search returns to the folder.
     await tester.tap(find.byTooltip(S.searchClear));
     await settle(tester);
@@ -360,11 +377,22 @@ void main() {
     await tester.pump();
     await tester.tap(find.text(S.carveStart));
     await settleDialog(tester);
-    expect(fake.lastArgs('carve_start'), {'kinds': [kinds.first]});
+    expect(fake.lastArgs('carve_start'), {
+      'kinds': [kinds.first],
+    });
     await fake.step(2);
     final progress = fake.app.carve.progress!;
-    expect(find.textContaining('${en.count(progress.candidatesDone)} of ${en.count(progress.candidatesTotal)} places checked'), findsOneWidget);
-    expect(tester.widget<FilledButton>(find.widgetWithText(FilledButton, S.carveAction)).onPressed, isNull, reason: 'one job at a time');
+    expect(
+      find.textContaining(
+        '${en.count(progress.candidatesDone)} of ${en.count(progress.candidatesTotal)} places checked',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      tester.widget<FilledButton>(find.widgetWithText(FilledButton, S.carveAction)).onPressed,
+      isNull,
+      reason: 'one job at a time',
+    );
     await fake.finishJob();
     final done = fake.app.carve.result!;
     expect(find.text(S.carveDone(en.count(done.found), en.bytes(done.bytesFound), cancelled: false)), findsOneWidget);
@@ -393,7 +421,10 @@ void main() {
     final info = fake.app.catalog.info!;
     expect(info.scanComplete, isFalse);
     expect(find.text(S.incompleteTitle(en.bytes(info.scannedBytes), en.bytes(info.range.length))), findsOneWidget);
-    expect(find.text(S.outOfRangeTitle(en.count(info.outOfRangeFiles), en.bytes(info.outOfRangeBytes))), findsOneWidget);
+    expect(
+      find.text(S.outOfRangeTitle(en.count(info.outOfRangeFiles), en.bytes(info.outOfRangeBytes))),
+      findsOneWidget,
+    );
     expect(find.text(S.warningHeadline(WarningCode.mixedGenerations)), findsNothing);
     await tester.tap(find.text(S.moreNotices(1)));
     await settleDialog(tester);

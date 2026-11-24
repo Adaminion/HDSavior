@@ -438,12 +438,14 @@ class _BytesView extends StatelessWidget {
     return cut;
   }
 
-  static String hexDump(Uint8List bytes, {int maxBytes = 512}) {
+  /// A hex dump of the first [maxBytes] bytes, [perLine] bytes a line:
+  /// offset, bytes, and the printable characters.
+  static String hexDump(Uint8List bytes, {int maxBytes = 512, int perLine = 16}) {
     final lines = <String>[];
     final end = bytes.length < maxBytes ? bytes.length : maxBytes;
-    for (var offset = 0; offset < end; offset += 16) {
-      final slice = bytes.sublist(offset, offset + 16 > end ? end : offset + 16);
-      final hex = [for (final b in slice) b.toRadixString(16).padLeft(2, '0')].join(' ').padRight(47);
+    for (var offset = 0; offset < end; offset += perLine) {
+      final slice = bytes.sublist(offset, offset + perLine > end ? end : offset + perLine);
+      final hex = [for (final b in slice) b.toRadixString(16).padLeft(2, '0')].join(' ').padRight(perLine * 3 - 1);
       final ascii = String.fromCharCodes([for (final b in slice) b >= 0x20 && b < 0x7F ? b : 0x2E]);
       lines.add('${offset.toRadixString(16).padLeft(4, '0')}  $hex  $ascii');
     }
@@ -470,10 +472,19 @@ class _BytesView extends StatelessWidget {
             borderRadius: BorderRadius.circular(6),
           ),
           padding: const EdgeInsets.all(8),
-          child: SingleChildScrollView(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: SelectableText(text ?? hexDump(bytes), style: mono),
+          child: LayoutBuilder(
+            builder: (context, constraints) => SingleChildScrollView(
+              // Text wraps; a hex dump keeps its columns, 8 bytes a line
+              // when 16 do not fit.
+              child: text != null
+                  ? SelectableText(text, style: mono)
+                  : SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: SelectableText(
+                        hexDump(bytes, perLine: constraints.maxWidth < 520 ? 8 : 16),
+                        style: mono?.copyWith(fontSize: 11),
+                      ),
+                    ),
             ),
           ),
         ),
@@ -491,7 +502,7 @@ class _BytesView extends StatelessWidget {
 String? previewText(Uint8List bytes) => _BytesView.asText(bytes);
 
 /// Exposed for tests.
-String previewHexDump(Uint8List bytes) => _BytesView.hexDump(bytes);
+String previewHexDump(Uint8List bytes, {int perLine = 16}) => _BytesView.hexDump(bytes, perLine: perLine);
 
 /// A file system found by the scan: what it is, its figures, its disk
 /// layout, and the user's say about it (docs/ALGORITHMS.md D8 and

@@ -27,16 +27,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # apt on hosted runners took 10 to 19 minutes; the packages are cached
+      # between runs (the cache key is the package list).
       - name: Install fixture tools
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          # man-db triggers take minutes on hosted runners and are not needed.
-          sudo rm -f /var/lib/man-db/auto-update
-          pkgs="ntfs-3g fdisk python3-pil"
-          command -v ffmpeg >/dev/null || pkgs="$pkgs ffmpeg"
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends $pkgs
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: ntfs-3g fdisk python3-pil ffmpeg
+          version: 1
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -67,17 +64,25 @@ jobs:
           HDS_FIXTURES: ${{ github.workspace }}/fixtures-out
         run: cargo test $CRATES
 
+      - name: Test-image builder (cross-checked with the independent decoder)
+        working-directory: engine
+        run: |
+          cargo fmt -p hds-testkit -- --check
+          cargo clippy -p hds-testkit --all-targets -- -D warnings
+          cargo test -p hds-testkit
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: 3.50.1
           channel: stable
           cache: true
 
-      - name: Flutter analyze
+      - name: Flutter analyze and test
         working-directory: app
         run: |
           flutter pub get
           flutter analyze
+          flutter test
 
   windows:
     name: Windows (engine tests, raw disk and destination guard on real virtual disks)

@@ -54,26 +54,34 @@ impl CurrentMft {
     /// origin, as D1 sees it).
     fn offset_of(&self, number: u64, near: u64) -> Option<u64> {
         let inside = self.extents.iter().find_map(|&(start, first, slots)| {
-            (first..first + slots).contains(&number).then(|| start + (number - first) * self.record_size)
+            (first..first + slots)
+                .contains(&number)
+                .then(|| start + (number - first) * self.record_size)
         });
         inside.or_else(|| {
-            let &(start, first, _) = self
-                .extents
-                .iter()
-                .find(|&&(start, _, slots)| near >= start && near < start + slots * self.record_size)?;
+            let &(start, first, _) = self.extents.iter().find(|&&(start, _, slots)| {
+                near >= start && near < start + slots * self.record_size
+            })?;
             (number >= first).then(|| start + (number - first) * self.record_size)
         })
     }
 
     fn slot_live(&self, slot: u64) -> bool {
-        self.live_slots.iter().any(|&(first, count)| (first..first + count).contains(&slot))
+        self.live_slots
+            .iter()
+            .any(|&(first, count)| (first..first + count).contains(&slot))
     }
 
     /// Origins of its extents, as `(record size, origin)`.
     pub fn origins(&self) -> Vec<(u64, i64)> {
         self.extents
             .iter()
-            .map(|&(start, first, _)| (self.record_size, start as i64 - (first * self.record_size) as i64))
+            .map(|&(start, first, _)| {
+                (
+                    self.record_size,
+                    start as i64 - (first * self.record_size) as i64,
+                )
+            })
             .collect()
     }
 }
@@ -93,7 +101,11 @@ pub(crate) fn current_mfts(m: &Manifest) -> Vec<CurrentMft> {
                 cluster_size: cs,
                 volume_offset: g.volume_offset,
                 format_time: i.format_time,
-                extents: g.mft_extents.iter().map(|e| (e.offset, e.first_record, e.records)).collect(),
+                extents: g
+                    .mft_extents
+                    .iter()
+                    .map(|e| (e.offset, e.first_record, e.records))
+                    .collect(),
                 initialized: g.mft_initialized_records,
                 live_slots: i.live_slots.clone(),
                 mirror: (mirror, mirror + g.mftmirr_clusters * cs),
@@ -138,7 +150,12 @@ pub(crate) fn resolves(r: &RecordFact, seq: u16) -> bool {
 /// Classifies every record (ALGORITHMS A3 and C3). `None` for records whose
 /// bytes the manifest does not describe.
 pub(crate) fn classify(m: &Manifest, current: &[CurrentMft]) -> Vec<Option<RecordClass>> {
-    let by_offset: HashMap<u64, usize> = m.records.iter().enumerate().map(|(i, r)| (r.offset, i)).collect();
+    let by_offset: HashMap<u64, usize> = m
+        .records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.offset, i))
+        .collect();
     let mut classes: Vec<Option<RecordClass>> = vec![None; m.records.len()];
     // extension records in free slots whose class depends on their base
     let mut pending: Vec<(usize, usize)> = Vec::new();
@@ -146,7 +163,10 @@ pub(crate) fn classify(m: &Manifest, current: &[CurrentMft]) -> Vec<Option<Recor
     for (i, r) in m.records.iter().enumerate() {
         // damaged records are not described; records outside the session
         // range are never read
-        if r.state != ArtifactState::Intact || r.offset < range_start || r.offset + r.size as u64 > range_end {
+        if r.state != ArtifactState::Intact
+            || r.offset < range_start
+            || r.offset + r.size as u64 > range_end
+        {
             continue;
         }
         let blocks = (r.size / 512) as usize;
@@ -162,7 +182,9 @@ pub(crate) fn classify(m: &Manifest, current: &[CurrentMft]) -> Vec<Option<Recor
                 class = RecordClass::Live;
                 break;
             }
-            let Some(slot) = cv.slot_at(r.offset) else { continue };
+            let Some(slot) = cv.slot_at(r.offset) else {
+                continue;
+            };
             class = if cv.slot_live(slot) {
                 RecordClass::Live
             } else if let Some(t) = change_time(r) {
@@ -211,7 +233,8 @@ pub(crate) fn current_holder(m: &Manifest, current: &[CurrentMft]) -> Vec<Option
         .iter()
         .map(|r| {
             current.iter().position(|cv| {
-                (r.offset >= cv.mirror.0 && r.offset < cv.mirror.1) || cv.slot_at(r.offset).is_some()
+                (r.offset >= cv.mirror.0 && r.offset < cv.mirror.1)
+                    || cv.slot_at(r.offset).is_some()
             })
         })
         .collect()
@@ -227,7 +250,12 @@ pub(crate) fn overwritten_set(
 ) -> Vec<(u64, u64)> {
     let mut ranges: Vec<(u64, u64)> = Vec::new();
     for cv in current {
-        ranges.extend(m.instances[cv.instance as usize].live_allocated.iter().copied());
+        ranges.extend(
+            m.instances[cv.instance as usize]
+                .live_allocated
+                .iter()
+                .copied(),
+        );
     }
     let holders = current_holder(m, current);
     for (i, r) in m.records.iter().enumerate() {
@@ -237,7 +265,10 @@ pub(crate) fn overwritten_set(
         let Some(k) = holders[i] else { continue };
         let cv = &current[k];
         for (lcn, len) in cluster_runs(r) {
-            ranges.push((cv.volume_offset + lcn * cv.cluster_size, len * cv.cluster_size));
+            ranges.push((
+                cv.volume_offset + lcn * cv.cluster_size,
+                len * cv.cluster_size,
+            ));
         }
     }
     crate::disk::merge_ranges(ranges)
@@ -250,7 +281,11 @@ pub(crate) fn cluster_runs(r: &RecordFact) -> Vec<(u64, u64)> {
     let index = r.index_allocation.iter().filter(|s| s.name == "$I30");
     data.chain(index)
         .filter_map(|s| s.non_resident.as_ref())
-        .flat_map(|x| x.runs.iter().filter_map(|run| run.lcn.map(|lcn| (lcn, run.len))))
+        .flat_map(|x| {
+            x.runs
+                .iter()
+                .filter_map(|run| run.lcn.map(|lcn| (lcn, run.len)))
+        })
         .filter(|&(_, len)| len > 0)
         .collect()
 }
@@ -312,7 +347,11 @@ impl Analysis {
 /// D1 and D2 over the records of class `Old`.
 pub(crate) fn analyse(m: &Manifest, classes: &[Option<RecordClass>]) -> Analysis {
     let n = m.records.len();
-    let mut analysis = Analysis { numbers: vec![None; n], fragment_of: vec![None; n], ..Analysis::default() };
+    let mut analysis = Analysis {
+        numbers: vec![None; n],
+        fragment_of: vec![None; n],
+        ..Analysis::default()
+    };
     let mut index: BTreeMap<(u64, i64), usize> = BTreeMap::new();
     let old = |i: usize| classes[i] == Some(RecordClass::Old);
     // numbered records
@@ -321,7 +360,11 @@ pub(crate) fn analyse(m: &Manifest, classes: &[Option<RecordClass>]) -> Analysis
         let size = r.size as u64;
         let origin = r.offset as i64 - (number * size) as i64;
         let f = *index.entry((size, origin)).or_insert_with(|| {
-            analysis.fragments.push(Fragment { record_size: size, origin, ..Fragment::default() });
+            analysis.fragments.push(Fragment {
+                record_size: size,
+                origin,
+                ..Fragment::default()
+            });
             analysis.fragments.len() - 1
         });
         analysis.fragments[f].members.insert(number, i);
@@ -333,9 +376,19 @@ pub(crate) fn analyse(m: &Manifest, classes: &[Option<RecordClass>]) -> Analysis
     let spans: Vec<(u64, u64)> = analysis
         .fragments
         .iter()
-        .map(|f| (*f.members.keys().next().expect("not empty"), *f.members.keys().last().expect("not empty")))
+        .map(|f| {
+            (
+                *f.members.keys().next().expect("not empty"),
+                *f.members.keys().last().expect("not empty"),
+            )
+        })
         .collect();
-    for (i, r) in m.records.iter().enumerate().filter(|(i, r)| old(*i) && r.number.is_none()) {
+    for (i, r) in m
+        .records
+        .iter()
+        .enumerate()
+        .filter(|(i, r)| old(*i) && r.number.is_none())
+    {
         let size = r.size as u64;
         let place = analysis.fragments.iter().enumerate().find_map(|(f, frag)| {
             let delta = r.offset as i64 - frag.origin;
@@ -357,7 +410,11 @@ pub(crate) fn analyse(m: &Manifest, classes: &[Option<RecordClass>]) -> Analysis
     }
     // records the manifest cannot describe that a scanner would put into a
     // fragment make that fragment's analysis uncertain
-    for r in m.records.iter().filter(|r| r.state == ArtifactState::Damaged) {
+    for r in m
+        .records
+        .iter()
+        .filter(|r| r.state == ArtifactState::Damaged)
+    {
         if let Some(number) = r.number {
             let origin = r.offset as i64 - (number * r.size as u64) as i64;
             if let Some(&f) = index.get(&(r.size as u64, origin)) {
@@ -383,7 +440,11 @@ fn contradictions(m: &Manifest, f: &Fragment) -> Vec<RawContradiction> {
     let mut runs: Vec<(u64, u64, u64)> = Vec::new(); // (first lcn, end lcn, number)
     for (&number, &i) in &f.members {
         if eligible(i) {
-            runs.extend(cluster_runs(&m.records[i]).into_iter().map(|(lcn, len)| (lcn, lcn + len, number)));
+            runs.extend(
+                cluster_runs(&m.records[i])
+                    .into_iter()
+                    .map(|(lcn, len)| (lcn, lcn + len, number)),
+            );
         }
     }
     runs.sort_unstable();
@@ -392,7 +453,11 @@ fn contradictions(m: &Manifest, f: &Fragment) -> Vec<RawContradiction> {
         active.retain(|&(e, _)| e > start);
         for &(_, other) in &active {
             if other != number {
-                out.push((other.min(number), other.max(number), ContradictionKind::SharedCluster));
+                out.push((
+                    other.min(number),
+                    other.max(number),
+                    ContradictionKind::SharedCluster,
+                ));
             }
         }
         active.push((end, number));
@@ -403,13 +468,18 @@ fn contradictions(m: &Manifest, f: &Fragment) -> Vec<RawContradiction> {
             continue;
         }
         let r = &m.records[i];
-        let parents = r.names.iter().map(|n| (n.parent, ContradictionKind::ParentSlot));
+        let parents = r
+            .names
+            .iter()
+            .map(|n| (n.parent, ContradictionKind::ParentSlot));
         let base = (r.base != FileRef::NONE).then_some((r.base, ContradictionKind::BaseSlot));
         for (target, kind) in parents.chain(base) {
             if target.number == number || target.seq == 0 {
                 continue;
             }
-            let Some(&j) = f.members.get(&target.number) else { continue };
+            let Some(&j) = f.members.get(&target.number) else {
+                continue;
+            };
             if !eligible(j) {
                 continue;
             }
@@ -470,8 +540,11 @@ fn generation_cuts(m: &Manifest, f: &mut Fragment) {
             slot.1.insert(kind);
         }
     }
-    let timed: Vec<(u64, u64)> =
-        f.members.iter().filter_map(|(&number, &i)| Some((number, timed(&m.records[i])?))).collect();
+    let timed: Vec<(u64, u64)> = f
+        .members
+        .iter()
+        .filter_map(|(&number, &i)| Some((number, timed(&m.records[i])?)))
+        .collect();
     let mut chosen: Vec<u64> = Vec::new();
     for (&hi, &(lo, _)) in &per_hi {
         if chosen.iter().any(|&c| lo < c && c <= hi) {
@@ -483,9 +556,17 @@ fn generation_cuts(m: &Manifest, f: &mut Fragment) {
     }
     let mut kept: Vec<CutFact> = Vec::new();
     for &c in &chosen {
-        let support = per_hi.iter().filter(|(&hi, &(lo, _))| lo < c && c <= hi).count() as u32;
+        let support = per_hi
+            .iter()
+            .filter(|(&hi, &(lo, _))| lo < c && c <= hi)
+            .count() as u32;
         if support >= 2 {
-            kept.push(CutFact { position: c, older_newest: 0, newer_oldest: 0, support });
+            kept.push(CutFact {
+                position: c,
+                older_newest: 0,
+                newer_oldest: 0,
+                support,
+            });
         }
     }
     kept.sort_by_key(|c| c.position);
@@ -495,17 +576,31 @@ fn generation_cuts(m: &Manifest, f: &mut Fragment) {
         let below_start = if j == 0 { 0 } else { kept[j - 1].position };
         let above_end = kept.get(j + 1).map_or(u64::MAX, |c| c.position);
         let c = kept[j].position;
-        let above = timed.iter().filter(|&&(n, _)| n >= c && n < above_end).map(|&(_, t)| t);
-        let below = timed.iter().filter(|&&(n, _)| n >= below_start && n < c).map(|&(_, t)| t);
+        let above = timed
+            .iter()
+            .filter(|&&(n, _)| n >= c && n < above_end)
+            .map(|&(_, t)| t);
+        let below = timed
+            .iter()
+            .filter(|&&(n, _)| n >= below_start && n < c)
+            .map(|&(_, t)| t);
         kept[j].older_newest = above.max().unwrap_or(0);
         kept[j].newer_oldest = below.min().unwrap_or(0);
     }
     f.contradictions = per_hi
         .iter()
         .map(|(&hi, (lo, kinds))| {
-            let explained_by =
-                kept.iter().rev().find(|c| *lo < c.position && c.position <= hi).map(|c| c.position);
-            ContradictionFact { lo: *lo, hi, kinds: kinds.iter().copied().collect(), explained_by }
+            let explained_by = kept
+                .iter()
+                .rev()
+                .find(|c| *lo < c.position && c.position <= hi)
+                .map(|c| c.position);
+            ContradictionFact {
+                lo: *lo,
+                hi,
+                kinds: kinds.iter().copied().collect(),
+                explained_by,
+            }
         })
         .collect();
     f.marked = f
@@ -531,7 +626,9 @@ pub(crate) fn side(cut: &CutFact, span: Option<(u64, u64)>) -> Side {
     match span {
         None => Side::Undecided,
         Some((_, newest)) if newest <= cut.older_newest => Side::Before,
-        Some((oldest, newest)) if oldest > cut.older_newest && newest >= cut.newer_oldest => Side::After,
+        Some((oldest, newest)) if oldest > cut.older_newest && newest >= cut.newer_oldest => {
+            Side::After
+        }
         Some(_) => Side::Undecided,
     }
 }
@@ -629,12 +726,21 @@ mod tests {
 
     #[test]
     fn changepoints_need_strict_order_and_a_timed_record_on_each_side() {
-        let timed = [(10, year(2022)), (11, year(2023)), (20, year(2018)), (21, year(2019))];
+        let timed = [
+            (10, year(2022)),
+            (11, year(2023)),
+            (20, year(2018)),
+            (21, year(2019)),
+        ];
         // the only split: below 11, above 20; valid p in (11, 20]
         assert_eq!(highest_changepoint(&timed, 0, 100), Some(20));
         assert_eq!(highest_changepoint(&timed, 0, 15), Some(15));
         assert_eq!(highest_changepoint(&timed, 11, 12), Some(12));
-        assert_eq!(highest_changepoint(&timed, 20, 30), None, "(20, 30] holds no changepoint");
+        assert_eq!(
+            highest_changepoint(&timed, 20, 30),
+            None,
+            "(20, 30] holds no changepoint"
+        );
         assert_eq!(highest_changepoint(&timed, 0, 11), None);
         // equal times are not strictly older
         let tie = [(10, year(2020)), (20, year(2020))];
@@ -667,7 +773,10 @@ mod tests {
         assert_eq!(pairs, [(101, 200), (102, 201), (100, 203)]);
         assert_eq!(f.contradictions[2].kinds, [ContradictionKind::ParentSlot]);
         assert_eq!(f.cuts.len(), 1);
-        assert_eq!(f.cuts[0].position, 200, "the highest changepoint in (101, 200]");
+        assert_eq!(
+            f.cuts[0].position, 200,
+            "the highest changepoint in (101, 200]"
+        );
         assert_eq!(f.cuts[0].support, 3);
         assert_eq!(f.cuts[0].older_newest, year(2019));
         assert_eq!(f.cuts[0].newer_oldest, year(2022));
@@ -687,7 +796,13 @@ mod tests {
         let f = &a.fragments[0];
         assert!(f.cuts.is_empty(), "a cut with a single hi is dropped");
         assert_eq!(f.contradictions[0].explained_by, None);
-        assert_eq!(f.marked.iter().map(|&i| m.records[i].slot).collect::<Vec<_>>(), [200]);
+        assert_eq!(
+            f.marked
+                .iter()
+                .map(|&i| m.records[i].slot)
+                .collect::<Vec<_>>(),
+            [200]
+        );
     }
 
     #[test]
@@ -736,7 +851,11 @@ mod tests {
             with_run(record(200, Some(year(2018))), 5000, 2),
         ]);
         let a = analyse_all(&m);
-        let pairs: Vec<(u64, u64)> = a.fragments[0].contradictions.iter().map(|c| (c.lo, c.hi)).collect();
+        let pairs: Vec<(u64, u64)> = a.fragments[0]
+            .contradictions
+            .iter()
+            .map(|c| (c.lo, c.hi))
+            .collect();
         assert_eq!(pairs, [(150, 200)]);
     }
 
@@ -749,10 +868,20 @@ mod tests {
         let mut off_grid = record(4, Some(year(2020)));
         off_grid.number = None;
         off_grid.offset = 4 * 1024 + 512;
-        let m = manifest(vec![record(1, None), record(2, None), unnumbered, off_grid, far]);
+        let m = manifest(vec![
+            record(1, None),
+            record(2, None),
+            unnumbered,
+            off_grid,
+            far,
+        ]);
         let a = analyse_all(&m);
         assert_eq!(a.fragments.len(), 2);
-        assert_eq!(a.numbers[2], Some(3), "positional number on the grid of the first fragment");
+        assert_eq!(
+            a.numbers[2],
+            Some(3),
+            "positional number on the grid of the first fragment"
+        );
         assert_eq!(a.fragment_of[2], Some(0));
         assert_eq!(a.unplaced, [3], "not on any grid: a stray");
         assert_eq!(a.fragments[1].origin, (64 << 20) - 5000 * 1024);
@@ -760,11 +889,24 @@ mod tests {
 
     #[test]
     fn boundary_sides_follow_d3() {
-        let cut = CutFact { position: 512, older_newest: year(2019), newer_oldest: year(2021), support: 2 };
+        let cut = CutFact {
+            position: 512,
+            older_newest: year(2019),
+            newer_oldest: year(2021),
+            support: 2,
+        };
         assert_eq!(side(&cut, Some((year(2017), year(2019)))), Side::Before);
         assert_eq!(side(&cut, Some((year(2021), year(2023)))), Side::After);
-        assert_eq!(side(&cut, Some((year(2020), year(2020)))), Side::Undecided, "newest before A_c");
-        assert_eq!(side(&cut, Some((year(2018), year(2023)))), Side::Undecided, "straddles B_c");
+        assert_eq!(
+            side(&cut, Some((year(2020), year(2020)))),
+            Side::Undecided,
+            "newest before A_c"
+        );
+        assert_eq!(
+            side(&cut, Some((year(2018), year(2023)))),
+            Side::Undecided,
+            "straddles B_c"
+        );
         assert_eq!(side(&cut, None), Side::Undecided);
     }
 }

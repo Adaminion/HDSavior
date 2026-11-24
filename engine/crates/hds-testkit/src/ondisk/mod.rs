@@ -25,7 +25,9 @@ use serde::{Deserialize, Serialize};
 
 /// A file reference: 48-bit MFT record number and 16-bit sequence number
 /// (notes section 3).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub struct FileRef {
     /// MFT record number (48 bits on disk).
     pub number: u64,
@@ -49,7 +51,10 @@ impl FileRef {
 
     /// Splits a 64-bit on-disk reference.
     pub const fn from_raw(raw: u64) -> Self {
-        FileRef { number: raw & 0x0000_FFFF_FFFF_FFFF, seq: (raw >> 48) as u16 }
+        FileRef {
+            number: raw & 0x0000_FFFF_FFFF_FFFF,
+            seq: (raw >> 48) as u16,
+        }
     }
 }
 
@@ -77,9 +82,15 @@ pub const FIXUP_STRIDE: usize = 512;
 /// the last two bytes of every 512-byte block behind it and replaces them
 /// with `usn` (notes section 2).
 pub fn apply_fixups(buf: &mut [u8], usa_offset: usize, usn: u16) {
-    assert!(buf.len().is_multiple_of(FIXUP_STRIDE), "structure size must be a multiple of 512");
+    assert!(
+        buf.len().is_multiple_of(FIXUP_STRIDE),
+        "structure size must be a multiple of 512"
+    );
     let blocks = buf.len() / FIXUP_STRIDE;
-    assert!(usa_offset + 2 * (blocks + 1) <= FIXUP_STRIDE - 2, "update sequence array does not fit");
+    assert!(
+        usa_offset + 2 * (blocks + 1) <= FIXUP_STRIDE - 2,
+        "update sequence array does not fit"
+    );
     buf[usa_offset..usa_offset + 2].copy_from_slice(&usn.to_le_bytes());
     for block in 0..blocks {
         let tail = (block + 1) * FIXUP_STRIDE - 2;
@@ -128,7 +139,10 @@ mod tests {
         assert_eq!(FileRef::from_raw(0xFEDC_1234_5678_9ABC), r);
         assert_eq!(FileRef::NONE.raw(), 0);
         // root directory reference as it appears in every top-level name
-        assert_eq!(FileRef::new(5, 5).raw().to_le_bytes(), [5, 0, 0, 0, 0, 0, 5, 0]);
+        assert_eq!(
+            FileRef::new(5, 5).raw().to_le_bytes(),
+            [5, 0, 0, 0, 0, 0, 5, 0]
+        );
     }
 
     #[test]
@@ -153,7 +167,9 @@ mod tests {
         assert_eq!(&buf[510..512], &[0x02, 0x01]);
         assert_eq!(&buf[1022..1024], &[0x02, 0x01]);
         // nothing else changed
-        for i in (0..1024).filter(|i| !(0x30..0x36).contains(i) && !(510..512).contains(i) && *i < 1022) {
+        for i in
+            (0..1024).filter(|i| !(0x30..0x36).contains(i) && !(510..512).contains(i) && *i < 1022)
+        {
             assert_eq!(buf[i], original[i], "byte {i}");
         }
     }

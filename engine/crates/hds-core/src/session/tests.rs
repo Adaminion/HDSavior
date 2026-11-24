@@ -597,17 +597,23 @@ fn the_destination_guard_decides_where_a_session_may_go() {
     let meta = meta_for(&disk, 0..4 * MIB as u64, ScanOptions::default());
     let protected = [Protected::session(0..4 * MIB as u64)];
     let path = dir.join("s.hds");
-    let refused = Session::create(meta.clone(), &path, &guard_for(&disk, &protected)).unwrap_err();
+    // On Windows "disk 3" is resolved against the real disks of the machine: a
+    // temporary directory on another disk is simply allowed. Only Unix, where a
+    // disk number names nothing, is certain to answer `unknown_disk`.
+    let refused = match Session::create(meta.clone(), &path, &guard_for(&disk, &protected)) {
+        Err(refused) => refused,
+        Ok(session) if cfg!(windows) => {
+            drop(session);
+            std::fs::remove_file(&path).unwrap();
+            return;
+        }
+        Ok(_) => panic!("a disk that cannot be located must need consent"),
+    };
     match &refused {
         SessionError::DestinationRefused(check) => {
-            assert_eq!(
-                check.verdict,
-                if cfg!(windows) {
-                    check.verdict
-                } else {
-                    Verdict::UnknownDisk
-                }
-            )
+            if !cfg!(windows) {
+                assert_eq!(check.verdict, Verdict::UnknownDisk);
+            }
         }
         other => panic!("{other}"),
     }

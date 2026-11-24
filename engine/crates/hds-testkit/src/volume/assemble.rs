@@ -8,8 +8,8 @@ use crate::ondisk::attr::{
 };
 use crate::ondisk::index::{index_root_value, IndexEntry, Tree};
 use crate::ondisk::record::{
-    attr_type, AttrBody, AttrModel, HeaderForm, NonResident, RecordModel, END_TAIL_WINDOWS, FLAG_DIRECTORY,
-    FLAG_IN_USE, FLAG_VIEW_INDEX,
+    attr_type, AttrBody, AttrModel, HeaderForm, NonResident, RecordModel, END_TAIL_WINDOWS,
+    FLAG_DIRECTORY, FLAG_IN_USE, FLAG_VIEW_INDEX,
 };
 use crate::ondisk::runlist::{total_clusters, Run};
 use crate::ondisk::{next_seq, utf16, FileRef};
@@ -28,7 +28,11 @@ pub(crate) struct Overflow {
 
 impl std::fmt::Display for Overflow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} bytes needed, {} available", self.needed, self.record_size)
+        write!(
+            f,
+            "{} bytes needed, {} available",
+            self.needed, self.record_size
+        )
     }
 }
 
@@ -65,7 +69,7 @@ pub(crate) fn security_descriptor() -> Vec<u8> {
     sd.extend_from_slice(&88u32.to_le_bytes()); // group
     sd.extend_from_slice(&0u32.to_le_bytes()); // no SACL
     sd.extend_from_slice(&20u32.to_le_bytes()); // DACL
-    // ACL: revision 2, size 52, two ACEs
+                                                // ACL: revision 2, size 52, two ACEs
     sd.extend_from_slice(&[2, 0]);
     sd.extend_from_slice(&52u16.to_le_bytes());
     sd.extend_from_slice(&2u16.to_le_bytes());
@@ -89,7 +93,11 @@ fn split_runs(runs: &[Run], pieces: &[Piece], what: &str, record: u64) -> Vec<(u
     let mut out = Vec::with_capacity(pieces.len());
     let mut at = 0;
     for piece in pieces {
-        let take = if piece.runs == 0 { runs.len() - at } else { piece.runs };
+        let take = if piece.runs == 0 {
+            runs.len() - at
+        } else {
+            piece.runs
+        };
         assert!(
             take > 0 && at + take <= runs.len(),
             "the {what} of record {record} has {} runs; its pieces ask for more",
@@ -98,7 +106,11 @@ fn split_runs(runs: &[Run], pieces: &[Piece], what: &str, record: u64) -> Vec<(u
         out.push((piece.holder, runs[at..at + take].to_vec()));
         at += take;
     }
-    assert!(at == runs.len(), "the pieces of the {what} of record {record} leave {} runs out", runs.len() - at);
+    assert!(
+        at == runs.len(),
+        "the pieces of the {what} of record {record} leave {} runs out",
+        runs.len() - at
+    );
     out
 }
 
@@ -127,11 +139,20 @@ impl Volume {
         let multi = node.multi.as_ref();
         let is_data = stream.is_unnamed_data();
         let Some(runs) = &stream.runs else {
-            let holder = if is_data { multi.map_or(0, |m| m.resident_data_in) } else { 0 };
+            let holder = if is_data {
+                multi.map_or(0, |m| m.resident_data_in)
+            } else {
+                0
+            };
             let attr = AttrModel::resident(stream.type_code, self.resident_bytes(stream))
                 .named(&stream.name)
                 .with_flags(stream.flags);
-            items.push(Item { holder, attr, lowest_vcn: 0, index_root: None });
+            items.push(Item {
+                holder,
+                attr,
+                lowest_vcn: 0,
+                index_root: None,
+            });
             return;
         };
         let pieces = match multi {
@@ -177,10 +198,21 @@ impl Volume {
                     0
                 },
                 compressed_size: (stream.wide_header && first).then_some(stored * cs),
-                tail: if is_data { node.quirks.runlist_tail.clone() } else { Vec::new() },
+                tail: if is_data {
+                    node.quirks.runlist_tail.clone()
+                } else {
+                    Vec::new()
+                },
             };
-            let attr = AttrModel::non_resident(stream.type_code, body).named(&stream.name).with_flags(stream.flags);
-            items.push(Item { holder, attr, lowest_vcn: vcn, index_root: None });
+            let attr = AttrModel::non_resident(stream.type_code, body)
+                .named(&stream.name)
+                .with_flags(stream.flags);
+            items.push(Item {
+                holder,
+                attr,
+                lowest_vcn: vcn,
+                index_root: None,
+            });
             vcn += len;
         }
     }
@@ -188,7 +220,11 @@ impl Volume {
     /// Builds the records of `node`. `tree` is the folder's index as laid out
     /// by the last `finalize` (`None`: an empty index, which is also what a
     /// deleted folder has).
-    pub(crate) fn assemble(&self, id: NodeId, tree: Option<&Tree>) -> Result<Vec<Assembled>, Overflow> {
+    pub(crate) fn assemble(
+        &self,
+        id: NodeId,
+        tree: Option<&Tree>,
+    ) -> Result<Vec<Assembled>, Overflow> {
         let node = self.node(id);
         let cs = self.cluster_size();
         let ibs = self.params.index_block_size;
@@ -198,12 +234,24 @@ impl Volume {
         let holders = 1 + node.extensions.len();
         let i30 = utf16("$I30");
         let mut items: Vec<Item> = Vec::new();
-        let plain = |holder: usize, attr: AttrModel| Item { holder, attr, lowest_vcn: 0, index_root: None };
+        let plain = |holder: usize, attr: AttrModel| Item {
+            holder,
+            attr,
+            lowest_vcn: 0,
+            index_root: None,
+        };
 
         if node.has_si && !node.quirks.no_standard_information {
-            let long = node.quirks.long_standard_information.unwrap_or(node.si_long);
-            let v3 =
-                long.then_some(SiV3 { owner_id: 0, security_id: node.security_id, quota_charged: 0, usn: 0 });
+            let long = node
+                .quirks
+                .long_standard_information
+                .unwrap_or(node.si_long);
+            let v3 = long.then_some(SiV3 {
+                owner_id: 0,
+                security_id: node.security_id,
+                quota_charged: 0,
+                usn: 0,
+            });
             let mut attr = AttrModel::resident(
                 attr_type::STANDARD_INFORMATION,
                 standard_information(&node.times, node.file_attributes, v3),
@@ -216,7 +264,10 @@ impl Volume {
 
         let names_holder = multi.map_or(0, |m| m.names_in);
         for link in &node.names {
-            let parent = node.quirks.raw_parent.unwrap_or_else(|| self.parent_ref(&link.parent));
+            let parent = node
+                .quirks
+                .raw_parent
+                .unwrap_or_else(|| self.parent_ref(&link.parent));
             let value = file_name(&FileNameValue {
                 parent,
                 times: link.times,
@@ -230,7 +281,10 @@ impl Volume {
                 name: link.name.clone(),
             });
             let mut attr = AttrModel::resident(attr_type::FILE_NAME, value.clone());
-            attr.body = AttrBody::Resident { value, indexed: true };
+            attr.body = AttrBody::Resident {
+                value,
+                indexed: true,
+            };
             if windows {
                 attr.unnamed_name_offset = Some(0);
             }
@@ -238,7 +292,10 @@ impl Volume {
         }
 
         if node.security_descriptor {
-            items.push(plain(0, AttrModel::resident(attr_type::SECURITY_DESCRIPTOR, security_descriptor())));
+            items.push(plain(
+                0,
+                AttrModel::resident(attr_type::SECURITY_DESCRIPTOR, security_descriptor()),
+            ));
         }
         for attr in &node.extra_attrs {
             items.push(plain(0, attr.clone()));
@@ -268,7 +325,12 @@ impl Volume {
                     node.record
                 );
                 let pieces = match multi {
-                    Some(m) => split_runs(&dir.runs, &m.index_allocation, "$INDEX_ALLOCATION", node.record),
+                    Some(m) => split_runs(
+                        &dir.runs,
+                        &m.index_allocation,
+                        "$INDEX_ALLOCATION",
+                        node.record,
+                    ),
                     None => vec![(0, dir.runs.clone())],
                 };
                 let mut vcn = 0u64;
@@ -286,20 +348,32 @@ impl Volume {
                         compressed_size: None,
                         tail: Vec::new(),
                     };
-                    let attr = AttrModel::non_resident(attr_type::INDEX_ALLOCATION, body).named(&i30);
-                    items.push(Item { holder, attr, lowest_vcn: vcn, index_root: None });
+                    let attr =
+                        AttrModel::non_resident(attr_type::INDEX_ALLOCATION, body).named(&i30);
+                    items.push(Item {
+                        holder,
+                        attr,
+                        lowest_vcn: vcn,
+                        index_root: None,
+                    });
                     vcn += len;
                 }
                 let mut bits = vec![0u8; (blocks as usize).div_ceil(64) * 8];
                 for block in 0..blocks as usize {
                     bits[block / 8] |= 1 << (block % 8);
                 }
-                items.push(plain(root_holder, AttrModel::resident(attr_type::BITMAP, bits).named(&i30)));
+                items.push(plain(
+                    root_holder,
+                    AttrModel::resident(attr_type::BITMAP, bits).named(&i30),
+                ));
             }
         }
 
         if let Some((tag, data)) = &node.reparse {
-            items.push(plain(0, AttrModel::resident(attr_type::REPARSE_POINT, reparse_point(*tag, data))));
+            items.push(plain(
+                0,
+                AttrModel::resident(attr_type::REPARSE_POINT, reparse_point(*tag, data)),
+            ));
         }
         if node.efs {
             let mut efs = vec![0u8; 80];
@@ -322,13 +396,20 @@ impl Volume {
         // Attributes are stored sorted by type, then name (notes section 4);
         // the sort is stable, so several names keep their given order.
         items.sort_by(|a, b| {
-            (a.attr.type_code, &a.attr.name, a.lowest_vcn).cmp(&(b.attr.type_code, &b.attr.name, b.lowest_vcn))
+            (a.attr.type_code, &a.attr.name, a.lowest_vcn).cmp(&(
+                b.attr.type_code,
+                &b.attr.name,
+                b.lowest_vcn,
+            ))
         });
 
         // Attribute ids count up per record in storage order; the attribute
         // list takes its place (and id) between the types around 0x20.
         let has_list = multi.is_some();
-        let list_position = items.iter().filter(|i| i.holder == 0 && i.attr.type_code < attr_type::ATTRIBUTE_LIST).count();
+        let list_position = items
+            .iter()
+            .filter(|i| i.holder == 0 && i.attr.type_code < attr_type::ATTRIBUTE_LIST)
+            .count();
         let mut next_id = vec![0u16; holders];
         let mut base_seen = 0;
         let mut list_id = 0;
@@ -349,8 +430,9 @@ impl Volume {
         }
         if node.quirks.reverse_name_ids {
             // all names live in one record; swap their ids end for end
-            let at: Vec<usize> =
-                (0..items.len()).filter(|&k| items[k].attr.type_code == attr_type::FILE_NAME).collect();
+            let at: Vec<usize> = (0..items.len())
+                .filter(|&k| items[k].attr.type_code == attr_type::FILE_NAME)
+                .collect();
             let ids: Vec<u16> = at.iter().map(|&k| items[k].attr.id).collect();
             for (&k, &id) in at.iter().zip(ids.iter().rev()) {
                 items[k].attr.id = id;
@@ -384,12 +466,20 @@ impl Volume {
             if node.quirks.old_header || self.params.flavor == Flavor::Win2000 {
                 HeaderForm::V30
             } else {
-                HeaderForm::V31 { number: number as u32, number_high: (number >> 32) as u16 }
+                HeaderForm::V31 {
+                    number: number as u32,
+                    number_high: (number >> 32) as u16,
+                }
             }
         };
-        let mut records: Vec<Option<(RecordModel, Option<Vec<IndexEntry>>)>> = Vec::with_capacity(holders);
+        let mut records: Vec<Option<(RecordModel, Option<Vec<IndexEntry>>)>> =
+            Vec::with_capacity(holders);
         for (holder, &next) in next_id.iter().enumerate() {
-            let superseded = if holder == 0 { node.superseded } else { node.extensions[holder - 1].superseded };
+            let superseded = if holder == 0 {
+                node.superseded
+            } else {
+                node.extensions[holder - 1].superseded
+            };
             if superseded {
                 records.push(None);
                 continue;
@@ -397,9 +487,10 @@ impl Volume {
             let mut model = if holder == 0 {
                 let mut m = RecordModel::new(node.record, node.header_seq(), rs);
                 m.header = match node.quirks.claimed_number {
-                    Some(claimed) if !node.quirks.old_header => {
-                        HeaderForm::V31 { number: claimed as u32, number_high: (claimed >> 32) as u16 }
-                    }
+                    Some(claimed) if !node.quirks.old_header => HeaderForm::V31 {
+                        number: claimed as u32,
+                        number_high: (claimed >> 32) as u16,
+                    },
                     _ => header(node.record),
                 };
                 m.flags = node.header_flags;
@@ -408,13 +499,20 @@ impl Volume {
                 }
                 // Windows leaves the link count alone when it deletes a
                 // file; ntfs-3g sets it to 0 (notes section 3).
-                m.link_count =
-                    if node.in_use || windows { node.names.len() as u16 } else { 0 };
+                m.link_count = if node.in_use || windows {
+                    node.names.len() as u16
+                } else {
+                    0
+                };
                 m.torn_blocks = node.quirks.torn_blocks.clone();
                 m
             } else {
                 let e = node.extensions[holder - 1];
-                let mut m = RecordModel::new(e.record, if node.in_use { e.seq } else { next_seq(e.seq) }, rs);
+                let mut m = RecordModel::new(
+                    e.record,
+                    if node.in_use { e.seq } else { next_seq(e.seq) },
+                    rs,
+                );
                 m.header = header(e.record);
                 m.flags = 0;
                 // the reference keeps the sequence the base had while in use
@@ -453,8 +551,11 @@ impl Volume {
                     let clusters = (bytes.len() as u64).div_ceil(cs).max(1);
                     // Before the clusters are allocated (trial fits) a
                     // stand-in run of the same shape is used.
-                    let runs =
-                        if node.list_runs.is_empty() { vec![Run::at(1, clusters)] } else { node.list_runs.clone() };
+                    let runs = if node.list_runs.is_empty() {
+                        vec![Run::at(1, clusters)]
+                    } else {
+                        node.list_runs.clone()
+                    };
                     AttrModel::non_resident(
                         attr_type::ATTRIBUTE_LIST,
                         NonResident {
@@ -481,14 +582,26 @@ impl Volume {
                 continue;
             };
             let needed = model.bytes_in_use();
-            let slot = if holder == 0 { node.record } else { node.extensions[holder - 1].record };
+            let slot = if holder == 0 {
+                node.record
+            } else {
+                node.extensions[holder - 1].record
+            };
             if needed > rs as usize {
-                return Err(Overflow { slot, needed, record_size: rs as usize });
+                return Err(Overflow {
+                    slot,
+                    needed,
+                    record_size: rs as usize,
+                });
             }
             out.push(Assembled {
                 slot,
                 model,
-                role: if holder == 0 { RecordRole::Base } else { RecordRole::Extension },
+                role: if holder == 0 {
+                    RecordRole::Base
+                } else {
+                    RecordRole::Extension
+                },
                 index_root,
                 list: if holder == 0 { list.clone() } else { None },
             });
@@ -501,16 +614,29 @@ impl Volume {
     pub(crate) fn root_capacities(&self, id: NodeId) -> (usize, usize) {
         let node = self.node(id);
         let root_holder = node.multi.as_ref().map_or(0, |m| m.index_root_in);
-        let slot = if root_holder == 0 { node.record } else { node.extensions[root_holder - 1].record };
+        let slot = if root_holder == 0 {
+            node.record
+        } else {
+            node.extensions[root_holder - 1].record
+        };
         let free = match self.assemble(id, None) {
-            Ok(records) => records.iter().find(|a| a.slot == slot).map_or(0, |a| a.model.free_bytes()),
-            Err(overflow) => panic!("record {} overflows even with an empty index: {overflow}", overflow.slot),
+            Ok(records) => records
+                .iter()
+                .find(|a| a.slot == slot)
+                .map_or(0, |a| a.model.free_bytes()),
+            Err(overflow) => panic!(
+                "record {} overflows even with an empty index: {overflow}",
+                overflow.slot
+            ),
         };
         // the trial already contains the 16-byte end entry
         let small = free + 0x10;
         // `$INDEX_ALLOCATION` (header, name, room for a few runs) and the
         // index `$BITMAP` join the record once blocks exist
-        let allocation_here = node.multi.as_ref().is_none_or(|m| m.index_allocation.iter().any(|p| p.holder == root_holder));
+        let allocation_here = node
+            .multi
+            .as_ref()
+            .is_none_or(|m| m.index_allocation.iter().any(|p| p.holder == root_holder));
         let reserve = 0x28 + if allocation_here { 0x78 } else { 0 };
         let large = small.saturating_sub(reserve).max(0x18);
         (small, large)

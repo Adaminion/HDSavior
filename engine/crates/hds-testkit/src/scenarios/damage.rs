@@ -35,13 +35,34 @@ use super::{finish_formatted, old_volume, reformat, stage, stage_with, MIB};
 /// of `intact.dat`'s record in which *every* block fails the check, as
 /// Windows logs whole records into `$LogFile`: it is dropped at scan time.
 pub fn torn_records(seed: u64) -> Built {
-    let (mut disk, old, test) = stage("torn_records", seed, "FILE records with broken fixups.", &["A3", "A4", "G1", "G3"]);
+    let (mut disk, old, test) = stage(
+        "torn_records",
+        seed,
+        "FILE records with broken fixups.",
+        &["A3", "A4", "G1", "G3"],
+    );
     let v = disk.volume(old);
     let cs = v.cluster_size();
-    let torn = |blocks: Vec<usize>| Quirks { torn_blocks: blocks, ..Quirks::default() };
-    v.add_file(test, "second-block-torn.bin", FileSpec::tagged(derive(seed, "a"), 40_000).quirks(torn(vec![1])));
-    v.add_file(test, "resident-torn.txt", FileSpec::tagged(derive(seed, "b"), 600).resident().quirks(torn(vec![1])));
-    let quirks = Quirks { torn_extension_blocks: vec![(1, vec![1])], ..Quirks::default() };
+    let torn = |blocks: Vec<usize>| Quirks {
+        torn_blocks: blocks,
+        ..Quirks::default()
+    };
+    v.add_file(
+        test,
+        "second-block-torn.bin",
+        FileSpec::tagged(derive(seed, "a"), 40_000).quirks(torn(vec![1])),
+    );
+    v.add_file(
+        test,
+        "resident-torn.txt",
+        FileSpec::tagged(derive(seed, "b"), 600)
+            .resident()
+            .quirks(torn(vec![1])),
+    );
+    let quirks = Quirks {
+        torn_extension_blocks: vec![(1, vec![1])],
+        ..Quirks::default()
+    };
     v.add_file(
         test,
         "extension-torn.bin",
@@ -82,14 +103,21 @@ pub fn pre31_volume(seed: u64) -> Built {
         "Windows 2000 volume (records without record number), quick-formatted by Windows 10; its MFT was elsewhere.",
         &["D1", "D6"],
     );
-    let mut params = VolumeParams::new(0, 96 * MIB).label("old").flavor(Flavor::Win2000);
+    let mut params = VolumeParams::new(0, 96 * MIB)
+        .label("old")
+        .flavor(Flavor::Win2000);
     let lcn = params.total_clusters() * 3 / 5;
     params = params.mft_at(lcn, 1024);
     let (old, _) = old_volume(&mut disk, params, &TreeSpec::small());
     reformat(&mut disk, old);
     disk.expect_kind(old, InstanceKind::Strays);
     let mut built = disk.finish();
-    for entry in built.manifest.entries.iter_mut().filter(|e| e.expect.presence == Presence::Shown) {
+    for entry in built
+        .manifest
+        .entries
+        .iter_mut()
+        .filter(|e| e.expect.presence == Presence::Shown)
+    {
         // without numbers no parent reference can be resolved
         entry.expect.path = None;
     }
@@ -115,11 +143,22 @@ pub fn pre31_mixed(seed: u64) -> Built {
     );
     let v = disk.volume(old);
     let cs = v.cluster_size();
-    let old_header = || Quirks { old_header: true, ..Quirks::default() };
+    let old_header = || Quirks {
+        old_header: true,
+        ..Quirks::default()
+    };
     v.add_tagged(test, "numbered-before.dat", 2000);
-    v.add_file(test, "unnumbered.bin", FileSpec::tagged(derive(seed, "u"), 30_000).quirks(old_header()));
+    v.add_file(
+        test,
+        "unnumbered.bin",
+        FileSpec::tagged(derive(seed, "u"), 30_000).quirks(old_header()),
+    );
     v.add_tagged(test, "numbered-after.dat", 2000);
-    let dir = v.mkdir_with(test, "Unnumbered folder", DirSpec::new().quirks(old_header()));
+    let dir = v.mkdir_with(
+        test,
+        "Unnumbered folder",
+        DirSpec::new().quirks(old_header()),
+    );
     for i in 0..3 {
         v.add_tagged(dir, format!("numbered-child-{i}.dat").as_str(), 1500);
     }
@@ -147,22 +186,48 @@ pub fn pre31_mixed(seed: u64) -> Built {
 /// records claim number 0 and so fall into eight one-record fragments —
 /// strays without name or data.
 pub fn never_used_records(seed: u64) -> Built {
-    let params = VolumeParams::new(0, 64 * MIB).label("old").blank_slots(BlankSlots::Zeros);
-    let (mut disk, old, test) =
-        stage_with("never_used_records", seed, "Never-used MFT slots in all known forms.", &["A3"], params);
+    let params = VolumeParams::new(0, 64 * MIB)
+        .label("old")
+        .blank_slots(BlankSlots::Zeros);
+    let (mut disk, old, test) = stage_with(
+        "never_used_records",
+        seed,
+        "Never-used MFT slots in all known forms.",
+        &["A3"],
+        params,
+    );
     let v = disk.volume(old);
     for i in 0..40 {
         v.add_tagged(test, format!("used-{i:02}.dat").as_str(), 500);
     }
     let time = v.params().format_time;
     for slot in 400..450 {
-        v.put_raw_record(slot, blank_model(BlankForm::Empty { sequence: 1 }, slot, 1024, 0x30_0000 + slot, time, false), false);
+        v.put_raw_record(
+            slot,
+            blank_model(
+                BlankForm::Empty { sequence: 1 },
+                slot,
+                1024,
+                0x30_0000 + slot,
+                time,
+                false,
+            ),
+            false,
+        );
     }
     for slot in 450..500 {
-        v.put_raw_record(slot, blank_model(BlankForm::Empty { sequence: 0 }, slot, 1024, 0, time, false), false);
+        v.put_raw_record(
+            slot,
+            blank_model(BlankForm::Empty { sequence: 0 }, slot, 1024, 0, time, false),
+            false,
+        );
     }
     for slot in 500..508 {
-        v.put_raw_record(slot, blank_model(BlankForm::Mkntfs, slot, 1024, 0, time, false), false);
+        v.put_raw_record(
+            slot,
+            blank_model(BlankForm::Mkntfs, slot, 1024, 0, time, false),
+            false,
+        );
     }
     finish_formatted(disk, old)
 }
@@ -236,14 +301,43 @@ pub fn stale_copies(seed: u64) -> Built {
 ///
 /// `honest-303.bin` in slot 303 must stay untouched by its impostor.
 pub fn wrong_record_numbers(seed: u64) -> Built {
-    let (mut disk, old, test) =
-        stage("wrong_record_numbers", seed, "Records whose stored record number is not their slot.", &["D1", "D4", "E9"]);
+    let (mut disk, old, test) = stage(
+        "wrong_record_numbers",
+        seed,
+        "Records whose stored record number is not their slot.",
+        &["D1", "D4", "E9"],
+    );
     let v = disk.volume(old);
-    let claim = |n: u64| Quirks { claimed_number: Some(n), ..Quirks::default() };
-    v.add_file(test, "claims-5300.bin", FileSpec::tagged(derive(seed, "a"), 20_000).record(300).quirks(claim(5300)));
-    v.add_file(test, "claims-5.bin", FileSpec::tagged(derive(seed, "b"), 20_000).record(301).quirks(claim(5)));
-    v.add_file(test, "claims-303.bin", FileSpec::tagged(derive(seed, "c"), 20_000).record(302).quirks(claim(303)));
-    v.add_file(test, "honest-303.bin", FileSpec::tagged(derive(seed, "d"), 20_000).record(303));
+    let claim = |n: u64| Quirks {
+        claimed_number: Some(n),
+        ..Quirks::default()
+    };
+    v.add_file(
+        test,
+        "claims-5300.bin",
+        FileSpec::tagged(derive(seed, "a"), 20_000)
+            .record(300)
+            .quirks(claim(5300)),
+    );
+    v.add_file(
+        test,
+        "claims-5.bin",
+        FileSpec::tagged(derive(seed, "b"), 20_000)
+            .record(301)
+            .quirks(claim(5)),
+    );
+    v.add_file(
+        test,
+        "claims-303.bin",
+        FileSpec::tagged(derive(seed, "c"), 20_000)
+            .record(302)
+            .quirks(claim(303)),
+    );
+    v.add_file(
+        test,
+        "honest-303.bin",
+        FileSpec::tagged(derive(seed, "d"), 20_000).record(303),
+    );
     for i in 0..40 {
         v.add_tagged(test, format!("neighbour-{i:02}.dat").as_str(), 800);
     }
@@ -266,7 +360,12 @@ pub fn wrong_record_numbers(seed: u64) -> Built {
 /// shown, somewhere below `[Lost folders]`, each exactly once. The manifest
 /// states no path for them.
 pub fn parent_cycles(seed: u64) -> Built {
-    let (mut disk, old, test) = stage("parent_cycles", seed, "Folders whose parent references form cycles.", &["E8"]);
+    let (mut disk, old, test) = stage(
+        "parent_cycles",
+        seed,
+        "Folders whose parent references form cycles.",
+        &["E8"],
+    );
     let v = disk.volume(old);
     let a = v.mkdir(test, "A");
     let b = v.mkdir(a, "B");
@@ -277,7 +376,14 @@ pub fn parent_cycles(seed: u64) -> Built {
     let y = v.mkdir(x, "Y");
     let z = v.mkdir(y, "Z");
     v.set_parent(x, z);
-    for (dir, name) in [(a, "in-a.dat"), (b, "in-b.dat"), (own, "in-self.dat"), (x, "in-x.dat"), (y, "in-y.dat"), (z, "in-z.dat")] {
+    for (dir, name) in [
+        (a, "in-a.dat"),
+        (b, "in-b.dat"),
+        (own, "in-self.dat"),
+        (x, "in-x.dat"),
+        (y, "in-y.dat"),
+        (z, "in-z.dat"),
+    ] {
         v.add_tagged(dir, name, 1200);
     }
     v.add_tagged(test, "reachable.dat", 1200);
@@ -312,20 +418,50 @@ pub fn reparse_and_flags(seed: u64) -> Built {
     );
     let v = disk.volume(old);
     let s = |label: &str| derive(seed, label);
-    v.add_file(test, "onedrive-placeholder.docx", FileSpec::cloud_placeholder(s("c1"), 800_000, reparse_tag::CLOUD));
-    v.add_file(test, "onedrive-variant.xlsx", FileSpec::cloud_placeholder(s("c2"), 123_456, reparse_tag::CLOUD_6));
-    v.add_file(test, "dedup-stub.vhdx", FileSpec::dedup_stub(s("d"), 5_000_000));
-    v.add_file(test, "compact-os.dll", FileSpec::wof_compressed(s("w"), 300_000));
+    v.add_file(
+        test,
+        "onedrive-placeholder.docx",
+        FileSpec::cloud_placeholder(s("c1"), 800_000, reparse_tag::CLOUD),
+    );
+    v.add_file(
+        test,
+        "onedrive-variant.xlsx",
+        FileSpec::cloud_placeholder(s("c2"), 123_456, reparse_tag::CLOUD_6),
+    );
+    v.add_file(
+        test,
+        "dedup-stub.vhdx",
+        FileSpec::dedup_stub(s("d"), 5_000_000),
+    );
+    v.add_file(
+        test,
+        "compact-os.dll",
+        FileSpec::wof_compressed(s("w"), 300_000),
+    );
     let mut stream_only = FileSpec::wof_compressed(s("w2"), 200_000);
     stream_only.reparse = None;
     stream_only.file_attributes &= !0x400;
     v.add_file(test, "wof-stream-only.dll", stream_only);
-    v.add_file(test, "lznt1.txt", FileSpec::tagged(s("z"), 150_000).compressed());
+    v.add_file(
+        test,
+        "lznt1.txt",
+        FileSpec::tagged(s("z"), 150_000).compressed(),
+    );
     let mut tiny = FileSpec::tagged(s("t"), 40).resident();
     tiny.attr_flags = ATTR_COMPRESSED;
     v.add_file(test, "tiny-compressed-flag.txt", tiny);
-    v.add_file(test, "efs.docx", FileSpec::tagged(s("e"), 70_000).encrypted());
-    v.add_file(test, "symlink", FileSpec::tagged(0, 0).resident().reparse(reparse_tag::SYMLINK, vec![0x55; 0x40]));
+    v.add_file(
+        test,
+        "efs.docx",
+        FileSpec::tagged(s("e"), 70_000).encrypted(),
+    );
+    v.add_file(
+        test,
+        "symlink",
+        FileSpec::tagged(0, 0)
+            .resident()
+            .reparse(reparse_tag::SYMLINK, vec![0x55; 0x40]),
+    );
     let junction = v.mkdir(test, "Junction");
     v.node_reparse(junction, reparse_tag::MOUNT_POINT, vec![0x33; 0x30]);
     v.add_tagged(test, "plain.dat", 9000);
@@ -351,8 +487,15 @@ pub fn reparse_and_flags(seed: u64) -> Built {
 /// are named in `notes`.
 pub fn bad_boot_sectors(seed: u64) -> Built {
     let mut disk = Disk::new("bad_boot_sectors", seed, 96 * MIB);
-    disk.describe("Quick format plus decoy boot sectors, valid and invalid.", &["A3", "C1", "F2"]);
-    let (old, _) = old_volume(&mut disk, VolumeParams::new(0, 96 * MIB).label("old"), &TreeSpec::default());
+    disk.describe(
+        "Quick format plus decoy boot sectors, valid and invalid.",
+        &["A3", "C1", "F2"],
+    );
+    let (old, _) = old_volume(
+        &mut disk,
+        VolumeParams::new(0, 96 * MIB).label("old"),
+        &TreeSpec::default(),
+    );
     let new = reformat(&mut disk, old);
     let v = disk.volume_ref(new);
     let current = v.boot_params();
@@ -391,7 +534,15 @@ pub fn bad_boot_sectors(seed: u64) -> Built {
     disk.track_boot_sector(fact(copy_at, &current));
     // broken ones
     let mut broken = Vec::new();
-    for (i, (at, value)) in [(0x0B, [0u8, 0]), (0x0B, [0x00, 0x03]), (0x0D, [0x81, 0]), (0x40, [0, 0])].into_iter().enumerate() {
+    for (i, (at, value)) in [
+        (0x0B, [0u8, 0]),
+        (0x0B, [0x00, 0x03]),
+        (0x0D, [0x81, 0]),
+        (0x40, [0, 0]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let mut sector = encode_boot_sector(&phantom);
         sector[at] = value[0];
         if at == 0x0B {
@@ -441,19 +592,35 @@ pub fn sparse_and_initialized(seed: u64) -> Built {
         test,
         "sparse.bin",
         FileSpec::tagged(s("sparse"), 265 * cs - 10)
-            .runs(vec![Run::at(base, 6), Run::hole(255), Run::at(base + 300, 4)])
+            .runs(vec![
+                Run::at(base, 6),
+                Run::hole(255),
+                Run::at(base + 300, 4),
+            ])
             .sparse(),
     );
     v.add_file(
         test,
         "hole-without-flag.bin",
-        FileSpec::tagged(s("hole"), 24 * cs).runs(vec![Run::at(base + 400, 8), Run::hole(8), Run::at(base + 500, 8)]),
+        FileSpec::tagged(s("hole"), 24 * cs).runs(vec![
+            Run::at(base + 400, 8),
+            Run::hole(8),
+            Run::at(base + 500, 8),
+        ]),
     );
     let mut stale = FileSpec::tagged(s("stale"), 40_000).initialized(10_000);
     stale.extra_clusters = 2;
     v.add_file(test, "stale-tail.bin", stale);
-    v.add_file(test, "never-written.bin", FileSpec::tagged(s("never"), 6 * cs).initialized(0));
-    v.add_file(test, "slack.bin", FileSpec::tagged(s("slack"), 5000).non_resident());
+    v.add_file(
+        test,
+        "never-written.bin",
+        FileSpec::tagged(s("never"), 6 * cs).initialized(0),
+    );
+    v.add_file(
+        test,
+        "slack.bin",
+        FileSpec::tagged(s("slack"), 5000).non_resident(),
+    );
     let mut pre = FileSpec::tagged(s("pre"), 3 * cs - 1).non_resident();
     pre.extra_clusters = 17;
     v.add_file(test, "preallocated.bin", pre);
@@ -481,8 +648,12 @@ pub fn sparse_and_initialized(seed: u64) -> Built {
 ///   touched by the conflict.
 /// * `deleted-twice.bin` in a record whose sequence is now 3.
 pub fn deleted_and_reused(seed: u64) -> Built {
-    let (mut disk, old, test) =
-        stage("deleted_and_reused", seed, "Deleted files and folders, reused records, reused clusters.", &["E5", "E6", "G1", "G2"]);
+    let (mut disk, old, test) = stage(
+        "deleted_and_reused",
+        seed,
+        "Deleted files and folders, reused records, reused clusters.",
+        &["E5", "E6", "G1", "G2"],
+    );
     let v = disk.volume(old);
     let cs = v.cluster_size();
     let s = |label: &str| derive(seed, label);
@@ -492,11 +663,19 @@ pub fn deleted_and_reused(seed: u64) -> Built {
     v.add_tagged(dir, "child-2.dat", 700);
     // folder -> file
     let by_file = v.mkdir(test, "Folder replaced by a file");
-    v.add_file(by_file, "orphaned-by-a-file.dat", FileSpec::tagged(s("of"), 9000));
+    v.add_file(
+        by_file,
+        "orphaned-by-a-file.dat",
+        FileSpec::tagged(s("of"), 9000),
+    );
     let file_slot = v.reference(by_file).number;
     // folder -> folder
     let by_dir = v.mkdir(test, "Folder replaced by a folder");
-    v.add_file(by_dir, "orphaned-by-a-folder.dat", FileSpec::tagged(s("od"), 9000));
+    v.add_file(
+        by_dir,
+        "orphaned-by-a-folder.dat",
+        FileSpec::tagged(s("od"), 9000),
+    );
     let dir_slot = v.reference(by_dir).number;
     let victim = v.add_file(test, "victim.bin", FileSpec::tagged(s("victim"), 10 * cs));
     let victim_runs = v.runs(victim);
@@ -510,11 +689,23 @@ pub fn deleted_and_reused(seed: u64) -> Built {
     v.delete_tree(by_dir);
     v.delete(victim);
     v.delete(twice);
-    v.add_file(test, "usurper.bin", FileSpec::tagged(s("usurper"), 12_000).record(file_slot));
+    v.add_file(
+        test,
+        "usurper.bin",
+        FileSpec::tagged(s("usurper"), 12_000).record(file_slot),
+    );
     let newer = v.mkdir_with(test, "Newer folder", DirSpec::new().record(dir_slot));
     v.add_tagged(newer, "child-of-the-newer-folder.dat", 2000);
-    v.add_file(test, "reuser.bin", FileSpec::tagged(s("reuser"), 10 * cs - 17).runs(victim_runs));
-    let second = v.add_file(test, "deleted-twice.bin", FileSpec::tagged(s("twice"), 20_000).record(twice_slot));
+    v.add_file(
+        test,
+        "reuser.bin",
+        FileSpec::tagged(s("reuser"), 10 * cs - 17).runs(victim_runs),
+    );
+    let second = v.add_file(
+        test,
+        "deleted-twice.bin",
+        FileSpec::tagged(s("twice"), 20_000).record(twice_slot),
+    );
     v.delete(second);
     finish_formatted(disk, old)
 }
@@ -552,12 +743,18 @@ pub fn lost_folder_names(seed: u64) -> Built {
         "Lost top-level folders named by Win32 entries, by DOS aliases only, by a stale index block, or not at all.",
         &["E5", "E6", "C4"],
     );
-    let old = disk.format(VolumeParams::new(0, 96 * MIB).label("old").flavor(Flavor::Win7));
+    let old = disk.format(
+        VolumeParams::new(0, 96 * MIB)
+            .label("old")
+            .flavor(Flavor::Win7),
+    );
     let v = disk.volume(old);
     let root = v.root();
     let first_life = v.mkdir(root, "AAA first life");
     let shared = v.reference(first_life).number;
-    let archives: Vec<_> = (0..30).map(|i| v.mkdir(root, format!("Archive {i:02}").as_str())).collect();
+    let archives: Vec<_> = (0..30)
+        .map(|i| v.mkdir(root, format!("Archive {i:02}").as_str()))
+        .collect();
     // push the next automatic record number beyond 255
     let filler = v.mkdir(root, "Filler");
     for i in 0..(255 - v.reference(filler).number - 1) {
@@ -570,7 +767,11 @@ pub fn lost_folder_names(seed: u64) -> Built {
     v.add_tagged(inner, "in inner survivor.dat", 3000);
     let gone = v.add_tagged(first_life, "from the first life.dat", 4000);
     for (i, &dir) in archives.iter().enumerate() {
-        v.add_tagged(dir, format!("content of archive {i:02}.dat").as_str(), 2000 + 10 * i as u64);
+        v.add_tagged(
+            dir,
+            format!("content of archive {i:02}.dat").as_str(),
+            2000 + 10 * i as u64,
+        );
     }
     // first life ends, the record number is used again
     v.delete(gone);
@@ -599,7 +800,8 @@ pub fn lost_folder_names(seed: u64) -> Built {
     let second_block = v.lcn_to_offset(root_blocks[1].lcn.expect("allocated"));
     let spare = v.lcn_to_offset(v.total_clusters() - 2000);
     disk.copy(second_block, spare, 4096);
-    disk.volume(old).rename(archives[renamed], format!("Renamed {renamed:02}").as_str());
+    disk.volume(old)
+        .rename(archives[renamed], format!("Renamed {renamed:02}").as_str());
     disk.render(old);
     let v = disk.volume_ref(old);
     let block_1_now: Vec<String> = v.trees[&v.root().0].blocks[1]
@@ -607,7 +809,10 @@ pub fn lost_folder_names(seed: u64) -> Built {
         .filter_map(|e| crate::facts::name_fact(&e.key, 0))
         .map(|n| n.name)
         .collect();
-    assert!(block_1_now.contains(&format!("Renamed {renamed:02}")), "the new name must land in a surviving block");
+    assert!(
+        block_1_now.contains(&format!("Renamed {renamed:02}")),
+        "the new name must land in a surviving block"
+    );
     let new = disk.format(disk.reformat_params(old).flavor(Flavor::Win7));
     disk.render(new);
     disk.finish()
@@ -642,7 +847,16 @@ pub fn lost_folder_names(seed: u64) -> Built {
 pub fn overlap_conflicts(seed: u64) -> Built {
     let mut params = VolumeParams::new(0, 64 * MIB).label("old");
     let far = params.total_clusters() * 3 / 4;
-    params.mft = vec![MftFragment { lcn: None, records: 512 }, MftFragment { lcn: Some(far), records: 512 }];
+    params.mft = vec![
+        MftFragment {
+            lcn: None,
+            records: 512,
+        },
+        MftFragment {
+            lcn: Some(far),
+            records: 512,
+        },
+    ];
     let (mut disk, old, test) = stage_with(
         "overlap_conflicts",
         seed,
@@ -657,13 +871,21 @@ pub fn overlap_conflicts(seed: u64) -> Built {
     let t0 = time::ymd(2021, 6, 1);
     let mut pair = |n: u64, later_first: bool, same_fragment: bool| {
         let runs = vec![Run::at(base + 100 * n, 8)];
-        let a = v.add_file(test, format!("pair{n}-a.bin").as_str(), FileSpec::tagged(derive(seed, "pa") + n, 8 * cs).runs(runs.clone()));
+        let a = v.add_file(
+            test,
+            format!("pair{n}-a.bin").as_str(),
+            FileSpec::tagged(derive(seed, "pa") + n, 8 * cs).runs(runs.clone()),
+        );
         let mut b_spec = FileSpec::tagged(derive(seed, "pb") + n, 8 * cs).forced_runs(runs);
         if !same_fragment {
             b_spec = b_spec.record(600 + n);
         }
         let b = v.add_file(test, format!("pair{n}-b.bin").as_str(), b_spec);
-        let (ta, tb) = if later_first { (t0 + time::HOUR, t0) } else { (t0, t0 + time::HOUR) };
+        let (ta, tb) = if later_first {
+            (t0 + time::HOUR, t0)
+        } else {
+            (t0, t0 + time::HOUR)
+        };
         v.set_times(a, Times::all(ta));
         v.set_times(b, Times::all(tb));
         (a, b)
@@ -698,7 +920,12 @@ pub fn overlap_conflicts(seed: u64) -> Built {
 /// 1980-01-01; 2038-01-19; 2107-12-31; and one with four different
 /// ordinary times whose `$FILE_NAME` copy says something else entirely.
 pub fn timestamp_edges(seed: u64) -> Built {
-    let (mut disk, old, test) = stage("timestamp_edges", seed, "Files with extreme and invalid timestamps.", &["H8"]);
+    let (mut disk, old, test) = stage(
+        "timestamp_edges",
+        seed,
+        "Files with extreme and invalid timestamps.",
+        &["H8"],
+    );
     let v = disk.volume(old);
     let cases: [(&str, u64); 10] = [
         ("zero.dat", 0),
@@ -713,7 +940,11 @@ pub fn timestamp_edges(seed: u64) -> Built {
         ("year-2107.dat", time::ymd_hms(2107, 12, 31, 23, 59, 58)),
     ];
     for (i, (name, t)) in cases.into_iter().enumerate() {
-        v.add_file(test, name, FileSpec::tagged(derive(seed, "t") + i as u64, 3000).times(Times::all(t)));
+        v.add_file(
+            test,
+            name,
+            FileSpec::tagged(derive(seed, "t") + i as u64, 3000).times(Times::all(t)),
+        );
     }
     let node = v.add_tagged(test, "four-different-times.dat", 3000);
     v.set_times(
@@ -746,14 +977,21 @@ pub fn timestamp_edges(seed: u64) -> Built {
 /// * `list-without-data.bin` — an attribute list (its name lives in an
 ///   extension record) but no `$DATA`: `missing_fragments`.
 pub fn streams_and_no_data(seed: u64) -> Built {
-    let (mut disk, old, test) =
-        stage("streams_and_no_data", seed, "Alternate data streams; files without an unnamed stream.", &["A4", "E2", "G1"]);
+    let (mut disk, old, test) = stage(
+        "streams_and_no_data",
+        seed,
+        "Alternate data streams; files without an unnamed stream.",
+        &["A4", "E2", "G1"],
+    );
     let v = disk.volume(old);
     let s = |label: &str| derive(seed, label);
     v.add_file(
         test,
         "download.exe",
-        FileSpec::tagged(s("dl"), 60_000).stream("Zone.Identifier", crate::content::ContentSpec::tagged(s("zone"), 26)),
+        FileSpec::tagged(s("dl"), 60_000).stream(
+            "Zone.Identifier",
+            crate::content::ContentSpec::tagged(s("zone"), 26),
+        ),
     );
     let mut big = FileSpec::tagged(s("small"), 100).resident();
     big.streams.push(crate::volume::spec::StreamSpec {
@@ -762,7 +1000,10 @@ pub fn streams_and_no_data(seed: u64) -> Built {
         non_resident: true,
     });
     v.add_file(test, "big-stream.bin", big);
-    let mut only = FileSpec::tagged(0, 0).stream("payload", crate::content::ContentSpec::tagged(s("payload"), 5000));
+    let mut only = FileSpec::tagged(0, 0).stream(
+        "payload",
+        crate::content::ContentSpec::tagged(s("payload"), 5000),
+    );
     only.no_data_attribute = true;
     v.add_file(test, "only-a-stream.dat", only);
     let mut none = FileSpec::tagged(0, 0);

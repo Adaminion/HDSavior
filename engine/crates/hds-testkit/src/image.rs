@@ -35,7 +35,10 @@ impl std::fmt::Debug for Image {
 impl Image {
     /// An all-zero image of `len` bytes.
     pub fn new(len: u64) -> Self {
-        Image { len, pages: BTreeMap::new() }
+        Image {
+            len,
+            pages: BTreeMap::new(),
+        }
     }
 
     /// An image holding exactly `bytes`.
@@ -162,10 +165,17 @@ impl Image {
 
     /// `true` when every byte of the range is zero.
     pub fn is_zero(&self, offset: u64, len: u64) -> bool {
-        assert!(offset.checked_add(len).is_some_and(|e| e <= self.len), "range outside the image");
+        assert!(
+            offset.checked_add(len).is_some_and(|e| e <= self.len),
+            "range outside the image"
+        );
         let end = offset + len;
         let first = offset / PAGE as u64;
-        let last = if len == 0 { first } else { (end - 1) / PAGE as u64 };
+        let last = if len == 0 {
+            first
+        } else {
+            (end - 1) / PAGE as u64
+        };
         for (&page_no, page) in self.pages.range(first..=last) {
             let page_start = page_no * PAGE as u64;
             let from = offset.max(page_start) - page_start;
@@ -180,7 +190,11 @@ impl Image {
     /// The whole image as one vector. Meant for small images; panics above
     /// 4 GiB so that a test cannot allocate a whole "disk" by accident.
     pub fn to_vec(&self) -> Vec<u8> {
-        assert!(self.len <= 4 << 30, "image of {} bytes is too large for to_vec()", self.len);
+        assert!(
+            self.len <= 4 << 30,
+            "image of {} bytes is too large for to_vec()",
+            self.len
+        );
         self.read_vec(0, self.len as usize)
     }
 
@@ -276,7 +290,12 @@ impl FileSink {
     pub fn create(path: &Path, len: u64) -> io::Result<Self> {
         let file = File::create(path)?;
         file.set_len(len)?;
-        Ok(FileSink { file, buf: Vec::with_capacity(Self::BUFFER), buf_start: 0, bytes_written: 0 })
+        Ok(FileSink {
+            file,
+            buf: Vec::with_capacity(Self::BUFFER),
+            buf_start: 0,
+            bytes_written: 0,
+        })
     }
 
     fn flush_buf(&mut self) -> io::Result<()> {
@@ -461,7 +480,10 @@ mod tests {
         assert_eq!(&bytes[..6], b"Abcdef");
         assert_eq!(&bytes[1 << 20..(1 << 20) + 3], b"far");
         assert_eq!(&bytes[8 << 20..(8 << 20) + big.len()], &big[..]);
-        assert_eq!(&bytes[(8 << 20) + big.len()..(8 << 20) + big.len() + 4], b"tail");
+        assert_eq!(
+            &bytes[(8 << 20) + big.len()..(8 << 20) + big.len() + 4],
+            b"tail"
+        );
         assert!(bytes[6..1 << 20].iter().all(|&b| b == 0));
     }
 }

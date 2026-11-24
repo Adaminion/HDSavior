@@ -22,7 +22,10 @@ pub const DAY: u64 = 24 * HOUR;
 /// arguments are literals in test code.
 pub fn ymd_hms(year: u32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> u64 {
     assert!(year >= 1601, "FILETIME starts in 1601");
-    assert!((1..=12).contains(&month) && (1..=31).contains(&day), "bad date");
+    assert!(
+        (1..=12).contains(&month) && (1..=31).contains(&day),
+        "bad date"
+    );
     assert!(hour < 24 && minute < 60 && second < 60, "bad time of day");
     days_since_1601(year, month, day) * DAY
         + hour as u64 * HOUR
@@ -38,7 +41,11 @@ pub fn ymd(year: u32, month: u32, day: u32) -> u64 {
 fn days_since_1601(year: u32, month: u32, day: u32) -> u64 {
     // Days from civil, after Howard Hinnant's well-known algorithm, shifted
     // from the 0000-03-01 era start to 1601-01-01.
-    let y = if month <= 2 { year as i64 - 1 } else { year as i64 };
+    let y = if month <= 2 {
+        year as i64 - 1
+    } else {
+        year as i64
+    };
     let era = y.div_euclid(400);
     let yoe = y.rem_euclid(400);
     let mp = (month as i64 + 9) % 12;
@@ -106,9 +113,15 @@ mod tests {
         // Raw creation time of `passwords.txt` on the Windows 10 sample volume
         // of docs/notes (bytes 86 A3 F1 EF C2 9F D6 01), which an independent
         // reader prints as 2020-10-11T11:37:45.2070790Z.
-        assert_eq!(ymd_hms(2020, 10, 11, 11, 37, 45) + 2_070_790, 0x01D6_9FC2_EFF1_A386);
+        assert_eq!(
+            ymd_hms(2020, 10, 11, 11, 37, 45) + 2_070_790,
+            0x01D6_9FC2_EFF1_A386
+        );
         // computed with Python's datetime
-        assert_eq!(ymd_hms(2020, 10, 11, 11, 37, 44) + 3_570_445, 132_468_898_643_570_445);
+        assert_eq!(
+            ymd_hms(2020, 10, 11, 11, 37, 44) + 3_570_445,
+            132_468_898_643_570_445
+        );
         assert_eq!(ymd_hms(2024, 2, 29, 23, 59, 59), 133_537_247_990_000_000);
         // 2000-02-29 exists, 1900-02-29 does not: day arithmetic across both.
         assert_eq!(ymd(2000, 3, 1) - ymd(2000, 2, 28), 2 * DAY);
@@ -131,12 +144,27 @@ mod tests {
     #[test]
     fn iso_formatting() {
         assert_eq!(to_iso(0), "1601-01-01T00:00:00.0000000Z");
-        assert_eq!(to_iso(132_468_898_643_570_445), "2020-10-11T11:37:44.3570445Z");
-        assert_eq!(to_iso(0x01D6_9FC2_EFF1_A386), "2020-10-11T11:37:45.2070790Z");
-        assert_eq!(to_iso(ymd_hms(2024, 2, 29, 23, 59, 59)), "2024-02-29T23:59:59.0000000Z");
+        assert_eq!(
+            to_iso(132_468_898_643_570_445),
+            "2020-10-11T11:37:44.3570445Z"
+        );
+        assert_eq!(
+            to_iso(0x01D6_9FC2_EFF1_A386),
+            "2020-10-11T11:37:45.2070790Z"
+        );
+        assert_eq!(
+            to_iso(ymd_hms(2024, 2, 29, 23, 59, 59)),
+            "2024-02-29T23:59:59.0000000Z"
+        );
         assert_eq!(to_iso(ymd(1999, 12, 31)), "1999-12-31T00:00:00.0000000Z");
         assert_eq!(to_iso(u64::MAX), "filetime:0xffffffffffffffff");
-        for (y, m, d) in [(1601, 1, 1), (1700, 3, 1), (1970, 1, 1), (2038, 1, 19), (2100, 12, 31)] {
+        for (y, m, d) in [
+            (1601, 1, 1),
+            (1700, 3, 1),
+            (1970, 1, 1),
+            (2038, 1, 19),
+            (2100, 12, 31),
+        ] {
             let iso = to_iso(ymd(y, m, d));
             assert_eq!(iso, format!("{y:04}-{m:02}-{d:02}T00:00:00.0000000Z"));
         }

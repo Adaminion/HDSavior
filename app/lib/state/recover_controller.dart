@@ -130,6 +130,11 @@ class RecoverController
   bool _disposed = false;
   CatalogInfo? _seenInfo;
   int _seenGuard = 0;
+  String? _jobDestination;
+
+  /// The folder the running (or last) recovery writes to, as given to
+  /// [start].
+  String? get jobDestination => _jobDestination;
 
   // --- options and summary -------------------------------------------------
 
@@ -307,6 +312,7 @@ class RecoverController
   /// (`destination_refused`), its verdict becomes [destinationCheck] and the
   /// exception is rethrown.
   Future<RecoverStartResult> start({required String dest}) async {
+    if (!isActive) _jobDestination = dest;
     final selection = _catalog.selection.spec;
     final options = _options;
     try {

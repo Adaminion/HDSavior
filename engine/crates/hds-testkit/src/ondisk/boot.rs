@@ -28,7 +28,10 @@ pub struct BootParams {
 /// Encodes "sectors per cluster" (0x0D): the count itself up to 0x80,
 /// `256 - log2(count)` above (notes section 1, "Encodings and rules").
 pub fn sectors_per_cluster_byte(sectors: u32) -> u8 {
-    assert!(sectors.is_power_of_two(), "sectors per cluster must be a power of two");
+    assert!(
+        sectors.is_power_of_two(),
+        "sectors per cluster must be a power of two"
+    );
     if sectors <= 0x80 {
         sectors as u8
     } else {
@@ -40,10 +43,16 @@ pub fn sectors_per_cluster_byte(sectors: u32) -> u8 {
 /// clusters when the structure is at least one cluster, otherwise
 /// `-log2(bytes)`.
 pub fn size_byte(size: u32, cluster_size: u32) -> u8 {
-    assert!(size.is_power_of_two(), "structure size must be a power of two");
+    assert!(
+        size.is_power_of_two(),
+        "structure size must be a power of two"
+    );
     if size >= cluster_size {
         let clusters = size / cluster_size;
-        assert!(clusters <= 0x7F, "structure of {clusters} clusters cannot be encoded");
+        assert!(
+            clusters <= 0x7F,
+            "structure of {clusters} clusters cannot be encoded"
+        );
         clusters as u8
     } else {
         (-(size.trailing_zeros() as i32)) as i8 as u8
@@ -53,7 +62,10 @@ pub fn size_byte(size: u32, cluster_size: u32) -> u8 {
 /// The 512 bytes of a boot sector. Only this first block is meaningful,
 /// also on 4096-byte-sector volumes.
 pub fn encode_boot_sector(p: &BootParams) -> [u8; 512] {
-    assert!(p.cluster_size.is_multiple_of(p.bytes_per_sector), "cluster must be whole sectors");
+    assert!(
+        p.cluster_size.is_multiple_of(p.bytes_per_sector),
+        "cluster must be whole sectors"
+    );
     let mut b = [0u8; 512];
     b[0..3].copy_from_slice(&[0xEB, 0x52, 0x90]);
     b[3..11].copy_from_slice(b"NTFS    ");
@@ -130,7 +142,11 @@ mod tests {
         });
         assert_eq!(&b[..0x0B], b"\xEB\x52\x90NTFS    ");
         assert_eq!(&b[0x0B..0x0E], &[0x00, 0x02, 0x08]);
-        assert_eq!(&b[0x0E..0x15], &[0; 7], "reserved sectors, FATs, root entries, sectors: zero");
+        assert_eq!(
+            &b[0x0E..0x15],
+            &[0; 7],
+            "reserved sectors, FATs, root entries, sectors: zero"
+        );
         assert_eq!(b[0x15], 0xF8);
         assert_eq!(&b[0x1C..0x20], &128u32.to_le_bytes());
         assert_eq!(&b[0x28..0x30], &6015u64.to_le_bytes());
@@ -138,7 +154,10 @@ mod tests {
         assert_eq!(&b[0x38..0x40], &2u64.to_le_bytes());
         assert_eq!(&b[0x40..0x44], &[0xF6, 0, 0, 0]);
         assert_eq!(&b[0x44..0x48], &[0x01, 0, 0, 0]);
-        assert_eq!(&b[0x48..0x50], &[0x88, 0x72, 0xEF, 0xA4, 0x9B, 0xEF, 0xA4, 0xE0]);
+        assert_eq!(
+            &b[0x48..0x50],
+            &[0x88, 0x72, 0xEF, 0xA4, 0x9B, 0xEF, 0xA4, 0xE0]
+        );
         assert_eq!(&b[0x1FE..], &[0x55, 0xAA]);
     }
 }

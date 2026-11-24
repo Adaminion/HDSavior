@@ -14,7 +14,10 @@ pub struct Run {
 impl Run {
     /// `len` clusters at `lcn`.
     pub const fn at(lcn: u64, len: u64) -> Self {
-        Run { lcn: Some(lcn), len }
+        Run {
+            lcn: Some(lcn),
+            len,
+        }
     }
 
     /// A sparse hole of `len` clusters.
@@ -55,7 +58,11 @@ pub fn encode_runlist(runs: &[Run]) -> Vec<u8> {
     let mut out = Vec::with_capacity(runs.len() * 5 + 1);
     let mut prev_lcn: i64 = 0;
     for run in runs {
-        assert!(run.len > 0 && run.len <= i64::MAX as u64, "run length {} cannot be encoded", run.len);
+        assert!(
+            run.len > 0 && run.len <= i64::MAX as u64,
+            "run length {} cannot be encoded",
+            run.len
+        );
         let len_bytes = signed_len(run.len as i64);
         match run.lcn {
             None => {
@@ -108,7 +115,10 @@ mod tests {
             [0x31, 0x01, 0x47, 0x81, 0x00, 0x02, 0xFF, 0x00, 0x21, 0x01, 0x00, 0x01, 0x00]
         );
         // 128 clusters need a second length byte: "22 80 00 68 40"
-        assert_eq!(encode_runlist(&[Run::at(0x4068, 128)]), [0x22, 0x80, 0x00, 0x68, 0x40, 0x00]);
+        assert_eq!(
+            encode_runlist(&[Run::at(0x4068, 128)]),
+            [0x22, 0x80, 0x00, 0x68, 0x40, 0x00]
+        );
         // Windows: "32 80 00 20 BF 00" (LCN 0xBF20 needs a third, zero byte)
         assert_eq!(
             encode_runlist(&[Run::at(0xBF20, 128)]),
@@ -116,11 +126,17 @@ mod tests {
         );
         // a hole of 15 clusters: "01 0F"; `$BadClus:$Bad`: "03 7F 77 02"
         assert_eq!(encode_runlist(&[Run::hole(15)]), [0x01, 0x0F, 0x00]);
-        assert_eq!(encode_runlist(&[Run::hole(0x02_777F)]), [0x03, 0x7F, 0x77, 0x02, 0x00]);
+        assert_eq!(
+            encode_runlist(&[Run::hole(0x02_777F)]),
+            [0x03, 0x7F, 0x77, 0x02, 0x00]
+        );
         // a negative delta: "31 09 DF 3C FF" = -49 953 from the previous run
         let first = 100_000;
         let bytes = encode_runlist(&[Run::at(first, 1), Run::at(first - 49_953, 9)]);
-        assert_eq!(&bytes[bytes.len() - 6..], &[0x31, 0x09, 0xDF, 0x3C, 0xFF, 0x00]);
+        assert_eq!(
+            &bytes[bytes.len() - 6..],
+            &[0x31, 0x09, 0xDF, 0x3C, 0xFF, 0x00]
+        );
     }
 
     #[test]
@@ -128,8 +144,14 @@ mod tests {
         assert_eq!(encode_runlist(&[]), [0x00]);
         // the delta after a hole is relative to the last real run, not to 0
         let bytes = encode_runlist(&[Run::at(1000, 4), Run::hole(8), Run::at(1010, 4)]);
-        assert_eq!(bytes, [0x21, 0x04, 0xE8, 0x03, 0x01, 0x08, 0x11, 0x04, 0x0A, 0x00]);
-        assert_eq!(total_clusters(&[Run::at(1000, 4), Run::hole(8), Run::at(1010, 4)]), 16);
+        assert_eq!(
+            bytes,
+            [0x21, 0x04, 0xE8, 0x03, 0x01, 0x08, 0x11, 0x04, 0x0A, 0x00]
+        );
+        assert_eq!(
+            total_clusters(&[Run::at(1000, 4), Run::hole(8), Run::at(1010, 4)]),
+            16
+        );
     }
 
     #[test]

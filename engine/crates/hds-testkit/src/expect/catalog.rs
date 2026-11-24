@@ -14,7 +14,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::facts::ArtifactState;
 use crate::image::Image;
 use crate::manifest::{
-    CatalogInstance, Entry, EntryKind, ExpectedGeometry, InstanceKind, InstanceRole, Manifest, RecordClass,
+    CatalogInstance, Entry, EntryKind, ExpectedGeometry, InstanceKind, InstanceRole, Manifest,
+    RecordClass,
 };
 use crate::time;
 
@@ -92,10 +93,20 @@ impl Inputs<'_> {
     }
 }
 
-fn union_of(inputs: &Inputs, records: Vec<usize>, segments: BTreeSet<(usize, usize)>, stray: bool) -> Union {
+fn union_of(
+    inputs: &Inputs,
+    records: Vec<usize>,
+    segments: BTreeSet<(usize, usize)>,
+    stray: bool,
+) -> Union {
     let m = inputs.m;
-    let current_origins: BTreeSet<(u64, i64)> = inputs.current.iter().flat_map(|c| c.origins()).collect();
-    let mut u = Union { segments, stray, ..Union::default() };
+    let current_origins: BTreeSet<(u64, i64)> =
+        inputs.current.iter().flat_map(|c| c.origins()).collect();
+    let mut u = Union {
+        segments,
+        stray,
+        ..Union::default()
+    };
     for &i in &records {
         let r = &m.records[i];
         if let Some(n) = inputs.number(i) {
@@ -118,7 +129,12 @@ fn union_of(inputs: &Inputs, records: Vec<usize>, segments: BTreeSet<(usize, usi
 
 /// D4 (c): `holder` has a record 0 named `$MFT` whose runs place at least
 /// 16 records of `other` where they were found, with one volume offset.
-fn mft_map_count(inputs: &Inputs, holder: &[usize], other: &[usize], cluster_size: u64) -> (u32, Option<u64>) {
+fn mft_map_count(
+    inputs: &Inputs,
+    holder: &[usize],
+    other: &[usize],
+    cluster_size: u64,
+) -> (u32, Option<u64>) {
     let m = inputs.m;
     let Some(&zero) = holder.iter().find(|&&i| {
         inputs.number(i) == Some(0) && m.records[i].names.iter().any(|n| n.name == "$MFT")
@@ -196,7 +212,9 @@ fn forbidden(inputs: &Inputs, a: &Union, b: &Union) -> bool {
         // slots the format destroyed, unless an MFT map ties them together
         if let (Some(lowest), Some(&least)) = (x.at_current_origin, y.numbers.iter().next()) {
             if least < lowest {
-                let cs = inputs.m.instances[*x.physical.iter().next().expect("not empty") as usize].geometry.cluster_size;
+                let cs = inputs.m.instances[*x.physical.iter().next().expect("not empty") as usize]
+                    .geometry
+                    .cluster_size;
                 let (forward, _) = mft_map_count(inputs, &y.records, &x.records, cs as u64);
                 let (backward, _) = mft_map_count(inputs, &x.records, &y.records, cs as u64);
                 if forward < 16 && backward < 16 {
@@ -211,8 +229,8 @@ fn forbidden(inputs: &Inputs, a: &Union, b: &Union) -> bool {
 /// The extensions on which `hds_carve::matches_extension` has an opinion,
 /// as far as the scenarios of this crate use them.
 const OPINION: [&str; 18] = [
-    "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "pdf", "zip", "docx", "xlsx", "pptx", "mp4", "mov",
-    "wav", "avi", "mkv", "mp3",
+    "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "pdf", "zip", "docx", "xlsx", "pptx", "mp4",
+    "mov", "wav", "avi", "mkv", "mp3",
 ];
 
 fn extension(name: &str) -> Option<String> {
@@ -250,26 +268,42 @@ fn entries_in(inputs: &Inputs, u: &Union) -> Vec<u32> {
 /// Every record of an entry is intact and none has a torn block.
 pub(crate) fn group_sound(inputs: &Inputs, e: &Entry) -> bool {
     e.truth.record_intact
-        && inputs.entry_records[e.id as usize]
-            .iter()
-            .all(|&i| inputs.m.records[i].torn_blocks.is_empty() && inputs.m.records[i].state == ArtifactState::Intact)
+        && inputs.entry_records[e.id as usize].iter().all(|&i| {
+            inputs.m.records[i].torn_blocks.is_empty()
+                && inputs.m.records[i].state == ArtifactState::Intact
+        })
 }
 
-fn evidence(inputs: &Inputs, u: &Union, cluster_size: u32, volume_offset: u64, live: &[(u64, u64)]) -> Evidence {
+fn evidence(
+    inputs: &Inputs,
+    u: &Union,
+    cluster_size: u32,
+    volume_offset: u64,
+    live: &[(u64, u64)],
+) -> Evidence {
     let m = inputs.m;
     let range = m.scan_range;
     let cs = cluster_size as u64;
-    let mut ev = Evidence { cluster_size, volume_offset, ..Evidence::default() };
+    let mut ev = Evidence {
+        cluster_size,
+        volume_offset,
+        ..Evidence::default()
+    };
     let in_union: BTreeSet<usize> = u.records.iter().copied().collect();
     let entries = entries_in(inputs, u);
     // F2 index votes, per distinct directory
     for &e in &entries {
         let entry = &m.entries[e as usize];
         let base = inputs.base_record[e as usize].expect("in the union");
-        if entry.kind != EntryKind::Dir || !entry.truth.record_intact || inputs.analysis.marked(base) == Some(true) {
+        if entry.kind != EntryKind::Dir
+            || !entry.truth.record_intact
+            || inputs.analysis.marked(base) == Some(true)
+        {
             continue;
         }
-        let Some(number) = inputs.number(base) else { continue };
+        let Some(number) = inputs.number(base) else {
+            continue;
+        };
         let votes = m.index_blocks.iter().any(|b| {
             b.state == ArtifactState::Intact
                 && !b.stale_copy
@@ -298,7 +332,9 @@ fn evidence(inputs: &Inputs, u: &Union, cluster_size: u32, volume_offset: u64, l
             && entry.data_flags & 0x80FF == 0
             && entry.data_flags & 0x4000 == 0
             && !entry.streams.iter().any(|s| s == "WofCompressedData")
-            && entry.reparse_tag.is_none_or(|t| t & 0xFFFF_0FFF != 0x9000_001A && t != 0x8000_0013 && t != 0x8000_0017)
+            && entry.reparse_tag.is_none_or(|t| {
+                t & 0xFFFF_0FFF != 0x9000_001A && t != 0x8000_0013 && t != 0x8000_0017
+            })
             && extension(entry.name()).is_some_and(|x| OPINION.contains(&x.as_str()))
             && group_sound(inputs, entry);
         if !checkable {
@@ -310,14 +346,20 @@ fn evidence(inputs: &Inputs, u: &Union, cluster_size: u32, volume_offset: u64, l
         }
         ev.checkable += 1;
         let ext = extension(entry.name()).expect("checked");
-        let head = inputs.image.read_vec(first, 1024.min((inputs.image.len() - first) as usize));
+        let head = inputs
+            .image
+            .read_vec(first, 1024.min((inputs.image.len() - first) as usize));
         ev.matches += u32::from(signature_matches(&head, &ext));
     }
     // F2 boot sectors that agree with the geometry
     ev.boot_agrees = !agreeing_boot_totals(m, cluster_size, volume_offset).is_empty();
     // F6
     let structural = ev.voting_directories >= 3 || ev.mft_map >= 16;
-    let fraction = if ev.checkable == 0 { 0.0 } else { ev.matches as f64 / ev.checkable as f64 };
+    let fraction = if ev.checkable == 0 {
+        0.0
+    } else {
+        ev.matches as f64 / ev.checkable as f64
+    };
     let near = |x: f64, t: f64| (x - t).abs() < 0.05;
     ev.validated = if ev.checkable >= 20 {
         if ev.checkable > 200 && (near(fraction, 0.8) || near(fraction, 0.5)) {
@@ -349,7 +391,12 @@ fn agreeing_boot_totals(m: &Manifest, cluster_size: u32, volume_offset: u64) -> 
 }
 
 /// F5 for one reading of "the in-use files of the instance".
-fn total_clusters(m: &Manifest, ends: &mut [u64], cluster_size: u32, volume_offset: u64) -> Option<u64> {
+fn total_clusters(
+    m: &Manifest,
+    ends: &mut [u64],
+    cluster_size: u32,
+    volume_offset: u64,
+) -> Option<u64> {
     ends.sort_unstable_by(|a, b| b.cmp(a));
     let end_by_files = if ends.len() >= 4 { ends[3] } else { 0 };
     let candidates: Vec<u64> = agreeing_boot_totals(m, cluster_size, volume_offset)
@@ -375,11 +422,19 @@ fn volume_size(inputs: &Inputs, u: &Union, cluster_size: u32, volume_offset: u64
         if entry.deleted || !group_sound(inputs, entry) {
             continue;
         }
-        if entry.expect.flags_set.contains(&crate::manifest::Flag::MissingFragments) {
+        if entry
+            .expect
+            .flags_set
+            .contains(&crate::manifest::Flag::MissingFragments)
+        {
             continue;
         }
         let end = match entry.kind {
-            EntryKind::File => entry.extents.iter().filter_map(|x| x.lcn.map(|l| l + x.clusters)).max(),
+            EntryKind::File => entry
+                .extents
+                .iter()
+                .filter_map(|x| x.lcn.map(|l| l + x.clusters))
+                .max(),
             EntryKind::Dir => inputs.entry_records[e as usize]
                 .iter()
                 .flat_map(|&i| m.records[i].index_allocation.iter())
@@ -412,11 +467,21 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
             per_segment.entry(frag.segment(n)).or_default().push(i);
         }
         for (s, records) in per_segment {
-            unions.push(union_of(inputs, records, [(f, s)].into_iter().collect(), false));
+            unions.push(union_of(
+                inputs,
+                records,
+                [(f, s)].into_iter().collect(),
+                false,
+            ));
         }
     }
     if !analysis.unplaced.is_empty() {
-        unions.push(union_of(inputs, analysis.unplaced.clone(), BTreeSet::new(), true));
+        unions.push(union_of(
+            inputs,
+            analysis.unplaced.clone(),
+            BTreeSet::new(),
+            true,
+        ));
     }
 
     // ---- joining (D4) between pieces of one file system
@@ -444,7 +509,12 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
     let live: Vec<(u64, u64)> = inputs
         .current
         .iter()
-        .flat_map(|c| m.instances[c.instance as usize].live_allocated.iter().copied())
+        .flat_map(|c| {
+            m.instances[c.instance as usize]
+                .live_allocated
+                .iter()
+                .copied()
+        })
         .collect();
     let live = crate::disk::merge_ranges(live);
 
@@ -452,7 +522,11 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
     let truth_geometry = |u: &Union| -> Option<(u32, u64)> {
         let mut g = u.physical.iter().map(|&p| {
             let i = &m.instances[p as usize];
-            (i.geometry.cluster_size, i.geometry.volume_offset, i.role == InstanceRole::Embedded)
+            (
+                i.geometry.cluster_size,
+                i.geometry.volume_offset,
+                i.role == InstanceRole::Embedded,
+            )
         });
         let first = g.next()?;
         if g.any(|x| x != first) {
@@ -481,7 +555,8 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
         .collect();
 
     // ---- anchors (D8)
-    let current_origins: Vec<(u64, i64)> = inputs.current.iter().flat_map(|c| c.origins()).collect();
+    let current_origins: Vec<(u64, i64)> =
+        inputs.current.iter().flat_map(|c| c.origins()).collect();
     let mut anchor_of: Vec<bool> = vec![false; unions.len()];
     for (f, frag) in analysis.fragments.iter().enumerate() {
         if current_origins.contains(&(frag.record_size, frag.origin)) {
@@ -493,17 +568,24 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
 
     // ---- embedded (D7)
     let mut stale_containers: BTreeSet<u32> = BTreeSet::new();
-    let union_of_record = |unions: &[Union], record: usize| unions.iter().position(|u| u.records.contains(&record));
+    let union_of_record =
+        |unions: &[Union], record: usize| unions.iter().position(|u| u.records.contains(&record));
     let mut embedded: Vec<Option<u32>> = vec![None; unions.len()];
     let mut undecided: Vec<String> = Vec::new();
     for (x, u) in unions.iter().enumerate() {
-        let all_embedded = u.physical.iter().all(|&p| m.instances[p as usize].role == InstanceRole::Embedded);
+        let all_embedded = u
+            .physical
+            .iter()
+            .all(|&p| m.instances[p as usize].role == InstanceRole::Embedded);
         if !all_embedded || u.stray || anchor_of[x] {
             continue;
         }
         let inst = &m.instances[*u.physical.iter().next().expect("not empty") as usize];
-        let Some(host_entry) = inst.embedded_in else { continue };
-        let Some(host_union) = inputs.base_record[host_entry as usize].and_then(|b| union_of_record(&unions, b))
+        let Some(host_entry) = inst.embedded_in else {
+            continue;
+        };
+        let Some(host_union) =
+            inputs.base_record[host_entry as usize].and_then(|b| union_of_record(&unions, b))
         else {
             continue;
         };
@@ -528,13 +610,18 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
         for &i in &u.records {
             let at = m.records[i].offset;
             if let Some(&e) = files.iter().find(|&&e| {
-                m.entries[e as usize].extents.iter().any(|x| x.offset.is_some_and(|o| at >= o && at < o + x.bytes))
+                m.entries[e as usize]
+                    .extents
+                    .iter()
+                    .any(|x| x.offset.is_some_and(|o| at >= o && at < o + x.bytes))
             }) {
                 inside += 1;
                 *holders.entry(e).or_default() += 1;
             }
         }
-        let Some((&container, _)) = holders.iter().max_by_key(|(_, &count)| count) else { continue };
+        let Some((&container, _)) = holders.iter().max_by_key(|(_, &count)| count) else {
+            continue;
+        };
         if inside * 10 < u.records.len() * 9 {
             continue;
         }
@@ -583,20 +670,36 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
     }
 
     // ---- main (D8) and kinds (D9)
-    let starts: BTreeSet<u64> =
-        std::iter::once(m.scan_range.0).chain(m.partitions.iter().map(|p| p.offset)).collect();
-    let candidates: Vec<usize> = (0..unions.len()).filter(|&i| !stray[i] && embedded[i].is_none()).collect();
+    let starts: BTreeSet<u64> = std::iter::once(m.scan_range.0)
+        .chain(m.partitions.iter().map(|p| p.offset))
+        .collect();
+    let candidates: Vec<usize> = (0..unions.len())
+        .filter(|&i| !stray[i] && embedded[i].is_none())
+        .collect();
     let newest = |i: usize| unions[i].span.map_or(0, |s| s.1);
-    let anchors: Vec<usize> = candidates.iter().copied().filter(|&i| anchor_of[i]).collect();
+    let anchors: Vec<usize> = candidates
+        .iter()
+        .copied()
+        .filter(|&i| anchor_of[i])
+        .collect();
     let main = if !anchors.is_empty() {
-        anchors.iter().copied().max_by_key(|&i| unions[i].records.len())
+        anchors
+            .iter()
+            .copied()
+            .max_by_key(|&i| unions[i].records.len())
     } else {
         let at_start: Vec<usize> = candidates
             .iter()
             .copied()
-            .filter(|&i| evidences[i].as_ref().is_some_and(|e| starts.contains(&e.volume_offset)))
+            .filter(|&i| {
+                evidences[i]
+                    .as_ref()
+                    .is_some_and(|e| starts.contains(&e.volume_offset))
+            })
             .collect();
-        let unknown = at_start.iter().any(|&i| evidences[i].as_ref().is_some_and(|e| e.validated.is_none()));
+        let unknown = at_start
+            .iter()
+            .any(|&i| evidences[i].as_ref().is_some_and(|e| e.validated.is_none()));
         let validated: Vec<usize> = at_start
             .iter()
             .copied()
@@ -607,7 +710,10 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
         }
         let by_offset = validated.iter().copied().max_by_key(|&i| newest(i));
         if by_offset.is_none() && !unknown {
-            candidates.iter().copied().max_by_key(|&i| (newest(i), unions[i].records.len()))
+            candidates
+                .iter()
+                .copied()
+                .max_by_key(|&i| (newest(i), unions[i].records.len()))
         } else {
             by_offset
         }
@@ -638,16 +744,25 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
                 }
             }
             // (ii) older than main and not validated at another offset
-            let elsewhere = evidences[i].as_ref().map(|e| (e.validated, Some(e.volume_offset) != main_offset));
-            let before_main = matches!((unions[i].span, main_oldest), (Some(s), Some(o)) if s.1 < o);
+            let elsewhere = evidences[i]
+                .as_ref()
+                .map(|e| (e.validated, Some(e.volume_offset) != main_offset));
+            let before_main =
+                matches!((unions[i].span, main_oldest), (Some(s), Some(o)) if s.1 < o);
             if before_main {
                 match elsewhere {
                     Some((Some(true), true)) => {}
-                    Some((None, true)) => undecided.push(format!("older or other ({:?})", unions[i].physical)),
+                    Some((None, true)) => {
+                        undecided.push(format!("older or other ({:?})", unions[i].physical))
+                    }
                     _ => older = true,
                 }
             }
-            kinds[i] = Some(if older { InstanceKind::Older } else { InstanceKind::Other });
+            kinds[i] = Some(if older {
+                InstanceKind::Older
+            } else {
+                InstanceKind::Other
+            });
         }
     }
     // stated kinds settle what the rules leave open here, and must agree
@@ -655,7 +770,13 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
     for (&physical, &kind) in kind_override {
         let Some(i) = (0..unions.len())
             .filter(|&i| unions[i].physical.contains(&physical))
-            .max_by_key(|&i| unions[i].records.iter().filter(|&&r| m.records[r].instance == physical).count())
+            .max_by_key(|&i| {
+                unions[i]
+                    .records
+                    .iter()
+                    .filter(|&&r| m.records[r].instance == physical)
+                    .count()
+            })
         else {
             continue;
         };
@@ -664,7 +785,10 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
             match kinds[i] {
                 Some(found) if found != kind => panic!(
                     "the scenario states kind {kind:?} for {:?}, ALGORITHMS D gives {found:?}",
-                    u.physical.iter().map(|&p| m.instances[p as usize].label.clone()).collect::<Vec<_>>()
+                    u.physical
+                        .iter()
+                        .map(|&p| m.instances[p as usize].label.clone())
+                        .collect::<Vec<_>>()
                 ),
                 _ => kinds[i] = Some(kind),
             }
@@ -672,7 +796,12 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
     }
 
     // ---- the catalog instances: strays merged into one
-    let mut catalog = Catalog { stale_containers, undecided, of_record: vec![None; m.records.len()], ..Catalog::default() };
+    let mut catalog = Catalog {
+        stale_containers,
+        undecided,
+        of_record: vec![None; m.records.len()],
+        ..Catalog::default()
+    };
     let mut order: Vec<usize> = (0..unions.len()).collect();
     // main first, then by kind, then by size
     let rank = |k: Option<InstanceKind>| match k {
@@ -689,7 +818,11 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
     for i in order {
         let u = &unions[i];
         let Some(kind) = kinds[i] else {
-            let labels: Vec<String> = u.physical.iter().map(|&p| m.instances[p as usize].label.clone()).collect();
+            let labels: Vec<String> = u
+                .physical
+                .iter()
+                .map(|&p| m.instances[p as usize].label.clone())
+                .collect();
             catalog.undecided.push(format!("kind of {labels:?}"));
             continue;
         };
@@ -734,7 +867,11 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
             }
         } else {
             let id = catalog.instances.len() as u32;
-            let labels: Vec<String> = u.physical.iter().map(|&p| m.instances[p as usize].label.clone()).collect();
+            let labels: Vec<String> = u
+                .physical
+                .iter()
+                .map(|&p| m.instances[p as usize].label.clone())
+                .collect();
             let own = evidences[i].as_ref();
             let inherit = kind == InstanceKind::Older && own.is_none_or(|e| !e.own());
             let geometry = if inherit {
@@ -755,10 +892,15 @@ pub(crate) fn assemble(inputs: &Inputs, kind_override: &BTreeMap<u32, InstanceKi
             });
             let lost_volume_range = geometry.as_ref().and_then(|g| {
                 let total = g.total_clusters?;
-                Some((g.volume_offset, (g.volume_offset + total * g.cluster_size as u64).min(m.image_size)))
+                Some((
+                    g.volume_offset,
+                    (g.volume_offset + total * g.cluster_size as u64).min(m.image_size),
+                ))
             });
             let protected = match kind {
-                InstanceKind::Main | InstanceKind::Other => geometry.as_ref().and_then(|g| g.validated),
+                InstanceKind::Main | InstanceKind::Other => {
+                    geometry.as_ref().and_then(|g| g.validated)
+                }
                 _ => Some(false),
             };
             catalog.instances.push(CatalogInstance {

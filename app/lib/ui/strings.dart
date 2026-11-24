@@ -66,6 +66,21 @@ abstract final class S {
   static const String unknown = 'unknown';
   static const String none = 'none';
   static const String showAll = 'Show all';
+  static const String copy = 'Copy';
+
+  // --- units (format.dart puts the numbers in) ----------------------------------
+
+  static String bytesCount(String count, int n) => n == 1 ? '1 byte' : '$count bytes';
+
+  /// Binary units with the names Windows uses.
+  static const List<String> sizeUnits = ['KB', 'MB', 'GB', 'TB', 'PB', 'EB'];
+  static String size(String number, String unit) => '$number $unit';
+  static String perSecond(String size) => '$size/s';
+  static String percent(String number) => '$number %';
+  static String seconds(int s) => '$s s';
+  static String minutesSeconds(int m, String s) => '$m min $s s';
+  static String hoursMinutes(int h, String m) => '$h h $m min';
+  static String daysHours(int d, int h) => '$d d $h h';
 
   static String files(String count, int n) => n == 1 ? '$count file' : '$count files';
   static String folders(String count, int n) => n == 1 ? '$count folder' : '$count folders';
@@ -992,4 +1007,6 @@ abstract final class S {
   static const String imageBackToResume = 'Back (to continue later)';
   static const String imageBackToForm = 'Back to the settings';
   static const String imageAnother = 'Make another image';
+  static String imageCopyName(String file) => 'Copy of $file';
+  static const String imageDefaultName = 'Disk';
 }

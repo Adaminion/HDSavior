@@ -49,7 +49,9 @@ pub struct ScenarioInfo {
 
 impl std::fmt::Debug for ScenarioInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ScenarioInfo").field("name", &self.name).finish()
+        f.debug_struct("ScenarioInfo")
+            .field("name", &self.name)
+            .finish()
     }
 }
 
@@ -131,11 +133,18 @@ catalog![
 
 /// Builds the scenario called `name`.
 pub fn build(name: &str, seed: u64) -> Option<Built> {
-    catalog().into_iter().find(|s| s.name == name).map(|s| (s.build)(seed))
+    catalog()
+        .into_iter()
+        .find(|s| s.name == name)
+        .map(|s| (s.build)(seed))
 }
 
 /// Formats a volume, fills it with a tree and writes it.
-pub(crate) fn old_volume(disk: &mut Disk, params: VolumeParams, tree: &TreeSpec) -> (VolumeId, Tree) {
+pub(crate) fn old_volume(
+    disk: &mut Disk,
+    params: VolumeParams,
+    tree: &TreeSpec,
+) -> (VolumeId, Tree) {
     let id = disk.format(params);
     let tree = populate(disk.volume(id), tree);
     disk.render(id);
@@ -147,8 +156,19 @@ pub(crate) fn old_volume(disk: &mut Disk, params: VolumeParams, tree: &TreeSpec)
 /// destroys) are a folder of throw-away files, and record 256 is the folder
 /// `Test`, which is returned. Everything a scenario adds afterwards
 /// survives [`finish_formatted`].
-pub(crate) fn stage(name: &str, seed: u64, description: &str, rules: &[&str]) -> (Disk, VolumeId, crate::volume::NodeId) {
-    stage_with(name, seed, description, rules, VolumeParams::new(0, 64 * MIB).label("old"))
+pub(crate) fn stage(
+    name: &str,
+    seed: u64,
+    description: &str,
+    rules: &[&str],
+) -> (Disk, VolumeId, crate::volume::NodeId) {
+    stage_with(
+        name,
+        seed,
+        description,
+        rules,
+        VolumeParams::new(0, 64 * MIB).label("old"),
+    )
 }
 
 /// [`stage`] with explicit volume parameters.
@@ -189,7 +209,11 @@ pub(crate) fn add_neighbours(v: &mut crate::volume::Volume, parent: crate::volum
     for shelf in 1..=3 {
         let dir = v.mkdir(home, format!("Shelf {shelf}").as_str());
         for i in 0..10u64 {
-            v.add_tagged(dir, format!("neighbour-{shelf}-{i:02}.dat").as_str(), 300 + 10 * i);
+            v.add_tagged(
+                dir,
+                format!("neighbour-{shelf}-{i:02}.dat").as_str(),
+                300 + 10 * i,
+            );
         }
     }
 }

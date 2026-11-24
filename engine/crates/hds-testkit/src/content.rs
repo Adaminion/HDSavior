@@ -89,12 +89,24 @@ pub struct ContentSpec {
 impl ContentSpec {
     /// `len` bytes of tagged pseudo-random content.
     pub fn tagged(seed: u64, len: u64) -> Self {
-        ContentSpec { kind: ContentKind::Tagged, seed, len, zero_ranges: Vec::new(), blob: None }
+        ContentSpec {
+            kind: ContentKind::Tagged,
+            seed,
+            len,
+            zero_ranges: Vec::new(),
+            blob: None,
+        }
     }
 
     /// `len` zero bytes.
     pub fn zeros(len: u64) -> Self {
-        ContentSpec { kind: ContentKind::Zeros, seed: 0, len, zero_ranges: Vec::new(), blob: None }
+        ContentSpec {
+            kind: ContentKind::Zeros,
+            seed: 0,
+            len,
+            zero_ranges: Vec::new(),
+            blob: None,
+        }
     }
 
     /// A valid file of a media kind, at least `min_len` bytes long and as
@@ -106,7 +118,13 @@ impl ContentSpec {
         // returns when asked for `len` bytes"; every generator returns
         // exactly the length it produced before when asked for it again.
         let len = generate_media(kind, seed, min_len).len() as u64;
-        ContentSpec { kind, seed, len, zero_ranges: Vec::new(), blob: None }
+        ContentSpec {
+            kind,
+            seed,
+            len,
+            zero_ranges: Vec::new(),
+            blob: None,
+        }
     }
 
     /// Content given as bytes.
@@ -150,7 +168,12 @@ impl ContentSpec {
                 .clone(),
             kind => generate_media(kind, self.seed, self.len),
         };
-        assert_eq!(data.len() as u64, self.len, "{:?} generator changed its length", self.kind);
+        assert_eq!(
+            data.len() as u64,
+            self.len,
+            "{:?} generator changed its length",
+            self.kind
+        );
         self.apply_zero_ranges(0, &mut data);
         data
     }
@@ -175,7 +198,10 @@ impl ContentSpec {
     /// range is not inside the content.
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) {
         let end = offset.checked_add(buf.len() as u64);
-        assert!(end.is_some_and(|e| e <= self.len), "read outside the content");
+        assert!(
+            end.is_some_and(|e| e <= self.len),
+            "read outside the content"
+        );
         match self.kind {
             ContentKind::Tagged => {
                 fill_tagged(b"hds:", self.seed, offset, buf);
@@ -274,7 +300,13 @@ fn printable(seed: u64, len: usize) -> Vec<u8> {
     const ALPHABET: &[u8] = b"0123456789abcdef";
     let mut rng = Rng::new(seed);
     (0..len)
-        .map(|i| if i % 65 == 64 { b'\n' } else { ALPHABET[rng.below(16) as usize] })
+        .map(|i| {
+            if i % 65 == 64 {
+                b'\n'
+            } else {
+                ALPHABET[rng.below(16) as usize]
+            }
+        })
         .collect()
 }
 
@@ -333,13 +365,11 @@ fn png(seed: u64, min_len: usize) -> Vec<u8> {
     ihdr.extend_from_slice(&[8, 0, 0, 0, 0]); // 8 bit, grey, deflate, adaptive, not interlaced
     png_chunk(&mut out, b"IHDR", &ihdr);
     let mut text = KEYWORD.to_vec();
-    text.extend(printable(derive_n(seed, 1), text_len - KEYWORD.len()).iter().map(|&c| {
-        if c == b'\n' {
-            b' '
-        } else {
-            c
-        }
-    }));
+    text.extend(
+        printable(derive_n(seed, 1), text_len - KEYWORD.len())
+            .iter()
+            .map(|&c| if c == b'\n' { b' ' } else { c }),
+    );
     png_chunk(&mut out, b"tEXt", &text);
     for chunk in zlib.chunks(IDAT) {
         png_chunk(&mut out, b"IDAT", chunk);
@@ -387,7 +417,11 @@ impl BitWriter {
 /// difference itself, and the one-bit end-of-block code.
 fn jpeg_scan(seed: u64, blocks: usize) -> Vec<u8> {
     let mut rng = Rng::new(seed);
-    let mut w = BitWriter { out: Vec::with_capacity(blocks * 2), acc: 0, bits: 0 };
+    let mut w = BitWriter {
+        out: Vec::with_capacity(blocks * 2),
+        acc: 0,
+        bits: 0,
+    };
     let mut previous = 0i32;
     for _ in 0..blocks {
         let value = rng.range(0, 1000) as i32 - 500;
@@ -396,7 +430,11 @@ fn jpeg_scan(seed: u64, blocks: usize) -> Vec<u8> {
         let category = 32 - diff.unsigned_abs().leading_zeros();
         w.put(category, 4);
         if category > 0 {
-            let bits = if diff > 0 { diff } else { diff + (1 << category) - 1 };
+            let bits = if diff > 0 {
+                diff
+            } else {
+                diff + (1 << category) - 1
+            };
             w.put(bits as u32, category);
         }
         w.put(0, 1);
@@ -446,7 +484,11 @@ fn jpeg(seed: u64, min_len: usize) -> Vec<u8> {
     while padding > 0 {
         // a comment segment: marker, length (counts itself), text
         let take = padding.min(4 + 65_533);
-        let take = if padding - take > 0 && padding - take < 4 { take - 4 } else { take };
+        let take = if padding - take > 0 && padding - take < 4 {
+            take - 4
+        } else {
+            take
+        };
         out.extend_from_slice(&[0xFF, 0xFE]);
         out.extend_from_slice(&((take - 2) as u16).to_be_bytes());
         out.extend_from_slice(&printable(comment_seed, take - 4));
@@ -525,7 +567,8 @@ fn pdf(seed: u64, min_len: usize) -> Vec<u8> {
     ];
     let filler_open = |n: usize| format!("5 0 obj\n<< /Length {n:<10} >>\nstream\n");
     let filler_close = "\nendstream\nendobj\n";
-    let before_filler: usize = head.len() + objects.iter().map(String::len).sum::<usize>() + filler_open(0).len();
+    let before_filler: usize =
+        head.len() + objects.iter().map(String::len).sum::<usize>() + filler_open(0).len();
     let xref_len = "xref\n0 6\n".len() + 6 * 20;
     let trailer_fixed = "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n".len() + "\n%%EOF\n".len();
     let fixed = before_filler + filler_close.len() + xref_len + trailer_fixed;
@@ -559,7 +602,9 @@ fn pdf(seed: u64, min_len: usize) -> Vec<u8> {
     for offset in offsets {
         out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
     }
-    out.extend_from_slice(format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n").as_bytes());
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n").as_bytes(),
+    );
     debug_assert_eq!(out.len(), target);
     out
 }
@@ -654,24 +699,45 @@ mod tests {
         assert_eq!(&data[1536..1568], b"hds:0123456789ABCDEF:0000000003\n");
         // the random part is not constant and differs between blocks and seeds
         assert_ne!(&data[32..512], &data[544..1024]);
-        assert_ne!(ContentSpec::tagged(1, 2000).to_vec()[32..512], data[32..512]);
+        assert_ne!(
+            ContentSpec::tagged(1, 2000).to_vec()[32..512],
+            data[32..512]
+        );
         assert!(data[32..512].iter().any(|&b| b != data[32]));
     }
 
     #[test]
     fn random_access_equals_sequential_generation() {
-        let spec = ContentSpec::tagged(77, 5000).with_zero_range(700, 900).with_zero_range(4990, 100);
+        let spec = ContentSpec::tagged(77, 5000)
+            .with_zero_range(700, 900)
+            .with_zero_range(4990, 100);
         let all = spec.to_vec();
         assert!(all[700..1600].iter().all(|&b| b == 0));
         assert!(all[4990..].iter().all(|&b| b == 0));
         assert_ne!(all[699], 0);
-        for (offset, len) in [(0, 5000), (1, 511), (511, 2), (699, 3), (1599, 600), (4096, 904), (4999, 1), (5000, 0)] {
+        for (offset, len) in [
+            (0, 5000),
+            (1, 511),
+            (511, 2),
+            (699, 3),
+            (1599, 600),
+            (4096, 904),
+            (4999, 1),
+            (5000, 0),
+        ] {
             let mut buf = vec![0xAAu8; len];
             spec.read_at(offset, &mut buf);
-            assert_eq!(buf, &all[offset as usize..offset as usize + len], "offset {offset} len {len}");
+            assert_eq!(
+                buf,
+                &all[offset as usize..offset as usize + len],
+                "offset {offset} len {len}"
+            );
         }
         assert_eq!(spec.sha256(), sha256_hex(&all));
-        assert_eq!(ContentSpec::zeros(100_000).sha256(), sha256_hex(&vec![0u8; 100_000]));
+        assert_eq!(
+            ContentSpec::zeros(100_000).sha256(),
+            sha256_hex(&vec![0u8; 100_000])
+        );
     }
 
     #[test]
@@ -689,7 +755,12 @@ mod tests {
     #[test]
     fn media_lengths() {
         // exact above the minimum for PNG, JPEG, PDF and ZIP
-        for kind in [ContentKind::Png, ContentKind::Jpeg, ContentKind::Pdf, ContentKind::Zip] {
+        for kind in [
+            ContentKind::Png,
+            ContentKind::Jpeg,
+            ContentKind::Pdf,
+            ContentKind::Zip,
+        ] {
             for want in [1000u64, 4096, 4097, 65_535, 65_536, 70_001, 300_000] {
                 let spec = ContentSpec::media(kind, 5, want);
                 assert_eq!(spec.len, want, "{kind:?} of {want} bytes");
@@ -703,7 +774,14 @@ mod tests {
         assert!((10_000..10_004).contains(&bmp.len));
         // a request below the smallest possible file gives that file, and
         // asking for the resulting length again gives the same bytes
-        for kind in [ContentKind::Png, ContentKind::Jpeg, ContentKind::Bmp, ContentKind::Pdf, ContentKind::Zip, ContentKind::Wav] {
+        for kind in [
+            ContentKind::Png,
+            ContentKind::Jpeg,
+            ContentKind::Bmp,
+            ContentKind::Pdf,
+            ContentKind::Zip,
+            ContentKind::Wav,
+        ] {
             let tiny = ContentSpec::media(kind, 9, 0);
             assert!(tiny.len > 0 && tiny.len < 1200, "{kind:?}: {}", tiny.len);
             let again = ContentSpec::media(kind, 9, tiny.len);
@@ -719,13 +797,19 @@ mod tests {
     fn media_files_start_with_their_signatures_and_end_properly() {
         let png = ContentSpec::media(ContentKind::Png, 1, 5000).to_vec();
         assert_eq!(&png[..16], b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR");
-        assert_eq!(&png[png.len() - 12..], &[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82]);
+        assert_eq!(
+            &png[png.len() - 12..],
+            &[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82]
+        );
         let jpeg = ContentSpec::media(ContentKind::Jpeg, 1, 5000).to_vec();
         assert_eq!(&jpeg[..11], b"\xFF\xD8\xFF\xE0\x00\x10JFIF\0");
         assert_eq!(&jpeg[jpeg.len() - 2..], &[0xFF, 0xD9]);
         let bmp = ContentSpec::media(ContentKind::Bmp, 1, 5000).to_vec();
         assert_eq!(&bmp[..2], b"BM");
-        assert_eq!(u32::from_le_bytes(bmp[2..6].try_into().unwrap()) as usize, bmp.len());
+        assert_eq!(
+            u32::from_le_bytes(bmp[2..6].try_into().unwrap()) as usize,
+            bmp.len()
+        );
         let pdf = ContentSpec::media(ContentKind::Pdf, 1, 5000).to_vec();
         assert!(pdf.starts_with(b"%PDF-1.4\n"));
         assert!(pdf.ends_with(b"%%EOF\n"));
@@ -735,16 +819,26 @@ mod tests {
         let wav = ContentSpec::media(ContentKind::Wav, 1, 5000).to_vec();
         assert_eq!(&wav[..4], b"RIFF");
         assert_eq!(&wav[8..16], b"WAVEfmt ");
-        assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()) as usize, wav.len() - 8);
+        assert_eq!(
+            u32::from_le_bytes(wav[4..8].try_into().unwrap()) as usize,
+            wav.len() - 8
+        );
     }
 
     #[test]
     fn pdf_cross_reference_offsets_point_at_the_objects() {
         fn find_last(haystack: &[u8], needle: &[u8]) -> usize {
-            haystack.windows(needle.len()).rposition(|w| w == needle).expect("needle present")
+            haystack
+                .windows(needle.len())
+                .rposition(|w| w == needle)
+                .expect("needle present")
         }
         fn number_at(bytes: &[u8], at: usize) -> usize {
-            let digits: Vec<u8> = bytes[at..].iter().copied().take_while(u8::is_ascii_digit).collect();
+            let digits: Vec<u8> = bytes[at..]
+                .iter()
+                .copied()
+                .take_while(u8::is_ascii_digit)
+                .collect();
             String::from_utf8(digits).unwrap().parse().unwrap()
         }
         for want in [0usize, 700, 9_999, 10_000, 100_000, 1_000_000] {
@@ -765,7 +859,10 @@ mod tests {
             let length_at = object5 + "5 0 obj\n<< /Length ".len();
             let length = number_at(&pdf, length_at);
             let stream_at = object5 + "5 0 obj\n<< /Length ".len() + 10 + " >>\nstream\n".len();
-            assert_eq!(&pdf[stream_at + length..stream_at + length + 11], b"\nendstream\n");
+            assert_eq!(
+                &pdf[stream_at + length..stream_at + length + 11],
+                b"\nendstream\n"
+            );
         }
     }
 
@@ -827,7 +924,8 @@ mod tests {
         assert_eq!(back.len, 5);
         assert!(!back.is_available());
         let tagged = ContentSpec::tagged(9, 100).with_zero_range(10, 20);
-        let back: ContentSpec = serde_json::from_str(&serde_json::to_string(&tagged).unwrap()).unwrap();
+        let back: ContentSpec =
+            serde_json::from_str(&serde_json::to_string(&tagged).unwrap()).unwrap();
         assert_eq!(back, tagged);
         assert_eq!(back.to_vec(), tagged.to_vec());
     }

@@ -30,7 +30,9 @@ fn split_files(name: &str, seed: u64, list: ListForm, description: &str) -> Buil
     v.add_file(
         test,
         "first-extent-in-base.bin",
-        FileSpec::tagged(derive(seed, "n"), 18 * cs).fragments(9).multi(MultiSpec::new(list).data(&[(0, 3), (1, 3), (2, 3)])),
+        FileSpec::tagged(derive(seed, "n"), 18 * cs)
+            .fragments(9)
+            .multi(MultiSpec::new(list).data(&[(0, 3), (1, 3), (2, 3)])),
     );
     // extents of very different lengths, so that start VCNs are not multiples of anything
     v.add_file(
@@ -104,7 +106,9 @@ pub fn vcn0_in_extension(seed: u64) -> Built {
     v.add_file(
         test,
         "resident-elsewhere.txt",
-        FileSpec::tagged(derive(seed, "r"), 300).resident().multi(MultiSpec::new(ListForm::Resident).resident_data_in(1)),
+        FileSpec::tagged(derive(seed, "r"), 300)
+            .resident()
+            .multi(MultiSpec::new(ListForm::Resident).resident_data_in(1)),
     );
     finish_formatted(disk, old)
 }
@@ -129,12 +133,17 @@ pub fn name_in_extension(seed: u64) -> Built {
     v.add_file(
         test,
         "named-by-its-child-record.bin",
-        FileSpec::tagged(derive(seed, "f"), 50_000).multi(MultiSpec::new(ListForm::NonResident).names_in(1)),
+        FileSpec::tagged(derive(seed, "f"), 50_000)
+            .multi(MultiSpec::new(ListForm::NonResident).names_in(1)),
     );
     let dir = v.mkdir_with(
         test,
         "Folder named by its child record",
-        DirSpec::new().multi(MultiSpec::new(ListForm::Resident).names_in(1).index_root_in(1)),
+        DirSpec::new().multi(
+            MultiSpec::new(ListForm::Resident)
+                .names_in(1)
+                .index_root_in(1),
+        ),
     );
     for i in 0..3 {
         v.add_tagged(dir, format!("inside-{i}.dat").as_str(), 500 + i);
@@ -153,7 +162,16 @@ pub fn name_in_extension(seed: u64) -> Built {
 pub fn extensions_in_other_fragment(seed: u64) -> Built {
     let mut params = VolumeParams::new(0, 64 * MIB).label("old");
     let far = params.total_clusters() * 3 / 4;
-    params.mft = vec![MftFragment { lcn: None, records: 512 }, MftFragment { lcn: Some(far), records: 512 }];
+    params.mft = vec![
+        MftFragment {
+            lcn: None,
+            records: 512,
+        },
+        MftFragment {
+            lcn: Some(far),
+            records: 512,
+        },
+    ];
     let (mut disk, old, test) = stage_with(
         "extensions_in_other_fragment",
         seed,
@@ -169,7 +187,11 @@ pub fn extensions_in_other_fragment(seed: u64) -> Built {
         FileSpec::tagged(derive(seed, "a"), 16 * cs)
             .fragments(8)
             .record(300)
-            .multi(MultiSpec::new(ListForm::Resident).data(&[(1, 4), (2, 4)]).extension_records(&[600, 601])),
+            .multi(
+                MultiSpec::new(ListForm::Resident)
+                    .data(&[(1, 4), (2, 4)])
+                    .extension_records(&[600, 601]),
+            ),
     );
     let far_dir = v.mkdir_with(test, "In the second fragment", DirSpec::new().record(650));
     v.add_file(
@@ -178,10 +200,18 @@ pub fn extensions_in_other_fragment(seed: u64) -> Built {
         FileSpec::tagged(derive(seed, "b"), 10 * cs)
             .fragments(4)
             .record(700)
-            .multi(MultiSpec::new(ListForm::Resident).data(&[(0, 2), (1, 2)]).extension_records(&[400])),
+            .multi(
+                MultiSpec::new(ListForm::Resident)
+                    .data(&[(0, 2), (1, 2)])
+                    .extension_records(&[400]),
+            ),
     );
     for i in 0..70u64 {
-        v.add_file(far_dir, format!("far-{i:02}.dat").as_str(), FileSpec::tagged(derive(seed, "far") + i, 300).record(520 + i));
+        v.add_file(
+            far_dir,
+            format!("far-{i:02}.dat").as_str(),
+            FileSpec::tagged(derive(seed, "far") + i, 300).record(520 + i),
+        );
     }
     // the first fragment gets a population of its own (records 257 and up)
     for i in 0..80u64 {
@@ -210,7 +240,13 @@ pub fn deleted_file_with_extensions(seed: u64) -> Built {
     let v = disk.volume(old);
     let cs = v.cluster_size();
     let multi = || MultiSpec::new(ListForm::Resident).data(&[(1, 3), (2, 3)]);
-    let first = v.add_file(test, "deleted-split.bin", FileSpec::tagged(derive(seed, "d"), 12 * cs - 9).fragments(6).multi(multi()));
+    let first = v.add_file(
+        test,
+        "deleted-split.bin",
+        FileSpec::tagged(derive(seed, "d"), 12 * cs - 9)
+            .fragments(6)
+            .multi(multi()),
+    );
     // a slot with history: created, deleted, reused, deleted again
     let scratch = v.add_tagged(test, "scratch.tmp", 100);
     let slot = v.reference(scratch).number;
@@ -218,7 +254,10 @@ pub fn deleted_file_with_extensions(seed: u64) -> Built {
     let second = v.add_file(
         test,
         "deleted-twice.bin",
-        FileSpec::tagged(derive(seed, "e"), 12 * cs).fragments(6).record(slot).multi(multi()),
+        FileSpec::tagged(derive(seed, "e"), 12 * cs)
+            .fragments(6)
+            .record(slot)
+            .multi(multi()),
     );
     assert_eq!(v.reference(second).seq, 2);
     v.add_tagged(test, "alive.dat", 5000);
@@ -245,8 +284,16 @@ pub fn free_extension_leftover(seed: u64) -> Built {
     );
     let v = disk.volume(old);
     let cs = v.cluster_size();
-    let file = v.add_file(test, "current.bin", FileSpec::tagged(derive(seed, "c"), 8 * cs - 300));
-    let other = v.add_file(test, "somebody-else.bin", FileSpec::tagged(derive(seed, "o"), 20 * cs));
+    let file = v.add_file(
+        test,
+        "current.bin",
+        FileSpec::tagged(derive(seed, "c"), 8 * cs - 300),
+    );
+    let other = v.add_file(
+        test,
+        "somebody-else.bin",
+        FileSpec::tagged(derive(seed, "o"), 20 * cs),
+    );
     let stale_runs = v.runs(other);
     let base = v.reference(file);
     let mut leftover = RecordModel::new(400, 2, 1024);
@@ -265,7 +312,9 @@ pub fn free_extension_leftover(seed: u64) -> Built {
         namespace: 1,
         name: utf16("old name of current.bin"),
     });
-    leftover.attrs.push(AttrModel::resident(attr_type::FILE_NAME, name));
+    leftover
+        .attrs
+        .push(AttrModel::resident(attr_type::FILE_NAME, name));
     leftover.attrs.push(
         AttrModel::non_resident(
             attr_type::DATA,
@@ -310,7 +359,10 @@ pub fn lost_base_with_extensions(seed: u64) -> Built {
     let (mut disk, old, test) = {
         // leave records 200..=210 free for the bases
         let mut disk = crate::disk::Disk::new("lost_base_with_extensions", seed, 64 * MIB);
-        disk.describe("Multi-record files whose base record was destroyed while extension records survive.", &["E7", "E2"]);
+        disk.describe(
+            "Multi-record files whose base record was destroyed while extension records survive.",
+            &["E7", "E2"],
+        );
         let old = disk.format(VolumeParams::new(0, 64 * MIB).label("old"));
         let v = disk.volume(old);
         let root = v.root();
@@ -329,7 +381,12 @@ pub fn lost_base_with_extensions(seed: u64) -> Built {
         FileSpec::tagged(derive(seed, "a"), 12 * cs - 50)
             .fragments(6)
             .record(200)
-            .multi(MultiSpec::new(ListForm::Resident).data(&[(1, 3), (2, 3)]).names_in(1).extension_records(&[300, 301])),
+            .multi(
+                MultiSpec::new(ListForm::Resident)
+                    .data(&[(1, 3), (2, 3)])
+                    .names_in(1)
+                    .extension_records(&[300, 301]),
+            ),
     );
     v.add_file(
         test,
@@ -337,7 +394,11 @@ pub fn lost_base_with_extensions(seed: u64) -> Built {
         FileSpec::tagged(derive(seed, "b"), 8 * cs)
             .fragments(4)
             .record(201)
-            .multi(MultiSpec::new(ListForm::Resident).data(&[(1, 2), (2, 2)]).extension_records(&[302, 303])),
+            .multi(
+                MultiSpec::new(ListForm::Resident)
+                    .data(&[(1, 2), (2, 2)])
+                    .extension_records(&[302, 303]),
+            ),
     );
     v.add_file(
         test,
@@ -345,14 +406,22 @@ pub fn lost_base_with_extensions(seed: u64) -> Built {
         FileSpec::tagged(derive(seed, "c"), 12 * cs - 1000)
             .fragments(6)
             .record(202)
-            .multi(MultiSpec::new(ListForm::Resident).data(&[(0, 2), (1, 2), (2, 2)]).extension_records(&[304, 305])),
+            .multi(
+                MultiSpec::new(ListForm::Resident)
+                    .data(&[(0, 2), (1, 2), (2, 2)])
+                    .extension_records(&[304, 305]),
+            ),
     );
     v.add_file(
         test,
         "only-a-name.bin",
         FileSpec::tagged(derive(seed, "d"), 4 * cs)
             .record(203)
-            .multi(MultiSpec::new(ListForm::Resident).names_in(1).extension_records(&[306])),
+            .multi(
+                MultiSpec::new(ListForm::Resident)
+                    .names_in(1)
+                    .extension_records(&[306]),
+            ),
     );
     // an extension record of a base below 24
     let mut low = RecordModel::new(310, 1, 1024);
@@ -381,7 +450,12 @@ pub fn lost_base_with_extensions(seed: u64) -> Built {
     let m = &mut built.manifest;
     let orphan = |m: &mut crate::manifest::Manifest, path: &str, shown_at: &[&str]| {
         let id = m.instance("old").id;
-        let at: Vec<u64> = m.entry("old", path).extension_records.iter().map(|&(_, o)| o).collect();
+        let at: Vec<u64> = m
+            .entry("old", path)
+            .extension_records
+            .iter()
+            .map(|&(_, o)| o)
+            .collect();
         let instance = m
             .records
             .iter()
@@ -394,7 +468,10 @@ pub fn lost_base_with_extensions(seed: u64) -> Built {
         e.expect.instance = Some(instance);
         e.expect.path = Some(shown_at.iter().map(|s| s.to_string()).collect());
         for (flag, on) in [
-            (Flag::OlderGeneration, kind == crate::manifest::InstanceKind::Older),
+            (
+                Flag::OlderGeneration,
+                kind == crate::manifest::InstanceKind::Older,
+            ),
             (Flag::Embedded, false),
             (Flag::Stray, kind == crate::manifest::InstanceKind::Strays),
         ] {
@@ -418,8 +495,11 @@ pub fn lost_base_with_extensions(seed: u64) -> Built {
     e.expect.set(Flag::MissingFragments);
     e.expect.set(Flag::SizeEstimated);
     e.expect.clear(Flag::Deleted);
-    m.notes.push("Expected size of Test/headless.bin: (highest mapped VCN + 1) x 4096 = 49152 bytes.".into());
-    m.notes.push("Record 310 is an extension of base record 20 and must be dropped (E7).".into());
+    m.notes.push(
+        "Expected size of Test/headless.bin: (highest mapped VCN + 1) x 4096 = 49152 bytes.".into(),
+    );
+    m.notes
+        .push("Record 310 is an extension of base record 20 and must be dropped (E7).".into());
     built
 }
 
@@ -439,7 +519,10 @@ pub fn lost_base_with_extensions(seed: u64) -> Built {
 pub fn lost_extension_records(seed: u64) -> Built {
     let (mut disk, old, test) = {
         let mut disk = crate::disk::Disk::new("lost_extension_records", seed, 64 * MIB);
-        disk.describe("Multi-record files that lost some of their extension records.", &["E2", "H7", "G3"]);
+        disk.describe(
+            "Multi-record files that lost some of their extension records.",
+            &["E2", "H7", "G3"],
+        );
         let old = disk.format(VolumeParams::new(0, 64 * MIB).label("old"));
         let v = disk.volume(old);
         let root = v.root();
@@ -456,12 +539,32 @@ pub fn lost_extension_records(seed: u64) -> Built {
         FileSpec::tagged(derive(seed, name), 12 * cs - 11)
             .fragments(6)
             .record(record)
-            .multi(MultiSpec::new(ListForm::Resident).data(pieces).extension_records(extensions))
+            .multi(
+                MultiSpec::new(ListForm::Resident)
+                    .data(pieces)
+                    .extension_records(extensions),
+            )
     };
-    v.add_file(test, "hole-in-the-middle.bin", file("hole", 257, &[(1, 2), (2, 2), (3, 2)], &[400, 210, 401]));
-    v.add_file(test, "no-beginning.bin", file("head", 258, &[(1, 2), (2, 2), (3, 2)], &[211, 402, 403]));
-    v.add_file(test, "nothing-left.bin", file("none", 259, &[(1, 6)], &[212]));
-    v.add_file(test, "complete.bin", file("ok", 260, &[(1, 2), (2, 2), (3, 2)], &[404, 405, 406]));
+    v.add_file(
+        test,
+        "hole-in-the-middle.bin",
+        file("hole", 257, &[(1, 2), (2, 2), (3, 2)], &[400, 210, 401]),
+    );
+    v.add_file(
+        test,
+        "no-beginning.bin",
+        file("head", 258, &[(1, 2), (2, 2), (3, 2)], &[211, 402, 403]),
+    );
+    v.add_file(
+        test,
+        "nothing-left.bin",
+        file("none", 259, &[(1, 6)], &[212]),
+    );
+    v.add_file(
+        test,
+        "complete.bin",
+        file("ok", 260, &[(1, 2), (2, 2), (3, 2)], &[404, 405, 406]),
+    );
     finish_formatted(disk, old)
 }
 
@@ -484,14 +587,21 @@ pub fn index_allocation_split(seed: u64) -> Built {
         &["F2", "E2", "A4"],
     );
     let v = disk.volume(old);
-    let mut spec = DirSpec::new().multi(MultiSpec::new(ListForm::Resident).index_allocation(&[(0, 4), (1, 4), (2, 0)]));
+    let mut spec = DirSpec::new().multi(MultiSpec::new(ListForm::Resident).index_allocation(&[
+        (0, 4),
+        (1, 4),
+        (2, 0),
+    ]));
     spec.fragment_index = true;
     let big = v.mkdir_with(test, "Big folder", spec);
     for i in 0..400 {
         v.add_tagged(big, format!("entry {i:04}.dat").as_str(), 100 + i);
     }
     let mut spec = DirSpec::new().multi(
-        MultiSpec::new(ListForm::NonResident).index_allocation(&[(1, 3), (2, 0)]).names_in(2).index_root_in(1),
+        MultiSpec::new(ListForm::NonResident)
+            .index_allocation(&[(1, 3), (2, 0)])
+            .names_in(2)
+            .index_root_in(1),
     );
     spec.fragment_index = true;
     let scattered = v.mkdir_with(test, "Scattered folder", spec);
@@ -540,10 +650,25 @@ pub fn runlist_oddities(seed: u64) -> Built {
     let mft = v.mft_extents()[0];
     let base = mft.lcn + mft.clusters + 1000;
     let runs: Vec<Run> = (0..5).map(|i| Run::at(base - 100 * i, 3)).collect();
-    v.add_file(test, "descending.bin", FileSpec::tagged(derive(seed, "d"), 15 * cs - 1).runs(runs));
-    v.add_file(test, "run-of-128.bin", FileSpec::tagged(derive(seed, "r"), 128 * cs).non_resident());
-    v.add_file(test, "empty-nonresident.bin", FileSpec::tagged(0, 0).non_resident());
+    v.add_file(
+        test,
+        "descending.bin",
+        FileSpec::tagged(derive(seed, "d"), 15 * cs - 1).runs(runs),
+    );
+    v.add_file(
+        test,
+        "run-of-128.bin",
+        FileSpec::tagged(derive(seed, "r"), 128 * cs).non_resident(),
+    );
+    v.add_file(
+        test,
+        "empty-nonresident.bin",
+        FileSpec::tagged(0, 0).non_resident(),
+    );
     let mut built = finish_formatted(disk, old);
-    built.manifest.notes.push("highest-vcn-zero.bin: 9 clusters mapped, header says highest VCN 0.".into());
+    built
+        .manifest
+        .notes
+        .push("highest-vcn-zero.bin: 9 clusters mapped, header says highest VCN 0.".into());
     built
 }

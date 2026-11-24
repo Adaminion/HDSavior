@@ -22,10 +22,19 @@ use super::{finish_formatted, stage, MIB};
 /// * `Readme.txt`, `README.TXT`, `readme.txt` side by side (POSIX names
 ///   that differ only in case; they collide on a Windows destination).
 pub fn namespaces(seed: u64) -> Built {
-    let (mut disk, old, test) = stage("namespaces", seed, "Files in every namespace and combination of namespaces.", &["E4", "A4", "H4"]);
+    let (mut disk, old, test) = stage(
+        "namespaces",
+        seed,
+        "Files in every namespace and combination of namespaces.",
+        &["E4", "A4", "H4"],
+    );
     let v = disk.volume(old);
     let mut add = |name: &str, names: Vec<NameSpec>| {
-        v.add_file(test, name, FileSpec::tagged(derive(seed, name), 3000).names(names));
+        v.add_file(
+            test,
+            name,
+            FileSpec::tagged(derive(seed, name), 3000).names(names),
+        );
     };
     add("posix-only.dat", vec![NameSpec::new("posix-only.dat", 0)]);
     add("win32-only.dat", vec![NameSpec::new("win32-only.dat", 1)]);
@@ -33,12 +42,24 @@ pub fn namespaces(seed: u64) -> Built {
     add("BOTH.DAT", vec![NameSpec::new("BOTH.DAT", 3)]);
     add(
         "long name with alias.dat",
-        vec![NameSpec::new("LONGNA~1.DAT", 2), NameSpec::new("long name with alias.dat", 1)],
+        vec![
+            NameSpec::new("LONGNA~1.DAT", 2),
+            NameSpec::new("long name with alias.dat", 1),
+        ],
     );
-    add("win32 first.dat", vec![NameSpec::new("win32 first.dat", 1), NameSpec::new("WIN32F~1.DAT", 2)]);
+    add(
+        "win32 first.dat",
+        vec![
+            NameSpec::new("win32 first.dat", 1),
+            NameSpec::new("WIN32F~1.DAT", 2),
+        ],
+    );
     add(
         "win32 name of a posix file.dat",
-        vec![NameSpec::new("posix name of the same file.dat", 0), NameSpec::new("win32 name of a posix file.dat", 1)],
+        vec![
+            NameSpec::new("posix name of the same file.dat", 0),
+            NameSpec::new("win32 name of a posix file.dat", 1),
+        ],
     );
     for name in ["Readme.txt", "README.TXT", "readme.txt"] {
         add(name, vec![NameSpec::new(name, 0)]);
@@ -47,7 +68,10 @@ pub fn namespaces(seed: u64) -> Built {
     let dir = v.mkdir_with(
         test,
         "Folder with alias",
-        DirSpec::new().names(vec![NameSpec::new("FOLDER~1", 2), NameSpec::new("Folder with alias", 1)]),
+        DirSpec::new().names(vec![
+            NameSpec::new("FOLDER~1", 2),
+            NameSpec::new("Folder with alias", 1),
+        ]),
     );
     v.add_tagged(dir, "child.dat", 1000);
     finish_formatted(disk, old)
@@ -75,7 +99,10 @@ pub fn namespaces(seed: u64) -> Built {
 ///   decides and the file belongs into B.
 pub fn hard_links(seed: u64) -> Built {
     let mut disk = crate::disk::Disk::new("hard_links", seed, 64 * MIB);
-    disk.describe("Files with several names in different folders.", &["E4", "E10"]);
+    disk.describe(
+        "Files with several names in different folders.",
+        &["E4", "E10"],
+    );
     let old = disk.format(crate::volume::params::VolumeParams::new(0, 64 * MIB).label("old"));
     let v = disk.volume(old);
     let root = v.root();
@@ -91,25 +118,43 @@ pub fn hard_links(seed: u64) -> Built {
     assert_eq!(v.reference(test).number, 256);
     let a = v.mkdir(test, "A");
     let b = v.mkdir(test, "B");
-    let two = v.add_file(a, "two-homes.dat", FileSpec::tagged(derive(seed, "two"), 5000).names(vec![NameSpec::new("two-homes.dat", 1)]));
+    let two = v.add_file(
+        a,
+        "two-homes.dat",
+        FileSpec::tagged(derive(seed, "two"), 5000).names(vec![NameSpec::new("two-homes.dat", 1)]),
+    );
     v.hard_link(two, b, "second name of two-homes.dat", 1);
     let second = v.add_file(
         gone,
         "name-in-destroyed-folder.dat",
-        FileSpec::tagged(derive(seed, "second"), 6000).names(vec![NameSpec::new("name-in-destroyed-folder.dat", 1)]),
+        FileSpec::tagged(derive(seed, "second"), 6000)
+            .names(vec![NameSpec::new("name-in-destroyed-folder.dat", 1)]),
     );
     v.hard_link(second, b, "second-home-survives.dat", 1);
-    let three = v.add_file(a, "three-links.dat", FileSpec::tagged(derive(seed, "three"), 7000).names(vec![NameSpec::new("three-links.dat", 1)]));
+    let three = v.add_file(
+        a,
+        "three-links.dat",
+        FileSpec::tagged(derive(seed, "three"), 7000)
+            .names(vec![NameSpec::new("three-links.dat", 1)]),
+    );
     v.hard_link(three, a, "three-links (2).dat", 1);
     v.hard_link(three, b, "three-links in B.dat", 1);
-    let rooted = v.add_file(root, "root-and-folder.dat", FileSpec::tagged(derive(seed, "root"), 8000).names(vec![NameSpec::new("root-and-folder.dat", 1)]));
+    let rooted = v.add_file(
+        root,
+        "root-and-folder.dat",
+        FileSpec::tagged(derive(seed, "root"), 8000)
+            .names(vec![NameSpec::new("root-and-folder.dat", 1)]),
+    );
     v.hard_link(rooted, a, "also in A.dat", 1);
     let ordered = v.add_file(
         a,
         "stored first, created last.dat",
         FileSpec::tagged(derive(seed, "ids"), 4000)
             .names(vec![NameSpec::new("stored first, created last.dat", 1)])
-            .quirks(Quirks { reverse_name_ids: true, ..Quirks::default() }),
+            .quirks(Quirks {
+                reverse_name_ids: true,
+                ..Quirks::default()
+            }),
     );
     v.hard_link(ordered, b, "stored last, created first.dat", 1);
     finish_formatted(disk, old)
@@ -137,7 +182,12 @@ pub fn hard_links(seed: u64) -> Built {
 /// * a folder called `PRN` with a file in it, and a folder whose name ends
 ///   in a dot.
 pub fn odd_names(seed: u64) -> Built {
-    let (mut disk, old, test) = stage("odd_names", seed, "Names with lone surrogates, 255 units, illegal characters and reserved words.", &["H4"]);
+    let (mut disk, old, test) = stage(
+        "odd_names",
+        seed,
+        "Names with lone surrogates, 255 units, illegal characters and reserved words.",
+        &["H4"],
+    );
     let v = disk.volume(old);
     let names = v.mkdir(test, "names");
     let u = |s: &str| -> Vec<u16> { s.encode_utf16().collect() };
@@ -172,22 +222,52 @@ pub fn odd_names(seed: u64) -> Built {
         cases.push((name, "control-char"));
     }
     // dots and spaces
-    for name in ["trailing dot.", "trailing space ", "trailing both . .", "...", "   ", " leading space.dat", ".leading dot"] {
+    for name in [
+        "trailing dot.",
+        "trailing space ",
+        "trailing both . .",
+        "...",
+        "   ",
+        " leading space.dat",
+        ".leading dot",
+    ] {
         cases.push((u(name), "dots-and-spaces"));
     }
     // device names
-    for name in ["CON", "nul.txt", "COM1", "LPT9.tar.gz", "AUX", "CONIN$", "CONOUT$", "COM\u{B9}", "con .txt", "Lpt\u{B2}.dat"] {
+    for name in [
+        "CON",
+        "nul.txt",
+        "COM1",
+        "LPT9.tar.gz",
+        "AUX",
+        "CONIN$",
+        "CONOUT$",
+        "COM\u{B9}",
+        "con .txt",
+        "Lpt\u{B2}.dat",
+    ] {
         cases.push((u(name), "reserved-name"));
     }
     for name in ["CONSOLE.txt", "COM10", "AUXILIARY", "nul"] {
-        cases.push((u(name), if name == "nul" { "reserved-name" } else { "not-reserved" }));
+        cases.push((
+            u(name),
+            if name == "nul" {
+                "reserved-name"
+            } else {
+                "not-reserved"
+            },
+        ));
     }
     // names of the engine's own files
     cases.push((u("HDSavior-report-20260101-000000.csv"), "engine-name"));
     cases.push((u("~hds-17.part"), "engine-name"));
     cases.push((u("~hds-.part.txt"), "not-reserved"));
     for (i, (name, tag)) in cases.into_iter().enumerate() {
-        let node = v.add_file(names, name, FileSpec::tagged(derive(seed, "odd") + i as u64, 100 + 10 * i as u64));
+        let node = v.add_file(
+            names,
+            name,
+            FileSpec::tagged(derive(seed, "odd") + i as u64, 100 + 10 * i as u64),
+        );
         v.tag(node, tag);
     }
     let prn = v.mkdir(names, "PRN");

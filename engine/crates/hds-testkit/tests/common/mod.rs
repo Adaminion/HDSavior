@@ -7,7 +7,9 @@ use std::process::Command;
 
 use hds_testkit::disk::Built;
 use hds_testkit::facts::{ArtifactState, RecordFact, RecordRole};
-use hds_testkit::manifest::{CatalogInstance, Entry, Flag, FragmentFact, Manifest, Presence, RecordClass};
+use hds_testkit::manifest::{
+    CatalogInstance, Entry, Flag, FragmentFact, Manifest, Presence, RecordClass,
+};
 
 /// The seeds the scenario tests run with: what a scenario promises must
 /// not depend on the seed.
@@ -18,7 +20,8 @@ pub const MIB: u64 = 1 << 20;
 
 /// Builds a catalog scenario.
 pub fn build(name: &str, seed: u64) -> Built {
-    hds_testkit::scenarios::build(name, seed).unwrap_or_else(|| panic!("the catalog has no scenario {name:?}"))
+    hds_testkit::scenarios::build(name, seed)
+        .unwrap_or_else(|| panic!("the catalog has no scenario {name:?}"))
 }
 
 /// The records of an instance that are intact where the file system wrote
@@ -51,25 +54,41 @@ pub fn shown(e: &Entry) -> bool {
 /// Asserts that the manifest requires `flag` for the entry.
 #[track_caller]
 pub fn must(e: &Entry, flag: Flag) {
-    assert!(e.expect.flags_set.contains(&flag), "{} should be expected {flag:?}: {:?}", e.path, e.expect);
+    assert!(
+        e.expect.flags_set.contains(&flag),
+        "{} should be expected {flag:?}: {:?}",
+        e.path,
+        e.expect
+    );
 }
 
 /// Asserts that the manifest forbids `flag` for the entry.
 #[track_caller]
 pub fn must_not(e: &Entry, flag: Flag) {
-    assert!(e.expect.flags_clear.contains(&flag), "{} should be expected without {flag:?}: {:?}", e.path, e.expect);
+    assert!(
+        e.expect.flags_clear.contains(&flag),
+        "{} should be expected without {flag:?}: {:?}",
+        e.path,
+        e.expect
+    );
 }
 
 /// The expected path of an entry, joined with `/`.
 #[track_caller]
 pub fn expected_path(e: &Entry) -> String {
-    e.expect.path.as_ref().unwrap_or_else(|| panic!("{} has no expected path", e.path)).join("/")
+    e.expect
+        .path
+        .as_ref()
+        .unwrap_or_else(|| panic!("{} has no expected path", e.path))
+        .join("/")
 }
 
 /// `true` when `[start, start + len)` meets one of the `(start, length)`
 /// ranges.
 pub fn meets(ranges: &[(u64, u64)], start: u64, len: u64) -> bool {
-    ranges.iter().any(|&(s, l)| s < start + len && start < s + l)
+    ranges
+        .iter()
+        .any(|&(s, l)| s < start + len && start < s + l)
 }
 
 /// A `FILE` record or `INDX` block read from the image with its fixups
@@ -91,7 +110,9 @@ pub fn read_structure(built: &Built, offset: u64, size: usize) -> Vec<u8> {
 /// is what a recovery has to produce.
 pub fn read_back(built: &Built, e: &Entry) -> Vec<u8> {
     if let Some((record, value, len)) = e.resident_at {
-        let size = built.manifest.instances[e.instance as usize].geometry.record_size as usize;
+        let size = built.manifest.instances[e.instance as usize]
+            .geometry
+            .record_size as usize;
         let bytes = read_structure(built, record, size);
         return bytes[value as usize..(value + len) as usize].to_vec();
     }
@@ -113,7 +134,12 @@ pub fn read_back(built: &Built, e: &Entry) -> Vec<u8> {
 #[track_caller]
 pub fn assert_reads_back(built: &Built, e: &Entry) {
     let hash = hds_testkit::hash::sha256_hex(&read_back(built, e));
-    assert_eq!(Some(&hash), e.sha256.as_ref(), "{} does not read back from the image", e.path);
+    assert_eq!(
+        Some(&hash),
+        e.sha256.as_ref(),
+        "{} does not read back from the image",
+        e.path
+    );
 }
 
 /// A directory for the files of one test; removed when dropped.
@@ -151,12 +177,17 @@ pub fn skip(what: &str, why: &str) {
 }
 
 fn runs(program: &str, arg: &str) -> bool {
-    Command::new(program).arg(arg).output().is_ok_and(|o| o.status.success())
+    Command::new(program)
+        .arg(arg)
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 /// The Python interpreter, if there is one.
 pub fn python() -> Option<&'static str> {
-    ["python3", "python"].into_iter().find(|p| runs(p, "--version"))
+    ["python3", "python"]
+        .into_iter()
+        .find(|p| runs(p, "--version"))
 }
 
 /// `scripts/linux/inspect-ntfs.py` of this repository, if it is there.
@@ -167,7 +198,9 @@ pub fn inspector() -> Option<PathBuf> {
 
 /// A script that lives next to the tests.
 pub fn test_script(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(name)
 }
 
 /// `true` when `program` can be started.
@@ -193,7 +226,11 @@ pub fn crosscheck(python: &str, inspector: &Path, image: &Path, manifest: &Path)
         .arg(manifest)
         .output()
         .expect("start python");
-    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     (output.status.success(), text)
 }
 
@@ -203,7 +240,10 @@ pub fn fragment_records<'a>(m: &'a Manifest, fragment: &FragmentFact) -> Vec<&'a
     m.records
         .iter()
         .filter(|r| r.expect.class == Some(RecordClass::Old) && r.size == fragment.record_size)
-        .filter(|r| r.number.is_some_and(|n| r.offset as i64 - (n * r.size as u64) as i64 == fragment.origin))
+        .filter(|r| {
+            r.number
+                .is_some_and(|n| r.offset as i64 - (n * r.size as u64) as i64 == fragment.origin)
+        })
         .collect()
 }
 
@@ -212,7 +252,8 @@ pub fn fragment_records<'a>(m: &'a Manifest, fragment: &FragmentFact) -> Vec<&'a
 fn timed(r: &RecordFact) -> Option<u64> {
     let t = r.standard_information?.0[2];
     let scan = hds_testkit::expect::ASSUMED_SCAN_TIME;
-    (t != 0 && t >= hds_testkit::time::ymd(1980, 1, 1) && t <= scan + hds_testkit::time::DAY).then_some(t)
+    (t != 0 && t >= hds_testkit::time::ymd(1980, 1, 1) && t <= scan + hds_testkit::time::DAY)
+        .then_some(t)
 }
 
 /// ALGORITHMS D2 written down once more, by brute force and independently
@@ -220,18 +261,26 @@ fn timed(r: &RecordFact) -> Option<u64> {
 /// with intact fixups, reduced to the highest `lo` per `hi`, as a map
 /// `hi -> lo`.
 pub fn contradictions(records: &[&RecordFact]) -> BTreeMap<u64, u64> {
-    let usable: Vec<&RecordFact> =
-        records.iter().copied().filter(|r| r.flags & 1 == 1 && r.torn_blocks.is_empty()).collect();
+    let usable: Vec<&RecordFact> = records
+        .iter()
+        .copied()
+        .filter(|r| r.flags & 1 == 1 && r.torn_blocks.is_empty())
+        .collect();
     let clusters = |r: &RecordFact| -> Vec<(u64, u64)> {
         r.data
             .iter()
             .filter(|s| s.name.is_empty())
             .chain(r.index_allocation.iter().filter(|s| s.name == "$I30"))
             .filter_map(|s| s.non_resident.as_ref())
-            .flat_map(|x| x.runs.iter().filter_map(|run| run.lcn.map(|l| (l, l + run.len))))
+            .flat_map(|x| {
+                x.runs
+                    .iter()
+                    .filter_map(|run| run.lcn.map(|l| (l, l + run.len)))
+            })
             .collect()
     };
-    let directory = |r: &RecordFact| r.flags & 2 != 0 || r.names.iter().any(|n| n.flags & 0x1000_0000 != 0);
+    let directory =
+        |r: &RecordFact| r.flags & 2 != 0 || r.names.iter().any(|n| n.flags & 0x1000_0000 != 0);
     let mut out: BTreeMap<u64, u64> = BTreeMap::new();
     let mut note = |a: u64, b: u64| {
         let (lo, hi) = (a.min(b), a.max(b));
@@ -242,13 +291,23 @@ pub fn contradictions(records: &[&RecordFact]) -> BTreeMap<u64, u64> {
         let xn = x.number.expect("numbered");
         for y in &usable[i + 1..] {
             let yn = y.number.expect("numbered");
-            let shared = clusters(x).iter().any(|&(a0, a1)| clusters(y).iter().any(|&(b0, b1)| a0 < b1 && b0 < a1));
+            let shared = clusters(x)
+                .iter()
+                .any(|&(a0, a1)| clusters(y).iter().any(|&(b0, b1)| a0 < b1 && b0 < a1));
             if shared {
                 note(xn, yn);
             }
         }
-        for (target, parent) in x.names.iter().map(|n| (n.parent, true)).chain(std::iter::once((x.base, false))) {
-            if target.number == xn || target.seq == 0 || (!parent && target == hds_testkit::ondisk::FileRef::NONE) {
+        for (target, parent) in x
+            .names
+            .iter()
+            .map(|n| (n.parent, true))
+            .chain(std::iter::once((x.base, false)))
+        {
+            if target.number == xn
+                || target.seq == 0
+                || (!parent && target == hds_testkit::ondisk::FileRef::NONE)
+            {
                 continue;
             }
             if let Some(y) = usable.iter().find(|y| y.number == Some(target.number)) {
@@ -263,7 +322,10 @@ pub fn contradictions(records: &[&RecordFact]) -> BTreeMap<u64, u64> {
 
 /// `true` when a changepoint of ALGORITHMS D2 lies in `(lo, hi]`.
 pub fn changepoint_between(records: &[&RecordFact], lo: u64, hi: u64) -> Option<u64> {
-    let timed: Vec<(u64, u64)> = records.iter().filter_map(|r| Some((r.number?, timed(r)?))).collect();
+    let timed: Vec<(u64, u64)> = records
+        .iter()
+        .filter_map(|r| Some((r.number?, timed(r)?)))
+        .collect();
     (lo + 1..=hi).rev().find(|&p| {
         let below: Vec<u64> = timed.iter().filter(|t| t.0 < p).map(|t| t.1).collect();
         let above: Vec<u64> = timed.iter().filter(|t| t.0 >= p).map(|t| t.1).collect();
@@ -274,13 +336,17 @@ pub fn changepoint_between(records: &[&RecordFact], lo: u64, hi: u64) -> Option<
 /// The catalog instance whose label is `label`.
 #[track_caller]
 pub fn catalog<'a>(m: &'a Manifest, label: &str) -> &'a CatalogInstance {
-    m.catalog.iter().find(|c| c.label == label).unwrap_or_else(|| panic!("no catalog instance {label:?}: {:?}", m.catalog))
+    m.catalog
+        .iter()
+        .find(|c| c.label == label)
+        .unwrap_or_else(|| panic!("no catalog instance {label:?}: {:?}", m.catalog))
 }
 
 /// The catalog instance an entry is expected in.
 #[track_caller]
 pub fn instance_of<'a>(m: &'a Manifest, e: &Entry) -> &'a CatalogInstance {
-    m.catalog_of(e).unwrap_or_else(|| panic!("{} has no expected instance", e.path))
+    m.catalog_of(e)
+        .unwrap_or_else(|| panic!("{} has no expected instance", e.path))
 }
 
 /// The value of the warning `code` in the manifest, if it is decided.
@@ -295,8 +361,18 @@ pub fn warning(m: &Manifest, code: &str) -> Option<bool> {
 /// than one scanned old record could resolve. Returns `(counted,
 /// resolving)`.
 pub fn references_between(m: &Manifest, a: &[&RecordFact], b: &[&RecordFact]) -> (usize, usize) {
-    let old: Vec<&RecordFact> = m.records.iter().filter(|r| r.expect.class == Some(RecordClass::Old)).collect();
-    let resolves = |r: &RecordFact, seq: u16| if r.flags & 1 == 1 { r.sequence == seq } else { r.sequence == seq.wrapping_add(1).max(1) };
+    let old: Vec<&RecordFact> = m
+        .records
+        .iter()
+        .filter(|r| r.expect.class == Some(RecordClass::Old))
+        .collect();
+    let resolves = |r: &RecordFact, seq: u16| {
+        if r.flags & 1 == 1 {
+            r.sequence == seq
+        } else {
+            r.sequence == seq.wrapping_add(1).max(1)
+        }
+    };
     let mut counted = 0;
     let mut resolving = 0;
     for (from, to) in [(a, b), (b, a)] {
@@ -307,7 +383,9 @@ pub fn references_between(m: &Manifest, a: &[&RecordFact], b: &[&RecordFact]) ->
                 if target.number == 5 || target.number == 11 {
                     continue;
                 }
-                let Some(t) = to.iter().find(|t| t.number == Some(target.number)) else { continue };
+                let Some(t) = to.iter().find(|t| t.number == Some(target.number)) else {
+                    continue;
+                };
                 // identical copies count once
                 let candidates: Vec<u64> = old
                     .iter()
@@ -320,7 +398,8 @@ pub fn references_between(m: &Manifest, a: &[&RecordFact], b: &[&RecordFact]) ->
                     continue;
                 }
                 counted += 1;
-                let directory = t.flags & 2 != 0 || t.names.iter().any(|n| n.flags & 0x1000_0000 != 0);
+                let directory =
+                    t.flags & 2 != 0 || t.names.iter().any(|n| n.flags & 0x1000_0000 != 0);
                 if resolves(t, target.seq) && (!parent || directory) {
                     resolving += 1;
                 }
