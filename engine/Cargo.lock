@@ -23,5 +23,9 @@ name = "hds-ntfs"
 version = "0.1.0"
 
 [[package]]
+name = "hds-recover"
+version = "0.1.0"
+
+[[package]]
 name = "hds-testkit"
 version = "0.1.0"

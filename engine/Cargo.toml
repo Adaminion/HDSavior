@@ -11,6 +11,7 @@ publish = false
 hds-ntfs = { path = "crates/hds-ntfs" }
 hds-io = { path = "crates/hds-io" }
 hds-carve = { path = "crates/hds-carve" }
+hds-recover = { path = "crates/hds-recover" }
 hds-core = { path = "crates/hds-core" }
 hds-testkit = { path = "crates/hds-testkit" }
 

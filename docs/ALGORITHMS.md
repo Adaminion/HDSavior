@@ -1,0 +1,544 @@
+# HDSavior — Algorithms
+
+Normative rules for the engine (`hds-core`). The overview, safety invariants
+and crate boundaries are in [ARCHITECTURE.md](ARCHITECTURE.md); the wire
+protocol is in [PROTOCOL.md](PROTOCOL.md); verified on-disk facts are in
+[notes/ntfs-on-disk.md](notes/ntfs-on-disk.md),
+[notes/quick-format-behaviour.md](notes/quick-format-behaviour.md) and
+[notes/windows-raw-io.md](notes/windows-raw-io.md).
+
+Vocabulary
+
+- *Session range* — the absolute byte range `[start, end)` of the source that
+  the user asked to scan. It never changes for the life of a session.
+- *Reference* `(N, s)` — a 48-bit record number and 16-bit sequence number.
+  `next(s)` is `s + 1`, with `next(0xFFFF) = 1`.
+- **Reference rule.** A reference `(N, s)` *resolves* to record `R` with number
+  `N` when `R` is in use and `R.seq == s`, or `R` is not in use and
+  `R.seq == next(s)` (freeing a record bumps its sequence; reuse does not).
+- *MFT-change time* — the third timestamp of `$STANDARD_INFORMATION`. Unlike
+  creation time it cannot be back-dated by copy or backup tools.
+
+---
+
+## A. Scan
+
+**A1. Reading.** The session range is read in 8 MiB sector-aligned chunks
+through `hds_io::read_resilient`. No byte outside the session range is ever
+read, by the scan or by anything that later works on its results (S2).
+
+**A2. Order.** Probe offsets are scanned first, then the rest of the range in
+ascending order, skipping what is done. Probe offsets, duplicates removed:
+the MFT offset from every valid NTFS boot sector at the range start or at a
+partition start inside the range; and for each such partition start `P` (the
+range start if there is no partition table) `P + min(3 GiB, size / 3)` rounded
+down to 4 KiB. A probe reads forward until 64 MiB pass without a `FILE` hit.
+Phase names: `mft_probe`, then `sweep`. The early phase exists so that
+stopping early is worthwhile; no catalog exists while a scan runs.
+
+**A3. Per 512-byte offset** of every chunk (partitions that start at sector 63
+are not 1 KiB aligned):
+
+1. `FILE` → `probe_file_record`. If the record crosses the chunk end it is read
+   on its own. Compute `hash` = FNV-1a 64 of the record bytes **as read**
+   (before fixups). Apply fixups, parse. A record that is not in use and has no
+   attributes (never used) is counted and dropped. Otherwise store a
+   `RawRecord` (A4).
+2. `INDX` → parse the index block (size from its header). Store one
+   `IndexBlock` tuple (disk offset, block VCN, block size, LSN, owner = the
+   parent reference shared by most entries) and, for entries **with the
+   directory flag only**, an `IndexEntry` (A5).
+3. NTFS boot sector (`"NTFS    "` at +3, 0x55AA at +510, parses) → `BootHit`
+   (offset and parsed fields).
+4. If carve hits are collected: `hds_carve::sniff` on the bytes at that offset
+   → `CarveHit`, packed as `(offset / 512) << 8 | kind`. At most 64 million
+   hits are kept; when the cap is reached further hits are dropped and the
+   warning `carve_hits_capped` is raised.
+
+**A4. RawRecord.** No per-record heap allocation: names and runs live in
+session-wide arenas (target ≤ 200 bytes per record on average). Fields:
+disk offset; record size; record number (absent for pre-3.1 headers); sequence;
+header flags; link count; LSN; base reference; `hash`; fixup status;
+`$STANDARD_INFORMATION` (four times, file-attribute flags) when present; every
+`$FILE_NAME` (parent reference, namespace, flags, attribute id, name as UTF-16
+units); the unnamed `$DATA` extents present in this record — resident
+(attribute offset and length **inside the record**; content is not stored) or
+non-resident (start VCN, header last VCN, runs, attribute flags, and
+allocated / real / initialized size, which are meaningful only when the start
+VCN is 0); whether a `$DATA` stream named `WofCompressedData` exists; the
+`$INDEX_ALLOCATION:$I30` extents (start VCN, runs, allocated size);
+`$ATTRIBUTE_LIST` presence and, when resident, its entries for types 0x80 and
+0xA0; the reparse tag when a `$REPARSE_POINT` exists. Alternate data streams
+are otherwise ignored. Directory entries found in a `$INDEX_ROOT:$I30` are
+emitted as `IndexEntry` values with the record's offset and LSN as source.
+
+**A5. IndexEntry** (directory entries only): child reference, parent reference,
+namespace, name, the entry's MFT-change time (from its `$FILE_NAME` copy),
+source disk offset (block or record), source LSN.
+
+**A6. Read errors** are classified by `hds-io` (media / device lost / caller /
+resource / cancelled). Media errors become bad ranges (zero-filled, counted,
+never "done-and-clean"). *Device lost* ends the job with error `source_lost`:
+the failing chunk is recorded neither as done nor as bad, the session is
+saved, and the scan can be resumed after `session_attach_source`. Caller-class
+errors are internal errors, never bad sectors.
+
+**A7. Dead source.** If the first 1 GiB read contains no non-zero byte, the
+warning `source_reads_zero` is raised (TRIM-capable device or full format).
+
+**A8. Progress and cancellation.** Progress events at most 4 per second.
+Cancellation is polled per chunk and between retries of a failing read.
+`bytes_done` is the size of the done set, so a resumed scan starts where it
+stopped. Counters `files` / `dirs` are in-use base records without / with the
+directory flag.
+
+## B. Session file
+
+**B1. Contents.** Source identity (kind, path, size, model, serial), session
+range, scan options, done range set, records, index entries, index blocks,
+boot hits, carve hits, bad ranges, counters, the latest current-volume
+snapshot (C), the geometry override per instance if any (F), carved results
+(I), warnings.
+
+**B2. Format.** `"HDSC"`, `u32` format version, then append-only blocks:
+`u32 type | u32 reserved | u64 payload length | u32 CRC-32 of payload |
+payload`. Block types: `RECORDS`, `INDEX_ENTRIES`, `INDEX_BLOCKS`, `BOOT_HITS`,
+`CARVE_HITS`, `BAD_RANGES`, `LIVE`, `GEOMETRY`, `CARVED`, `CHECKPOINT` (done
+set, counters, options, identity, range, warnings). The state of a file is
+everything up to its last valid `CHECKPOINT`; later bytes are ignored and
+truncated on the next append. Payloads use one pure-Rust binary serde codec,
+fixed per format version. A file with a newer format version is refused
+(`unsupported`).
+
+**B3. Saving.** During a scan, every 5 minutes and at the end (or stop, or
+`source_lost`, or shutdown): append the new data blocks and a `CHECKPOINT`,
+then sync. `session_save` to another path writes a compacted copy. Temporary
+files live next to the session file; the engine never uses `%TEMP%`. Session
+paths are subject to the destination guard (S2/S3). The engine never
+overwrites a session file that belongs to another source or range.
+
+**B4. Identity.** A source matches a session when its size covers the session
+range and at least 90 % of up to 64 stored records (spread over the range, not
+current-volume records) re-read from disk have the stored `hash`. Model and
+serial differences are only warnings (USB bridges change them). `force` on
+`session_attach_source` skips nothing but the 90 % threshold being met by
+fewer than 8 samples; a source whose samples mismatch is always refused.
+
+## C. Current volumes
+
+A *current volume* is an NTFS file system that exists inside the session range
+now (normally: the result of the accidental format).
+
+**C1. Discovery.** Candidates: a valid NTFS boot sector at the range start, at
+each partition start inside the range, and at each `BootHit`. A candidate is a
+current volume when the record at `offset + mft_lcn × cluster_size` parses as
+an in-use `FILE` record 0 named `$MFT`.
+
+**C2. Snapshot** (read through the volume's own structures, all reads inside
+the session range): the `$MFT`'s `$DATA` extents and `$BITMAP`, following its
+`$ATTRIBUTE_LIST` into extension records when present; the initialized size of
+`$MFT:$DATA`; `format_time` = creation time of record 3 (`$Volume`), falling
+back to record 0; the cluster allocation bitmap from record 6 (`$Bitmap`) as a
+set of absolute byte ranges (*live-allocated ranges*). If any part cannot be
+read the snapshot is marked incomplete (warning `live_volume_incomplete`).
+The snapshot is taken whenever a catalog is built with a source attached and
+again at `recover_start` and `carve_start`; the latest one is stored in the
+session. If the range holds a file system that is not NTFS, or no current
+volume at all can be read where a boot sector says there is one, the warning
+`writes_not_detectable` is raised.
+
+**C3. Current-volume records.** A scanned record whose disk offset lies inside
+a current `$MFT`'s extents below the initialized size is a current-volume
+record:
+
+- slot in use per the live `$BITMAP` → `live`: hidden, counted;
+- otherwise, MFT-change time ≥ `format_time`, or no `$STANDARD_INFORMATION` →
+  `post_format`: a file deleted on the current volume. Not shown. Its
+  non-resident extents, mapped with the **current** volume's geometry, are
+  added to the overwritten set;
+- otherwise → an old record that survived in an unused slot; it is treated like
+  any other old record.
+
+`live` and `post_format` records never take part in fragment or instance
+grouping and are never the target of a parent or base reference.
+
+**C4. Current index data.** An `IndexBlock` inside live-allocated ranges, and
+any `IndexEntry` whose MFT-change time is ≥ `format_time` or whose source is
+such a block or a current-volume record, belongs to the current volume and is
+excluded from lost-folder naming (E6) and geometry votes (F).
+
+**C5. Overwritten set** = live-allocated ranges ∪ extents of `post_format`
+records. It is the evidence of what has been written since the format.
+
+## D. MFT instances
+
+A scan can meet records of several file systems: the one that was lost, an
+older one formatted before it on the same partition, an NTFS volume inside a
+disk-image or VM file stored on the drive, stale copies of MFT blocks, other
+partitions in a whole-disk scan. Mixing them produces wrong trees.
+
+Input: all stored records except `live` and `post_format` ones.
+
+**D1. Fragments.** Numbered records are grouped by `(record size, origin)`
+with `origin = disk offset − number × record size` (signed 64-bit). A record
+without a number (pre-3.1 header) that lies on the grid of a fragment and
+within 4096 records of its number span takes the positional number and joins
+it; other unnumbered records go to the strays (D6).
+
+**D2. Generation cuts.** In a fragment with at least 32 records that carry a
+plausible MFT-change time (not 0, not before 1980, not more than a day after
+the scan), order by record number. A *cut* is a position with at least 16 such
+records on each side where every record above is older than every record
+below it (strictly, by MFT-change time). Cut at every such position (find the
+first, recurse on the upper part). Records without a time stay with their
+lower neighbour. The pieces are *segments*; each has a time span.
+Rationale: every format puts the MFT in the same place, so the tail of an
+older file system's MFT survives directly behind the newer one's, with higher
+record numbers and strictly older change times.
+
+**D3. Generation labels.** Every cut contributes a boundary time (the newest
+time of its older side). A segment's label is the number of boundaries that
+are ≥ its newest time; a segment that straddles a boundary (its oldest time ≤
+boundary < its newest time) is `unlabelled`. Without cuts every segment has
+label 0.
+
+**D4. Joining.** Segments are processed by descending record count, those with
+at least 64 records (*seeds*) first. For segment `S`, the candidates are the
+instances with the same label whose sets of record numbers are disjoint from
+`S`'s. The score of a candidate is the number of references between `S` and
+it, in both directions, that resolve by the reference rule: parent references
+whose target is a directory, and base references. References to records 5 and
+11 do not count. `S` joins the candidate with the highest score ≥ 1 (ties: the
+larger instance). A segment with no positive score is set aside; when all
+others are placed, set-aside segments join the single existing instance if
+there is exactly one and the numbers are disjoint; otherwise each founds its
+own instance. An `unlabelled` segment only ever founds its own instance.
+
+**D5. Assembly and geometry** are computed per instance (E1–E3, F).
+
+**D6. Strays.** Instances with fewer than 16 records are merged into one
+pseudo-instance `strays`. Its directory records can name lost folders of other
+instances (E6); its files are listed under its own root, rated at most
+`uncertain`.
+
+**D7. Embedded instances.** Instance `X` is *embedded* in instance `Y` when
+`Y` has a validated geometry (F6) and at least 90 % of `X`'s records lie
+inside data extents of in-use non-directory files of `Y`. It is labelled with
+the `Y` file that holds most of them. Its files are browse-only (flag
+`embedded`, rating `unsupported`): the way to them is to recover that file and
+open it as a disk image.
+
+**D8. Main instance.** Among instances that are neither embedded nor strays,
+the first that exists in this order: (1) the label-0 instance that contains
+old records at the origin of a current volume's `$MFT`; (2) an instance with
+validated geometry whose volume offset equals the range start or a partition
+start, newest change time first; (3) the instance with the newest change
+time; (4) the one with most records.
+
+**D9. Kinds.** `main`; `older` — an instance with a label > 0, or whose
+newest change time is older than the oldest of `main`'s and whose geometry is
+not validated at a different volume offset (a file system from before the
+previous format); `other` — a different volume (whole-disk scans);
+`embedded`; `strays`. Every instance is a root of its own with its own virtual
+folders. Instances that produce no catalog node are not reported.
+
+## E. Catalog build (per instance)
+
+**E1. Base and extension records.** A record with a non-zero base reference
+`(N, s)` is an extension record. It belongs to base record `N` of the same
+instance when: the extension is in use, the base is in use and `base.seq ==
+s`; or neither is in use, the base has attributes, and `base.seq` is `s` or
+`next(s)`. A free extension whose base is in use is a leftover and is ignored.
+Extensions that match no base form an *orphan group* per base reference (E7).
+
+**E2. Merging attributes.** Names come from the base and all its extensions
+alike (a file's only `$FILE_NAME` may sit in an extension record). Extents of
+each non-resident attribute — the unnamed `$DATA`, `$INDEX_ALLOCATION:$I30` —
+are merged across the group ordered by start VCN. Extent `k` must begin at
+`start_vcn(k−1) + Σ run lengths of extent k−1`; the stored last VCN is only a
+cross-check when it is > 0. Sizes (allocated, real, initialized) are read only
+from the extent with start VCN 0. A hole in the chain, an overlap, or fewer
+mapped clusters than the real size needs → `missing_fragments`. If the VCN-0
+extent is lost: size = (highest mapped VCN + 1) × cluster size, flags
+`missing_fragments` and `size_estimated`. A base with an `$ATTRIBUTE_LIST`
+but no `$DATA` extent found is `missing_fragments`; a base with neither is
+`no_data` (0 bytes).
+
+**E3. Directory or file.** A group is a directory when its base record has
+header flag 0x0002 (or one of its names has `$FILE_NAME` flag 0x10000000).
+
+**E4. Name.** Namespace preference: Win32 (1) or Win32+DOS (3), then POSIX (0),
+then DOS (2). Among names of the best namespace: one whose parent reference
+resolves to a surviving directory, then the lowest attribute id. Other hard
+links are listed in `node_info` only.
+
+**E5. Parent.** Parent reference `(P, s)`:
+
+- `P == 5` → the instance root (whether or not record 5 survived).
+- `P == 11` → under `$Extend`: the record and everything below it are omitted.
+- otherwise the directory group whose base record `P` resolves by the
+  reference rule. Never a `live`/`post_format` record, never a non-directory.
+- no such directory → a lost folder (E6).
+
+**E6. Lost folders** are keyed by `(instance, P, s)`: `Folder #P`, or
+`Folder #P.s` when several sequences share a number. A lost folder gets its
+real name and its own parent reference from, in this order: (a) a usable
+`IndexEntry` whose child reference is `(P, s)`; (b) an in-use directory record
+with number `P` and sequence `s` among the strays (a stale copy). With several
+entries: skip the DOS namespace when another exists, then take the one with
+the highest source LSN. An entry is *usable* for instance `I` when it is not
+current-volume data (C4), carries the same generation label as `I` (by its
+MFT-change time against the boundaries of D3), and its source offset is not
+inside a data extent of an in-use non-directory file of `I` (which would make
+it part of an embedded file system). A named lost folder is attached by the
+rules of E5/E6 applied to the entry's parent reference; a nameless one, and
+any folder whose chain does not reach the root, lives under `[Lost folders]`.
+
+**E7. Orphans.** An orphan group takes name and parent from its own
+`$FILE_NAME` when it has one; otherwise it is `File #<base number>` (plus the
+extension of the sniffed kind once content has been read) under
+`[Orphaned files]`. It is dropped when its base number is below 24 or it has
+no unnamed `$DATA`. Files without any usable parent reference also go to
+`[Orphaned files]`.
+
+**E8. Cycles** in parent chains are cut by attaching the node where the cycle
+is detected to `[Lost folders]`.
+
+**E9. System files.** Records 0–15 and their extension records are omitted;
+records 16–23 are omitted when they are extension records or have no
+`$FILE_NAME`.
+
+**E10. Aggregates** per folder, bottom-up: `files`, `size` (non-deleted files),
+`deleted_files`, `deleted_size`. They do not depend on request filters.
+
+**E11. Node ids** are dense integers assigned per catalog *epoch* (see
+PROTOCOL). An id is never reused inside an epoch.
+
+Virtual folder names: `[Lost folders]`, `[Orphaned files]`, `[Carved files]`.
+Instance labels: `[Older file system]`, `[File system N]`,
+`[Inside <file name>]`, `[Stray records]`.
+
+## F. Geometry (per instance)
+
+A geometry is `(cluster_size, volume_offset)`; `volume_offset` is the absolute
+byte offset of cluster 0 of that instance's volume.
+
+**F1. Cluster size** = the most frequent value of `allocated_size /
+(last_vcn + 1)` over non-resident attributes with start VCN 0 and
+`last_vcn ≥ 0`, accepting only powers of two from 512 to 2 MiB. Source `attr`.
+If no attribute qualifies: the cluster size of a matching boot hit, else 4096.
+
+**F2. Offset candidates**, all required to be ≥ 0, sector-aligned and inside
+the source:
+
+- *MFT map* — if the instance has a record 0 named `$MFT`: for each record of
+  number `n` at disk offset `D`, map byte `n × record_size` through the `$MFT`
+  extents to a volume byte `B`; the most frequent `D − B`. Source `mft`.
+- *Index votes* — for each `IndexBlock` at `D` with VCN `v` whose owner
+  resolves to a directory of the instance with `$INDEX_ALLOCATION` extents:
+  the block's byte position inside the attribute is `v × cluster_size` when
+  `cluster_size ≤ block size`, else `v × 512`; map it through the extent that
+  contains it to a volume byte `B`; vote for `D − B`. Votes are counted **per
+  distinct directory**, not per block. Source `index`.
+- *Boot sectors* — each `BootHit` at `X` with the instance's cluster size, both
+  as a primary (`X`) and as a backup (`X − total_sectors × bytes_per_sector`),
+  preferring the reading consistent with its `hidden_sectors`. Sources `boot`,
+  `backup_boot`.
+- *Partition starts* inside the range, and the range start. Source `default`.
+- *Signature anchors*, only when there are no index votes: for up to 64 in-use
+  files with a known signature and first cluster `l`, each carve hit at `D` of
+  a matching kind votes for `D − l × cluster_size`; an offset needs ≥ 3 votes.
+  Source `signature`.
+
+**F3. Validation.** For the best candidates (at most 8), read the first sector
+of up to 200 in-use, non-resident, non-sparse files with an extension that
+`hds_carve::matches_extension` has an opinion on, and count matches.
+
+**F4. Choice.** By signature matches when at least 20 files were checked; then
+by distinct voting directories; then `mft`, `boot`, `backup_boot`, `default`.
+`older` instances and strays without evidence of their own take `main`'s
+volume offset.
+
+**F5. Volume size.** `total_clusters` from a boot hit that agrees with the
+chosen geometry, else `(range end − volume_offset) / cluster_size`.
+
+**F6. Validated** means: ≥ 20 files checked and ≥ 80 % matched, or ≥ 3
+distinct voting directories, or an MFT map. Files of an instance whose
+geometry is not validated are rated at most `uncertain`.
+
+**F7. Override.** `geometry_set` replaces an instance's geometry (source
+`manual`); health is recomputed, the tree does not change, carved nodes are
+discarded. The choice is stored in the session.
+
+## G. Health
+
+**G1. Flags** (per file): `deleted`, `torn_record` (fixup mismatch in a record
+of the group), `missing_fragments`, `size_estimated`, `out_of_bounds`,
+`overwritten`, `overlap`, `compressed`, `encrypted`, `placeholder`, `sparse`,
+`no_data`, `bad_sectors`, `older_generation`, `embedded`, `stray`,
+`signature_ok`, `signature_mismatch`.
+
+- `compressed` — non-resident `$DATA` with `(flags & 0x00FF) != 0`, or reparse
+  tag 0x80000017 / a `WofCompressedData` stream. Resident data is always raw.
+  The compression-unit field never decides.
+- `encrypted` — `$DATA` flag 0x4000.
+- `placeholder` — reparse tag with `(tag & 0xFFFF0FFF) == 0x9000001A` (cloud)
+  or 0x80000013 (deduplication): the content is not on this disk.
+- `sparse` — the runlist has a hole or the attribute flag 0x8000 is set.
+- `out_of_bounds` — a run with LCN ≥ `total_clusters`, or mapped bytes outside
+  the session range.
+- `bad_sectors` — an extent intersects a bad range of the scan; set again by
+  any read that meets unreadable sectors.
+- `overwritten` — an extent intersects the overwritten set (C5), or the file
+  lost an overlap conflict (G2), or a carved file was found inside it (I4).
+- `signature_ok` / `signature_mismatch` — set whenever the first bytes have
+  been read (geometry validation, `read_file` at offset 0, recovery) and
+  `matches_extension` has an opinion.
+
+**G2. Overlap conflicts.** All extents of all non-embedded instances are
+compared in absolute bytes (sort, sweep). For two files that share bytes, the
+winner is decided by, in order: instance kind (`main` over `other` over
+`older` over `strays`); in use over deleted; later MFT-change time; higher LSN.
+The loser gets `overwritten`. The winner gets `overlap` only when both are in
+use and of the same instance kind. A full tie gives both `overlap`.
+
+**G3. Rating.**
+
+| rating | condition (first match) |
+|---|---|
+| `unsupported` | `compressed`, `encrypted`, `placeholder` or `embedded` |
+| `damaged` | `missing_fragments`, `out_of_bounds`, `overwritten`, `bad_sectors` or `signature_mismatch` |
+| `uncertain` | `deleted`, `overlap`, `torn_record`, `no_data`, `older_generation`, `stray`, geometry not validated, or carved without a verified end |
+| `good` | otherwise |
+
+`sparse`, `size_estimated` and `signature_ok` never change a rating by
+themselves. `hide_damaged` and `skip_damaged` mean rating `damaged`.
+
+## H. Recovery
+
+**H1. Preconditions.** A catalog with its source attached. The current-volume
+snapshot is refreshed and `overwritten` re-evaluated before anything is read.
+
+**H2. Selection.** `include` / `exclude` node ids; a node is selected when its
+nearest ancestor-or-self that appears in either list is in `include`. The
+optional `filter` (query, extensions, sizes, ratings), `include_deleted` and
+`skip_damaged` apply to every selected file, explicit or inherited. The walk
+passes through deleted folders. Files rated `unsupported` are never written.
+
+**H3. Destination.** The destination guard runs at job start on the created
+root (ARCHITECTURE §2 and §5.2). Files larger than the destination file
+system's maximum file size are `skipped:too_large`.
+
+**H4. Output paths.** `dest` + the full path from the instance root, also for
+a selection deep in the tree; files of non-main instances go below a folder
+named after the instance label. Virtual folders are real folders in the
+output. Selected folders are created even when empty. Names are assigned
+before any data is read, in-use entries first, then by record number.
+Sanitizing, in this order: (1) each of `<>:"/\|?*` and each unit below 0x20 →
+`_`; (2) a lone surrogate → U+FFFD; (3) strip trailing dots and spaces; empty
+→ `_`; (4) a reserved device name (the part before the first dot, trailing
+spaces ignored, ASCII case-insensitive: `CON PRN AUX NUL CONIN$ CONOUT$
+COM0`–`COM9 COM¹ COM² COM³ LPT0`–`LPT9 LPT¹ LPT² LPT³`) → prefix `_`; names
+beginning with `HDSavior-report-` or matching `~hds-*.part` → prefix `_`;
+(5) case-insensitive collisions inside a folder get ` (2)`, ` (3)`… before the
+extension; (6) shorten the stem to the destination volume's component limit
+without cutting a surrogate pair. A path longer than 32,767 units is
+`skipped:path_too_long`. If the file system still rejects a name, retry once
+with `<shortened stem>~<record number>.<ext>`.
+
+**H5. Order.** Files are processed in ascending order of the absolute offset
+of their first data byte (resident files: their record's offset).
+
+**H6. Writing one file.** Create `~hds-<n>.part` in the final directory with
+create-new semantics, write, set the times on the writing handle, close, then
+rename **without replacing**. If the final name exists: a file produced by
+this run → take the next ` (n)`; a file that existed before → `on_exists`
+(`rename` → next ` (n)`, `skip` → `skipped:exists`, `overwrite` → only a
+regular file that is not a reparse point: delete it, then rename). Leftover
+`~hds-*.part` files in the tree are deleted when a job starts there, so a file
+under its final name is always complete. Output directories are created one
+level at a time; an existing name is reused only if it is a directory that is
+not a reparse point. `create_dir_all`, truncating opens and replacing renames
+are never used on output paths.
+
+**H7. Content.**
+
+- Resident: re-read the record that holds the attribute (base or extension)
+  at its disk offset, compare `hash`; a mismatch is `failed:record_changed`.
+  Apply fixups, copy the attribute content.
+- Non-resident: for each run read `volume_offset + lcn × cluster_size` with
+  `read_resilient` in large aligned chunks. Sparse runs, clusters missing from
+  the chain and runs outside the session range produce zeros. Bytes at or
+  beyond the initialized size are zeros. The output is truncated to the real
+  size.
+
+**H8. Times.** Creation, modification and access time from
+`$STANDARD_INFORMATION`, converted with checked arithmetic; only values with
+`0 < FILETIME < 2^63` are applied. Directories this run created get theirs
+bottom-up at the end. A time that cannot be set is a note in the report and
+never changes a status.
+
+**H9. Verification.** The first bytes, still in memory, are checked with
+`matches_extension` → `signature_ok` / `signature_mismatch`.
+
+**H10. Report.** `HDSavior-report-<UTC yyyymmdd-hhmmss>.csv` in `dest`, created
+when the job starts; one row appended per file and flushed. UTF-8 with BOM,
+CRLF, RFC 4180 quoting; a cell starting with `=`, `+`, `-`, `@` or TAB is
+prefixed with an apostrophe. Columns: `status, flags, size, bytes_written,
+output_path, original_path, mft_record, record_offset, first_data_offset,
+modified_utc, detail`. Files not reached before a cancel are not listed.
+
+**H11. Status** of each file after the attempt:
+
+| status | meaning |
+|---|---|
+| `ok` | written, rating `good`, first bytes match the extension |
+| `ok_unverified` | written, rating `good`, no opinion about the extension (or empty file) |
+| `warning:<flags>` | written, rating after the read is not `good` |
+| `skipped:<reason>` | not written: `compressed`, `encrypted`, `placeholder`, `embedded`, `damaged` (skip_damaged), `exists`, `too_large`, `path_too_long` |
+| `failed:<code>` | nothing is left at the destination: `record_changed`, `write_error`, `io_error` |
+
+`ok + warnings + failed + skipped = files_total`; `ok` counts both ok kinds.
+
+**H12. Ending early.** Destination full → the job ends once with error
+`no_space`. Source lost → `source_lost`. Cancel → the current part file is
+removed, status `cancelled`. The report keeps what was done.
+
+## I. Carving
+
+**I1.** Optional job after a scan that collected carve hits (otherwise
+`unsupported`). Works with the `main` instance's geometry only.
+
+**I2. Candidates.** A hit qualifies when `(offset − volume_offset)` is a
+multiple of the cluster size, it is inside the scanned (done) part of the
+range, and it is not inside (a) an extent of an in-use `main` file that is
+neither `overwritten` nor `out_of_bounds`, (b) the overwritten set, (c) a file
+already carved in this run.
+
+**I3. Measuring.** Candidates are processed in ascending offset order with
+`hds_carve::try_measure`, bounded by the next extent of kind (a), the next
+live-allocated range, and the range end. A ZIP candidate that hits the read
+limit is retried once with the limit raised to that bound. Valid results
+become nodes `[Carved files]/<ext>/f<sector number, 10 digits>.<ext>`.
+Rating: `good` when the end was verified by structure (`Measured.end_verified`),
+else `uncertain`.
+
+**I4.** A carved file that lies inside a deleted file's extents makes that
+file `overwritten`.
+
+**I5. Lifetime.** `carve_start` replaces the carved nodes of the kinds it is
+given; results found before a cancel are kept; carved nodes are stored in the
+session and discarded by `geometry_set` on the main instance and by any
+`scan_start`. Carved files are recovered like any file with one run.
+
+## J. Imaging
+
+Sequential copy of a byte range of the source to a file with `read_resilient`.
+Bad sectors are zero-filled and appended to `<image>.bad.txt`. A side file
+`<image>.hdsimg` (source identity, range, confirmed byte count) is rewritten
+after a flush every 1 GiB and on stop. `resume` checks the identity and
+truncates the image to the confirmed count; the image length alone is never
+trusted. Without `resume` an existing image file is refused (`exists`). An
+image larger than the destination file system's maximum file size is refused
+before writing. Source lost ends the job with `source_lost` without extending
+the image.
