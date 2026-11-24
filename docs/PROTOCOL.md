@@ -377,6 +377,7 @@ args `{"instance": 0, "cluster_size": 4096, "volume_offset": 1048576}` →
 of 512 inside the source. A pair equal to one of the candidates selects that
 candidate. Health and the protected ranges are recomputed; the tree and the
 epoch stay; carved nodes are discarded when the main instance changes.
+`strays` cannot be changed (`bad_request`). On any error nothing changes.
 
 ### instance_set
 

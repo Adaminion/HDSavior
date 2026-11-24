@@ -303,7 +303,9 @@ the format's own structure to the end of a contiguous file. `end_verified`
 tells whether bytes at the computed end were structurally confirmed (JPEG
 EOI, PNG IEND with CRCs, a box or chunk chain landing exactly, ZIP end
 record, archive end headers) as opposed to a length taken from a header
-alone. `matches_extension` is the lenient check used for S5. The crate's
+alone. An end concluded because no more data could be read is never
+verified, and JPEG and GIF ends are verified by decoding the scan or LZW data
+to exactly the frame's size. `matches_extension` is the lenient check used for S5. The crate's
 documentation lists every format with its confidence and known gaps.
 
 ### 5.4 `hds-recover`

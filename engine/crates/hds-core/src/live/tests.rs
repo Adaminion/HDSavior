@@ -210,10 +210,27 @@ fn c2_a_huge_total_sectors_costs_no_more_than_the_range() {
         // What the bitmap says inside the range is still used ...
         assert!(v.allocated.contains_range(1000 * CS..1100 * CS));
         assert!(!v.allocated.contains(999 * CS) && !v.allocated.contains(2000 * CS));
-        // ... and everything it does not cover counts as written.
-        assert!(v.incomplete && s.incomplete);
+        // ... it covers every cluster inside the range (the snapshot is
+        // complete), and the clusters beyond count as written.
+        assert!(!v.incomplete && !s.incomplete);
         assert!(v.allocated.contains_range(16 * MIB..64 * MIB));
     }
+}
+
+#[test]
+fn c2_a_bitmap_shorter_than_the_volume_inside_the_range_is_incomplete() {
+    // The volume claims 8192 clusters (32 MiB) inside a 64 MiB source; its
+    // $Bitmap holds 4096.
+    let mut lab = Lab::new(64);
+    lab.current_volume(0, 4096, 256, 64, t(1500), &[], &[1000..1100]);
+    let (r, _) = snap_with_total_sectors(&lab, 8192 * 8);
+    let s = r.unwrap();
+    let v = &s.volumes[0];
+    assert!(v.incomplete && s.incomplete);
+    assert!(v.allocated.contains_range(1000 * CS..1100 * CS));
+    assert!(!v.allocated.contains(2000 * CS));
+    assert!(v.allocated.contains_range(4096 * CS..8192 * CS));
+    assert!(!v.allocated.contains(8192 * CS));
 }
 
 #[test]

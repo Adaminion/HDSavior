@@ -17,7 +17,7 @@ use std::sync::atomic::AtomicBool;
 
 use super::*;
 use crate::instances::testlab::*;
-use crate::instances::{InstanceKind, KindChoice, Overrides, MAX_WITNESSES};
+use crate::instances::{AnalysisInput, InstanceKind, KindChoice, Overrides, MAX_WITNESSES};
 
 const MIB: u64 = 1 << 20;
 const CS: u64 = 4096;
@@ -181,6 +181,96 @@ fn f2_a_backup_boot_sector_consistent_with_its_hidden_sectors_wins() {
         .collect();
     assert!(cands.contains(&(MIB + 8191 * 512, OffsetSource::Boot)));
     assert!(cands.contains(&(0, OffsetSource::Default)));
+}
+
+#[test]
+fn f4_an_mft_map_beats_a_boot_sector_consistent_with_its_hidden_sectors() {
+    // F4: mft, then boot. The hidden-sector preference of F2 only orders
+    // the boot readings among themselves.
+    let mut lab = Lab::new(32);
+    lab.put(0, &boot_sector(512, 8, 16384, 100, 8, -10, 1, 0));
+    let vol = 16 * MIB;
+    let origin = vol + 256 * CS;
+    let r0 = Rec::new(0)
+        .si([t(1); 4], 6)
+        .name(ROOT, "$MFT", 3, 6)
+        .data_extent(
+            0,
+            63,
+            (64 * CS, 256 * 1024, 256 * 1024),
+            &runlist(&[(Some(256), 64)]),
+            0,
+        );
+    lab.rec(origin, &r0);
+    resident_files(&mut lab, origin, 30..50);
+    let run = lab.run(None);
+    let g = own(&run, origin);
+    assert_eq!((g.volume_offset, g.offset_source), (vol, OffsetSource::Mft));
+    assert!(g.validated);
+}
+
+#[test]
+fn f3_a_new_snapshot_can_need_heads_that_were_not_stored() {
+    // Review finding: the F3 sample is taken over the files outside the
+    // overwritten set, so a new LIVE snapshot shifts it. With more than
+    // 200 checkable files an analysis without a source then misses heads;
+    // `misses` reports it, and an analysis with the source stores them.
+    let mut lab = Lab::new(16);
+    lab.current_volume(0, 4096, 16, 64, t(1500), &[], &[]);
+    for i in 0..300u32 {
+        let lcn = 1000 + u64::from(i);
+        lab.rec(
+            12 * MIB,
+            &file(
+                30 + i,
+                1,
+                ROOT,
+                &format!("p{i}.png"),
+                t(100),
+                Some((lcn, 1)),
+            ),
+        );
+        // The PNG signature only: it matches the extension, but is no
+        // carve hit, so no signature anchor offsets (which would read
+        // the heads of every file) are tried.
+        lab.put(lcn * CS, b"\x89PNG\r\n\x1a\n");
+    }
+    let run = lab.run(None);
+    assert_eq!(run.store().carve_hits().count(), 0);
+    let id = run.inst(12 * MIB + 30 * 1024).unwrap();
+    let stored = {
+        let mut h = Heads::new();
+        h.merge_payload(&run.heads.to_payload()).unwrap();
+        h
+    };
+    // The current volume writes over the clusters of files 10..100.
+    let mut live = run.live.clone();
+    live.snapshot.as_mut().unwrap().volumes[0]
+        .allocated
+        .insert(1010 * CS..1100 * CS);
+    let input = AnalysisInput::new(run.store(), run.session.meta(), &live);
+    let cancel = AtomicBool::new(false);
+    let mut heads = Heads::new();
+    heads.merge_payload(&stored.to_payload()).unwrap();
+    let without =
+        crate::instances::analyze(&input, &mut heads, &Overrides::new(), &cancel).unwrap();
+    assert!(heads.misses() > 0);
+    let g = without.instance(id).unwrap().own_geometry.clone().unwrap();
+    assert!(g.signature_checked < 200, "{}", g.signature_checked);
+    // With the source: nothing missing, 200 checked, the new heads stored.
+    let mut heads = Heads::new();
+    heads.merge_payload(&stored.to_payload()).unwrap();
+    heads.attach(Some(run.ranged.clone()));
+    let with = crate::instances::analyze(&input, &mut heads, &Overrides::new(), &cancel).unwrap();
+    assert_eq!(heads.misses(), 0);
+    let g = with.instance(id).unwrap().own_geometry.clone().unwrap();
+    assert_eq!((g.signature_checked, g.signature_ok), (200, 200));
+    // From then on, the analysis without a source comes out the same.
+    let mut again = Heads::new();
+    again.merge_payload(&heads.to_payload()).unwrap();
+    let later = crate::instances::analyze(&input, &mut again, &Overrides::new(), &cancel).unwrap();
+    assert_eq!(again.misses(), 0);
+    assert_eq!(later.instances(), with.instances());
 }
 
 /// LCN offsets with pairwise distinct differences (a Sidon set): only
@@ -458,7 +548,10 @@ fn f2_many_signature_anchors_keep_only_the_best_candidates() {
         .all(|c| c.signature_votes == top));
     // The true offset still wins and is validated.
     let g = inst.own_geometry.as_ref().unwrap();
-    assert_eq!((g.volume_offset, g.signature_checked, g.signature_ok), (0, 25, 25));
+    assert_eq!(
+        (g.volume_offset, g.signature_checked, g.signature_ok),
+        (0, 25, 25)
+    );
     assert!(g.validated);
     // F7 on an offset that is not among the kept candidates: its evidence
     // is gathered for that pair.
@@ -472,7 +565,10 @@ fn f2_many_signature_anchors_keep_only_the_best_candidates() {
     ov.set_geometry(run.store(), &run.layout, inst.id, Some((4096, far)));
     let l = run.reanalyze(&ov);
     let g = l.instance(inst.id).unwrap().geometry.clone().unwrap();
-    assert_eq!((g.volume_offset, g.offset_source), (far, OffsetSource::Manual));
+    assert_eq!(
+        (g.volume_offset, g.offset_source),
+        (far, OffsetSource::Manual)
+    );
     assert_eq!(g.signature_votes, votes);
 }
 
@@ -636,5 +732,8 @@ fn overrides_round_trip_and_hostile_payloads() {
     assert_eq!(o1.kinds()[0].0.offsets(), &[4096]);
     assert_eq!(o1.kinds()[0].1, KindChoice::Main);
     assert_eq!(o1.geometries()[0].0.offsets(), &[8192]);
-    assert_eq!((o1.geometries()[0].1, o1.geometries()[0].2), (4096, 1 << 20));
+    assert_eq!(
+        (o1.geometries()[0].1, o1.geometries()[0].2),
+        (4096, 1 << 20)
+    );
 }

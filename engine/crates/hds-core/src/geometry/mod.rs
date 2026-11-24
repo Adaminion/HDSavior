@@ -613,7 +613,9 @@ impl Cand {
             SOURCE_ORDER
                 .iter()
                 .position(|&s| self.has(s))
-                .map_or(SOURCE_ORDER.len().saturating_add(1), |p| p.saturating_add(1))
+                .map_or(SOURCE_ORDER.len().saturating_add(1), |p| {
+                    p.saturating_add(1)
+                })
         }
     }
 
@@ -975,10 +977,7 @@ pub(crate) fn compute(
         .take(CHECK_CANDIDATES)
         .filter_map(|&o| {
             let c = cands.get(&o)?;
-            Some((
-                (Reverse(sigkey(c)), Reverse(c.dirs), c.source_rank()),
-                o,
-            ))
+            Some(((Reverse(sigkey(c)), Reverse(c.dirs), c.source_rank()), o))
         })
         .min()
         .map_or(ctx.range.start, |(_, o)| o);

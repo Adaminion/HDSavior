@@ -416,14 +416,15 @@ pub fn analyze(
         u64::from(input.sector_size),
         starts.clone(),
     );
-    // Anchor fragments: old records at the origin of a current $MFT.
+    // Anchor fragments: old records at the origin of a current $MFT (of
+    // any record size: D8 names the origin only).
     let mut anchor_frags = Vec::new();
     for (vi, v) in snapshot.volumes.iter().enumerate() {
         let Some(origin) = v.mft_origin() else {
             continue;
         };
         for (fi, f) in frags.fragments.iter().enumerate() {
-            if i128::from(f.origin) == i128::from(origin) && f.record_size == v.record_size {
+            if i128::from(f.origin) == i128::from(origin) {
                 anchor_frags.push((u32::try_from(fi).unwrap_or(NONE), vi));
             }
         }
@@ -909,18 +910,19 @@ impl Layout {
             inst.geometry = g;
         }
 
-        // S2: the session range, then the lost-volume ranges of main and
-        // other instances with validated geometry, and of the anchors.
+        // S2: the session range, then the lost-volume ranges of main,
+        // `other` and `older` instances with validated geometry, and of the
+        // anchors. F5 names main, other and the anchor; ARCHITECTURE S2
+        // names every lost file system whose geometry is validated, which
+        // includes `older` ones (an older volume can be larger than main's).
         let mut protected = vec![Protected::session(self.range.clone())];
         let mut order: Vec<usize> = Vec::new();
         order.extend(main);
-        order.extend((0..self.instances.len()).filter(|&i| {
-            Some(i) != main
-                && self
-                    .instances
-                    .get(i)
-                    .is_some_and(|x| x.kind == InstanceKind::Other)
-        }));
+        for kind in [InstanceKind::Other, InstanceKind::Older] {
+            order.extend((0..self.instances.len()).filter(|&i| {
+                Some(i) != main && self.instances.get(i).is_some_and(|x| x.kind == kind)
+            }));
+        }
         let anchors: Vec<usize> = (0..self.instances.len())
             .filter(|&i| {
                 self.instances
@@ -1248,8 +1250,9 @@ impl Layout {
     }
 
     /// The protected ranges (S2): the session range first, then the
-    /// lost-volume ranges of main and the other instances with validated
-    /// geometry, and of the anchors.
+    /// lost-volume ranges of main, then of the `other` and the `older`
+    /// instances with validated geometry, then of the anchors (each range
+    /// once).
     pub fn protected(&self) -> &[Protected] {
         &self.protected
     }

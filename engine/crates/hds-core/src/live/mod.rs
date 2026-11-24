@@ -439,6 +439,14 @@ impl LiveState {
 
     /// Replaces the session's `LIVE` block with this state (written at the
     /// next checkpoint).
+    ///
+    /// A new snapshot changes the overwritten set and with it the files
+    /// that geometry validation samples (ALGORITHMS F3). Whenever a new
+    /// snapshot is saved, run [`crate::instances::analyze`] once more with
+    /// the source attached to the [`crate::geometry::Heads`] and save the
+    /// new heads, so that an analysis without a source later comes out
+    /// the same ([`crate::geometry::Heads::misses`] tells when it would
+    /// not).
     pub fn save(&self, session: &mut Session) -> Result<(), SessionError> {
         session.replace_opaque(OpaqueKind::Live, vec![self.to_payload()])
     }
@@ -1084,12 +1092,7 @@ fn read_volume(
                 // matter, and the bitmap holds at most its real size: the
                 // read is bounded by both, whatever the boot sector's
                 // total_sectors claims. The rest counts as allocated below.
-                let in_range = rd
-                    .src
-                    .range()
-                    .end
-                    .saturating_sub(start)
-                    .div_ceil(cs.max(1));
+                let in_range = rd.src.range().end.saturating_sub(start).div_ceil(cs.max(1));
                 let mut want = total.min(in_range).div_ceil(8);
                 if let Some((real, _)) = bmp.data.sizes {
                     want = want.min(real);
@@ -1119,9 +1122,14 @@ fn read_volume(
                 if let Some(s) = run_start {
                     insert_clusters(&mut alloc, start, cs, s, read_clusters);
                 }
-                if read_clusters < total {
-                    // Bitmap shorter than the volume: the rest is unknown.
+                if read_clusters < total.min(in_range) {
+                    // Bitmap shorter than the part of the volume inside
+                    // the range: that part is unknown.
                     complete = false;
+                }
+                if read_clusters < total {
+                    // Unknown, or beyond the session range (where it
+                    // decides nothing): counts as written.
                     insert_clusters(&mut alloc, start, cs, read_clusters, total);
                 }
                 vol.allocated = alloc;

@@ -623,7 +623,10 @@ impl<'a> Work<'a> {
                     if x != origin {
                         break;
                     }
-                    let Some(f) = self.frags.fragments.get(usize::try_from(fi).unwrap_or(usize::MAX))
+                    let Some(f) = self
+                        .frags
+                        .fragments
+                        .get(usize::try_from(fi).unwrap_or(usize::MAX))
                     else {
                         continue;
                     };

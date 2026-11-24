@@ -703,13 +703,21 @@ already carved in this run.
 **I3. Measuring.** Candidates are processed in ascending offset order with
 `hds_carve::try_measure`, bounded by the next extent of kind (a), the next
 live-allocated range, and the range end. A ZIP candidate that hits the read
-limit is retried once with the limit raised to that bound. Valid results
+limit is retried once with the limit raised to that bound; the retries of one
+run share a budget of one pass over the part of the range already done, and
+none is made once 1 GiB or less of that budget is left. Valid results
 become nodes `[Carved files]/<ext>/f<sector number, 10 digits>.<ext>`.
 Rating: `good` when the end was verified by structure (`Measured.end_verified`),
-else `uncertain`.
+else `uncertain`, and at most `uncertain` without a validated geometry (F6).
+An end concluded from missing data (the walker asked for bytes at or past the
+bound and got none) is not verified; JPEG and GIF ends are verified only by
+decoding the entropy-coded or LZW data to exactly the frame's size.
 
 **I4.** A carved file that lies inside a deleted file's extents makes that
-file `overwritten`.
+file `overwritten`, except the file's own content: a carved file that starts
+exactly at the deleted file's first data byte (its mapped run at VCN 0) and is
+no longer than its real size. A deleted file whose VCN-0 run is unknown gets
+no exemption.
 
 **I5. Lifetime.** `carve_start` replaces the carved nodes of the kinds it is
 given; results found before a cancel are kept; carved nodes are stored in the

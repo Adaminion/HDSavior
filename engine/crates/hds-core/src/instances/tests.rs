@@ -461,6 +461,27 @@ fn d8_the_anchor_is_main_and_instance_set_overrules_it() {
 }
 
 #[test]
+fn d8_the_anchor_does_not_need_the_current_record_size() {
+    // Review finding: the anchor match also required the old records to
+    // have the current volume's record size, which D8 does not say. Old
+    // 4 KiB records at the origin of a current $MFT of 1 KiB records are
+    // the anchor.
+    let mut lab = Lab::new(16);
+    lab.current_volume(0, 4096, 256, 64, t(1500), &[], &[]);
+    for n in 20..40 {
+        lab.rec(
+            MIB,
+            &file(n, 1, ROOT, &format!("f{n}.txt"), t(10 + u64::from(n)), None).size(4096),
+        );
+    }
+    files(&mut lab, 8 * MIB, 100..300, ROOT, 900); // larger and newer
+    let run = lab.run(None);
+    let anchor = run.inst(MIB + 20 * 4096).unwrap();
+    assert_eq!(run.layout.anchors(), vec![anchor]);
+    assert_eq!(run.layout.main(), Some(anchor));
+}
+
+#[test]
 fn d8_among_anchors_the_newest_format_wins() {
     // Two partitions, each a current volume with old records at its $MFT.
     let mut lab = Lab::new(40);
@@ -561,7 +582,7 @@ fn s2_validated_other_and_older_volumes_are_protected_unvalidated_ones_not() {
     let mut lab = Lab::new(32);
     // Main: a volume at 0 whose boot sector says 8 MiB (its MFT LCN names
     // no record 0: not a current volume).
-    lab.put(0, &boot_sector(512, 8, 16383, 100, 8, -10, 1, 0));
+    lab.put(0, &boot_sector(512, 8, 16384, 100, 8, -10, 1, 0));
     mft_volume(&mut lab, 0, 256, t(1000));
     // Older: the same volume offset, older times, files reaching 23 MiB.
     mft_volume(&mut lab, 0, 2048, t(10));
@@ -1088,7 +1109,10 @@ fn overrides_survive_a_resumed_scan_that_adds_lower_records() {
     let mut ov2 = ov.clone();
     ov2.set_kind(full.store(), &full.layout, fb, None);
     assert!(ov2.kinds().is_empty());
-    assert_eq!(lab.run_with(None, &ov2).kind(5 * MIB), Some(InstanceKind::Older));
+    assert_eq!(
+        lab.run_with(None, &ov2).kind(5 * MIB),
+        Some(InstanceKind::Older)
+    );
 }
 
 #[test]

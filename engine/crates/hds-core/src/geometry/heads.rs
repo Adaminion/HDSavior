@@ -61,6 +61,7 @@ pub struct Heads {
     fresh: Vec<u64>,
     source: Option<RangedSource>,
     reads: u64,
+    misses: u64,
 }
 
 impl fmt::Debug for Heads {
@@ -135,6 +136,16 @@ impl Heads {
         self.reads
     }
 
+    /// Heads asked for that were not stored while no source was attached
+    /// (those files were left unchecked). Non-zero means the analysis is
+    /// not the one a source would give: the set of sampled files (F3)
+    /// depends on the overwritten set, so a `LIVE` snapshot replaced since
+    /// the heads were stored can ask for others. Attach the source and
+    /// analyse again (and [`save_new`](Heads::save_new)) to make it so.
+    pub fn misses(&self) -> u64 {
+        self.misses
+    }
+
     /// The stored head at `offset`, if known.
     pub fn stored(&self, offset: u64) -> Option<Head> {
         self.known.get(&offset).copied()
@@ -155,6 +166,7 @@ impl Heads {
             return Ok(Some(*h));
         }
         let Some(src) = &self.source else {
+            self.misses = self.misses.saturating_add(1);
             return Ok(None);
         };
         let len = u64::try_from(SNIFF_LEN).unwrap_or(64);
