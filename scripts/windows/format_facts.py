@@ -138,6 +138,8 @@ def summary(rec):
         "names": [[n["name"], n["parent_record"], n["parent_sequence"], n["namespace"]]
                   for n in rec.get("names", [])],
         "si": si_times(rec), "data": data, "attribute_list": attr_list,
+        "fn_times": [{k: n.get(k) for k in ("created", "modified", "mft_changed", "accessed")}
+                     for n in rec.get("names", [])],
     }
 
 
@@ -336,12 +338,34 @@ def cmd_post(a):
             t["os_mft_changed_after_copy_start"] = t.get("os_mft_changed_after_copy_start", 0) + 1
         if os_t.get("mft_changed") is not None and os_t["mft_changed"] == si["mft_changed"]:
             t["raw_si_equals_os"] = t.get("raw_si_equals_os", 0) + 1
+        fn = rec.get("fn_times") or []
+        fn_latest = max((v for n in fn for v in n.values() if isinstance(v, int)), default=None)
+        if fn_latest is not None and fn_latest >= e["copy_started"]:
+            t["fn_latest_after_copy_start"] = t.get("fn_latest_after_copy_start", 0) + 1
         if len(t.setdefault("examples", [])) < 3:
-            t["examples"].append({"copy_started": e["copy_started"], "raw_si": si, "os": os_t,
+            t["examples"].append({"copy_started": e["copy_started"], "raw_si": si, "os": os_t, "raw_fn": fn,
                                   "source": {"created": e.get("source_created"),
                                              "modified": e.get("source_modified"),
                                              "mft_changed": e.get("source_mft_changed")}})
     facts["timestamps_after_copy"] = ts
+
+    # 4b. Ordinary old files: is max($SI MFT-change, $FILE_NAME times) a "written on this volume" time?
+    olds = [e for e in truth["entries"] if e["phase"] == "old" and not e.get("directory")]
+    fn_vs_si = {"files": 0, "fn_latest_le_si_mft_changed": 0, "fn_created_eq_si_created": 0, "examples": []}
+    for e in olds:
+        rec = pre["records"].get(str(e["frn"] & ((1 << 48) - 1)))
+        if not rec or not rec.get("si") or not rec.get("fn_times"):
+            continue
+        si, fn = rec["si"], rec["fn_times"]
+        fn_latest = max((v for n in fn for v in n.values() if isinstance(v, int)), default=None)
+        fn_vs_si["files"] += 1
+        if fn_latest is not None and fn_latest <= si["mft_changed"]:
+            fn_vs_si["fn_latest_le_si_mft_changed"] += 1
+        if any(n.get("created") == si["created"] for n in fn):
+            fn_vs_si["fn_created_eq_si_created"] += 1
+        if len(fn_vs_si["examples"]) < 3:
+            fn_vs_si["examples"].append({"path": e["path"], "si": si, "fn": fn})
+    facts["fn_vs_si_old_files"] = fn_vs_si
 
     # 5. Slot reuse: deleted files and the files created right after them.
     deleted = sorted(e["frn"] & ((1 << 48) - 1) for e in truth["entries"] if e["phase"] == "deleted")

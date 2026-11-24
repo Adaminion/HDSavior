@@ -251,14 +251,17 @@ were checked had byte-identical content through its old runlist after the format
 files' slots (471–480) were taken at once by the next 10 files created, so a deleted file's record is
 normally gone as soon as anything new is written. Copies from another volume: robocopy `/COPY:DAT`
 keeps creation and modified time, Copy-Item and Move-Item (copy + delete across volumes) keep only the
-modified time. **Open and important for ALGORITHMS D2/D3:** in the raw `$SI` of all 60 copies the
-MFT-change time was *older* than the start of the copy. The third run records the four times the
-system reports for source and copy, to tell "the copy tools carry the MFT-change time over" from "the
-raw record was not flushed yet". If copies do carry old MFT-change times, a volume restored from a
-backup with robocopy has a whole generation of records whose times say nothing about when they were
-written, and the D2 fallback (at most a quarter of timed records out of order) would not cover it.
-The file meant to have thousands of runs got one run (sparse files allocate in 64 KiB units); the
-third run writes one block every 128 KiB.
+modified time. **Confirmed and important for ALGORITHMS C, D2/D3, D7 and E6 [CI]:**
+robocopy, Copy-Item and Move-Item all carry the source's `$STANDARD_INFORMATION` MFT-change time over to
+the copy, to the 100 ns tick (60 of 60; the raw `$SI`, the time the system reports and the source's time
+are identical, so this is not an unflushed record). A volume filled from a backup therefore holds
+records whose `$SI` times say nothing about when they were written to this volume: a whole generation
+can look years old. Candidate remedy, being measured: `$FILE_NAME` times are written when the name is
+created on the volume and cannot be set through the file API, so "the time this record was last
+written here" would be the latest of the `$SI` MFT-change time and the record's `$FILE_NAME` times.
+A sparse file with one 4 KiB block every 128 KiB (1500 blocks) got a resident `$ATTRIBUTE_LIST`
+with 19 entries and 17 extension records (1560–1576), all intact after the format. (With one block
+every 8 KiB it got one run: sparse files allocate in 64 KiB units.)
 
 ## 8. Samples and how to re-check
 
