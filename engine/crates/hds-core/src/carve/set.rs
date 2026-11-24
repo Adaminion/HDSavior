@@ -72,7 +72,9 @@ impl CarveRun {
     /// Total bytes of the files.
     #[must_use]
     pub fn bytes(&self) -> u64 {
-        self.files.iter().fold(0_u64, |a, f| a.saturating_add(f.len()))
+        self.files
+            .iter()
+            .fold(0_u64, |a, f| a.saturating_add(f.len()))
     }
 }
 
@@ -158,7 +160,10 @@ impl CarvedSet {
         }
         let mut sorted;
         let mut added = added;
-        if !added.windows(2).all(|w| matches!(w, [a, b] if a.offset() < b.offset())) {
+        if !added
+            .windows(2)
+            .all(|w| matches!(w, [a, b] if a.offset() < b.offset()))
+        {
             // not what a job produces; keep the set sorted all the same
             sorted = added.to_vec();
             sorted.sort_by_key(CarvedFile::offset);
@@ -187,7 +192,10 @@ impl CarvedSet {
     /// the module documentation describes. An empty block gives an empty
     /// set.
     pub fn from_session(session: &Session) -> Result<CarvedSet, CarvedDecodeError> {
-        Self::from_payloads(session.opaque(OpaqueKind::Carved), session.meta().range.clone())
+        Self::from_payloads(
+            session.opaque(OpaqueKind::Carved),
+            session.meta().range.clone(),
+        )
     }
 
     /// [`from_session`](Self::from_session) on bare payloads, with the
@@ -367,7 +375,10 @@ impl Header {
         .ok_or(Problem("invalid geometry"))?;
         let count = le_u64(b, 24).ok_or(Problem("cut short"))?;
         // the count must match the bytes present: nothing is sized by it
-        let body = b.len().checked_sub(HEADER_LEN).ok_or(Problem("cut short"))?;
+        let body = b
+            .len()
+            .checked_sub(HEADER_LEN)
+            .ok_or(Problem("cut short"))?;
         if body % FILE_LEN != 0 || u64::try_from(body / FILE_LEN).ok() != Some(count) {
             return Err(Problem("file count does not match the payload"));
         }
@@ -445,11 +456,7 @@ impl CarvedDecodeError {
 
 impl fmt::Display for CarvedDecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "carved files, payload {}: {}",
-            self.payload, self.reason
-        )
+        write!(f, "carved files, payload {}: {}", self.payload, self.reason)
     }
 }
 

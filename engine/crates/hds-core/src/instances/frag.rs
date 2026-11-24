@@ -114,7 +114,12 @@ pub(crate) fn build(store: &ScanStore, live: &LiveIndex, timed: Timed) -> Frags 
             records: f
                 .records
                 .iter()
-                .filter_map(|&id| store.record(id).and_then(|r| r.record_number()).map(|k| (k, id)))
+                .filter_map(|&id| {
+                    store
+                        .record(id)
+                        .and_then(|r| r.record_number())
+                        .map(|k| (k, id))
+                })
                 .collect(),
             segments: Vec::new(),
         })
@@ -234,7 +239,8 @@ fn place_unnumbered(
         let from = origin
             .saturating_add(i128::from(lo).saturating_sub(D1_REACH).saturating_mul(size))
             .max(0);
-        let to = origin.saturating_add(i128::from(hi).saturating_add(D1_REACH).saturating_mul(size));
+        let to =
+            origin.saturating_add(i128::from(hi).saturating_add(D1_REACH).saturating_mul(size));
         if to < 0 {
             continue;
         }
@@ -421,8 +427,10 @@ fn cut_fragment(store: &ScanStore, recs: &[(u32, RecordId)], timed: Timed) -> Cu
             continue;
         }
         let Some(r) = store.record(id) else { continue };
-        let mut refs: Vec<(u64, u16, bool)> =
-            store.names(id).map(|n| (n.parent.number(), n.parent.sequence(), true)).collect();
+        let mut refs: Vec<(u64, u16, bool)> = store
+            .names(id)
+            .map(|n| (n.parent.number(), n.parent.sequence(), true))
+            .collect();
         if r.is_extension() {
             refs.push((r.base().number(), r.base().sequence(), false));
         }
@@ -431,7 +439,9 @@ fn cut_fragment(store: &ScanStore, recs: &[(u32, RecordId)], timed: Timed) -> Cu
             let Ok(pos) = recs.binary_search_by_key(&n32, |&(x, _)| x) else {
                 continue;
             };
-            let Some(&(_, qid)) = recs.get(pos) else { continue };
+            let Some(&(_, qid)) = recs.get(pos) else {
+                continue;
+            };
             if qid == id || !cand(qid) {
                 continue;
             }
@@ -538,7 +548,10 @@ impl Fallback {
             }
         }
         for i in (1..size).rev() {
-            let l = tree.get(i.saturating_mul(2)).copied().unwrap_or((u64::MAX, 0));
+            let l = tree
+                .get(i.saturating_mul(2))
+                .copied()
+                .unwrap_or((u64::MAX, 0));
             let r = tree
                 .get(i.saturating_mul(2).saturating_add(1))
                 .copied()
@@ -627,14 +640,19 @@ impl LazyMin {
 
     fn build(&mut self, node: usize, l: usize, r: usize, init: &[u64]) {
         if r.saturating_sub(l) == 1 {
-            let v = init.get(l).map_or(i64::MAX, |&x| i64::try_from(x).unwrap_or(i64::MAX));
+            let v = init
+                .get(l)
+                .map_or(i64::MAX, |&x| i64::try_from(x).unwrap_or(i64::MAX));
             if let Some(s) = self.min.get_mut(node) {
                 *s = v;
             }
             return;
         }
         let m = l.saturating_add(r.saturating_sub(l) / 2);
-        let (a, b) = (node.saturating_mul(2), node.saturating_mul(2).saturating_add(1));
+        let (a, b) = (
+            node.saturating_mul(2),
+            node.saturating_mul(2).saturating_add(1),
+        );
         self.build(a, l, m, init);
         self.build(b, m, r, init);
         let v = self.get(a).min(self.get(b));
@@ -671,7 +689,10 @@ impl LazyMin {
             return;
         }
         let m = l.saturating_add(r.saturating_sub(l) / 2);
-        let (ca, cb) = (node.saturating_mul(2), node.saturating_mul(2).saturating_add(1));
+        let (ca, cb) = (
+            node.saturating_mul(2),
+            node.saturating_mul(2).saturating_add(1),
+        );
         self.add_rec(ca, l, m, a, b, v);
         self.add_rec(cb, m, r, a, b, v);
         let lz = self.lazy.get(node).copied().unwrap_or(0);

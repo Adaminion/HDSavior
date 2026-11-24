@@ -13,7 +13,7 @@
 
 use hds_carve::{Confidence, FileKind, Measured};
 use hds_io::RangeSet;
-use hds_recover::{Flag, FileSource, FlagSet, Rating, Run};
+use hds_recover::{FileSource, Flag, FlagSet, Rating, Run};
 
 use super::set::encode_for_tests;
 use super::*;
@@ -23,7 +23,15 @@ fn geometry() -> CarveGeometry {
 }
 
 fn file(offset: u64, len: u64, kind: FileKind, ext: &str, verified: bool) -> CarvedFile {
-    CarvedFile::new(offset, len, kind, ExtName::new(ext).unwrap(), verified, true).unwrap()
+    CarvedFile::new(
+        offset,
+        len,
+        kind,
+        ExtName::new(ext).unwrap(),
+        verified,
+        true,
+    )
+    .unwrap()
 }
 
 fn run(kinds: &[FileKind], files: Vec<CarvedFile>) -> CarveRun {
@@ -45,7 +53,10 @@ fn kind_sets() {
     let some: KindSet = [FileKind::Zip, FileKind::Jpeg].into_iter().collect();
     assert!(some.contains(FileKind::Jpeg) && some.contains(FileKind::Zip));
     assert!(!some.contains(FileKind::Png));
-    assert_eq!(some.iter().collect::<Vec<_>>(), [FileKind::Jpeg, FileKind::Zip]);
+    assert_eq!(
+        some.iter().collect::<Vec<_>>(),
+        [FileKind::Jpeg, FileKind::Zip]
+    );
     assert!(KindSet::EMPTY.is_empty() && !some.is_empty());
 }
 
@@ -88,13 +99,35 @@ fn a_carved_file_as_node_and_plan() {
     assert_eq!(f.name(), "f0000000123.docx");
     assert_eq!(f.path(), "[Carved files]/docx/f0000000123.docx");
     assert_eq!(f.folder_name(), "docx");
-    assert_eq!((f.kind(), f.ext(), f.len(), f.end()), (FileKind::Zip, "docx", 70_000, 123 * 512 + 70_000));
+    assert_eq!(
+        (f.kind(), f.ext(), f.len(), f.end()),
+        (FileKind::Zip, "docx", 70_000, 123 * 512 + 70_000)
+    );
     // more than ten digits when the disk is that large
     let far = file(20_000_000_000_000, 10, FileKind::Png, "png", true);
     assert_eq!(far.name(), "f39062500000.png");
-    assert!(CarvedFile::new(5, 0, FileKind::Png, ExtName::new("png").unwrap(), true, true).is_none());
-    assert!(CarvedFile::new(u64::MAX, 1, FileKind::Png, ExtName::new("png").unwrap(), true, true).is_none());
-    assert_eq!(far.first_lcn(geometry()), Some((20_000_000_000_000 - (1 << 20)) / 4096));
+    assert!(CarvedFile::new(
+        5,
+        0,
+        FileKind::Png,
+        ExtName::new("png").unwrap(),
+        true,
+        true
+    )
+    .is_none());
+    assert!(CarvedFile::new(
+        u64::MAX,
+        1,
+        FileKind::Png,
+        ExtName::new("png").unwrap(),
+        true,
+        true
+    )
+    .is_none());
+    assert_eq!(
+        far.first_lcn(geometry()),
+        Some((20_000_000_000_000 - (1 << 20)) / 4096)
+    );
 
     // rating: good only with a verified end and no damage
     let none = RangeSet::new();
@@ -103,11 +136,11 @@ fn a_carved_file_as_node_and_plan() {
     assert!(unverified.rating_context().carved_end_unverified);
     assert!(!unverified.rating_context().geometry_not_validated);
     assert_eq!(unverified.rating(FlagSet::EMPTY), Rating::Uncertain);
-    let over: RangeSet = [f.end() - 1..f.end() + 5].into_iter().collect();
+    let over: RangeSet = std::iter::once(f.end() - 1..f.end() + 5).collect();
     let flags = f.health_flags(&over, &none);
     assert_eq!(flags, FlagSet::of(&[Flag::Overwritten]));
     assert_eq!(f.rating(flags), Rating::Damaged);
-    let touching: RangeSet = [f.end()..f.end() + 5].into_iter().collect();
+    let touching: RangeSet = std::iter::once(f.end()..f.end() + 5).collect();
     assert!(f.health_flags(&touching, &touching).is_empty());
     assert_eq!(
         f.health_flags(&none, &over),
@@ -140,7 +173,10 @@ fn a_carved_file_as_node_and_plan() {
     let root = carved_files_folder(1, None);
     assert_eq!(String::from_utf16(&root.name).unwrap(), "[Carved files]");
     let sub = ext_folder(9, 1, "docx");
-    assert_eq!((sub.parent, String::from_utf16(&sub.name).unwrap()), (Some(1), "docx".to_string()));
+    assert_eq!(
+        (sub.parent, String::from_utf16(&sub.name).unwrap()),
+        (Some(1), "docx".to_string())
+    );
 }
 
 #[test]
@@ -150,7 +186,12 @@ fn runs_replace_their_kinds_only() {
     let mut set = CarvedSet::new();
     set.apply(&run(&[FileKind::Jpeg], vec![jpg(1 << 20), jpg(3 << 20)]));
     set.apply(&run(&[FileKind::Zip], vec![zip(2 << 20)]));
-    let offsets = |s: &CarvedSet| s.files().iter().map(|f| f.offset() >> 20).collect::<Vec<_>>();
+    let offsets = |s: &CarvedSet| {
+        s.files()
+            .iter()
+            .map(|f| f.offset() >> 20)
+            .collect::<Vec<_>>()
+    };
     assert_eq!(offsets(&set), [1, 2, 3]);
     // a new JPEG run replaces both JPEGs, the ZIP stays
     set.apply(&run(&[FileKind::Jpeg], vec![jpg(5 << 20)]));
@@ -185,8 +226,14 @@ fn the_block_folds_like_apply() {
     // applying them in memory gives
     let jpg = |o| file(o, 1000, FileKind::Jpeg, "jpg", true);
     let runs = vec![
-        run(&[FileKind::Jpeg, FileKind::Zip], vec![jpg(1 << 20), file(2 << 20, 9, FileKind::Zip, "xlsx", false)]),
-        run(&[FileKind::Png], vec![file(4 << 20, 9, FileKind::Png, "png", true)]),
+        run(
+            &[FileKind::Jpeg, FileKind::Zip],
+            vec![jpg(1 << 20), file(2 << 20, 9, FileKind::Zip, "xlsx", false)],
+        ),
+        run(
+            &[FileKind::Png],
+            vec![file(4 << 20, 9, FileKind::Png, "png", true)],
+        ),
         run(&[FileKind::Jpeg], vec![jpg(6 << 20)]),
         run(&[FileKind::Gif], vec![]),
     ];
@@ -201,10 +248,17 @@ fn the_block_folds_like_apply() {
     assert_eq!(set.len(), 3);
     // compaction gives the same set from one payload
     let compact = encode_for_tests(KindSet::all(), geometry(), set.files());
-    assert_eq!(CarvedSet::from_payloads(&[compact.clone()], session_range()).unwrap(), set);
+    assert_eq!(
+        CarvedSet::from_payloads(std::slice::from_ref(&compact), session_range()).unwrap(),
+        set
+    );
     // a geometry change in the middle drops what came before
     let other = CarveGeometry::new(8192, 0).unwrap();
-    payloads.push(encode_for_tests(KindSet::EMPTY, other, &[file(9 << 20, 5, FileKind::Gif, "gif", true)]));
+    payloads.push(encode_for_tests(
+        KindSet::EMPTY,
+        other,
+        &[file(9 << 20, 5, FileKind::Gif, "gif", true)],
+    ));
     let loaded = CarvedSet::from_payloads(&payloads, session_range()).unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded.geometry(), Some(other));
@@ -214,9 +268,16 @@ fn the_block_folds_like_apply() {
         encode_for_tests(KindSet::EMPTY, geometry(), &[jpg(2 << 20)]),
         encode_for_tests([FileKind::Png].into_iter().collect(), geometry(), &[]),
     ];
-    assert_eq!(CarvedSet::from_payloads(&cont, session_range()).unwrap().len(), 2);
+    assert_eq!(
+        CarvedSet::from_payloads(&cont, session_range())
+            .unwrap()
+            .len(),
+        2
+    );
     // empty
-    assert!(CarvedSet::from_payloads(&[], session_range()).unwrap().is_empty());
+    assert!(CarvedSet::from_payloads(&[], session_range())
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -229,8 +290,14 @@ fn hostile_payloads_are_refused() {
             file(2 << 20, 100, FileKind::Mp4, "mov", false),
         ],
     );
-    assert_eq!(CarvedSet::from_payloads(&[good.clone()], session_range()).unwrap().len(), 2);
-    let refused = |p: Vec<u8>| CarvedSet::from_payloads(&[good.clone(), p], session_range()).unwrap_err();
+    assert_eq!(
+        CarvedSet::from_payloads(std::slice::from_ref(&good), session_range())
+            .unwrap()
+            .len(),
+        2
+    );
+    let refused =
+        |p: Vec<u8>| CarvedSet::from_payloads(&[good.clone(), p], session_range()).unwrap_err();
     // cut anywhere
     for cut in 0..good.len() {
         assert_eq!(refused(good[..cut].to_vec()).payload, 1, "cut {cut}");
@@ -270,7 +337,16 @@ fn hostile_payloads_are_refused() {
     let mut p = good.clone();
     p[at + 8..at + 16].copy_from_slice(&u64::MAX.to_le_bytes());
     refused(p);
-    for (byte, value) in [(16, 0u8), (16, 18), (17, 4), (18, 0), (18, 9), (19, b'A'), (22, b'x'), (27, 1)] {
+    for (byte, value) in [
+        (16, 0u8),
+        (16, 18),
+        (17, 4),
+        (18, 0),
+        (18, 9),
+        (19, b'A'),
+        (22, b'x'),
+        (27, 1),
+    ] {
         let mut p = good.clone();
         p[at + byte] = value;
         refused(p);
@@ -298,4 +374,155 @@ fn files_out_of_order_in_a_run_keep_the_set_sorted() {
     ));
     let offsets: Vec<u64> = set.files().iter().map(|f| f.offset() >> 20).collect();
     assert_eq!(offsets, [1, 3]);
+}
+
+// ------------------------------------------------- next to MFT records --
+
+mod next_to_mft_records {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    use hds_carve::FileKind;
+    use hds_io::testing::MemSource;
+    use hds_io::{BlockSource, RangeSet, RangedSource};
+
+    use super::super::*;
+    use crate::scan::{scan, NoObserver, ScanOptions, ScanStatus};
+    use crate::session::{Session, SessionMeta, SourceIdentity};
+    use crate::store::DataExtent;
+    use crate::test_build::{fref, runlist, Rec};
+
+    fn sample(name: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../hds-carve/tests/data")
+            .join(name);
+        std::fs::read(path).unwrap()
+    }
+
+    const C: u64 = 4096;
+
+    fn file_record(number: u32, in_use: bool, name: &str, lcn: u64, len: u64) -> Vec<u8> {
+        let clusters = len.div_ceil(C);
+        Rec::new(number)
+            .flags(u16::from(in_use))
+            .si([1, 2, 3, 4], 0)
+            .name(fref(5, 5), name, 1, 0)
+            .data_extent(
+                0,
+                i64::try_from(clusters).unwrap() - 1,
+                (clusters * C, len, len),
+                &runlist(&[(Some(lcn), clusters)]),
+                0,
+            )
+            .build()
+    }
+
+    /// The protected files of I2 (a), as the catalog derives them: the
+    /// clusters of every in-use record's runs, under the geometry.
+    fn protected_from_store(session: &Session, g: CarveGeometry) -> RangeSet {
+        let store = session.store();
+        let mut set = RangeSet::new();
+        for (id, record) in store.records() {
+            if !record.is_in_use() {
+                continue;
+            }
+            for extent in store.data_extents(id) {
+                if let DataExtent::NonResident(e) = extent {
+                    for run in e.runs() {
+                        if let Some(lcn) = run.lcn {
+                            let start = g.volume_offset() + lcn * g.cluster_size();
+                            set.insert(start..start + run.length * g.cluster_size());
+                        }
+                    }
+                }
+            }
+        }
+        set
+    }
+
+    #[test]
+    fn files_next_to_old_mft_records() {
+        let g = CarveGeometry::new(C, 0).unwrap();
+        let png = sample("png_rgb.png");
+        let jpg = sample("jpeg_baseline.jpg");
+        let mp3 = sample("mp3_lame_cbr_info_first.mp3");
+        let gif = sample("gif_static.gif");
+        let mut disk = vec![0_u8; 4 << 20];
+        let mut put = |at: u64, bytes: &[u8]| {
+            disk[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+        };
+        // A JPEG that ends in the cluster right in front of the old MFT
+        put(2 * C, &jpg);
+        // the old MFT at cluster 4: an in-use PNG (protected), a deleted
+        // GIF (its clusters are free for carving) and filler records
+        let mut mft = Vec::new();
+        for n in 16..48_u32 {
+            mft.extend(match n {
+                30 => file_record(n, true, "kept.png", 100, png.len() as u64),
+                31 => file_record(n, false, "gone.gif", 200, gif.len() as u64),
+                _ => Rec::new(n)
+                    .si([1, 2, 3, 4], 0)
+                    .name(fref(5, 5), &format!("f{n}"), 1, 0)
+                    .build(),
+            });
+        }
+        put(4 * C, &mft);
+        put(100 * C, &png);
+        put(200 * C, &gif);
+        // an MP3 (complete after any frame) with old MFT records right
+        // behind it, in its last cluster
+        let mp3_at = 300 * C;
+        put(mp3_at, &mp3);
+        let behind = mp3_at + mp3.len() as u64;
+        let behind = behind.div_ceil(1024) * 1024;
+        put(behind, &mft[..4096]);
+
+        let source: Arc<dyn BlockSource> = Arc::new(MemSource::new(disk));
+        let range = 0..source.size();
+        let options = ScanOptions::default();
+        let meta =
+            SessionMeta::new(SourceIdentity::from(&source.info()), range.clone(), options).unwrap();
+        let mut session = Session::new(meta);
+        let ranged = RangedSource::new(source.clone(), range.clone()).unwrap();
+        let cancel = AtomicBool::new(false);
+        let summary = scan(&ranged, &options, &mut session, &mut NoObserver, &cancel);
+        assert_eq!(summary.status, ScanStatus::Completed);
+        assert!(session.store().record_count() >= 32);
+
+        let protected = protected_from_store(&session, g);
+        assert!(protected.contains(100 * C) && !protected.contains(200 * C));
+        let input = CarveInput {
+            kinds: KindSet::all(),
+            geometry: g,
+            hits: session.store().carve_hits_sorted(),
+            done: session.store().done().clone(),
+            protected_files: protected,
+            overwritten: RangeSet::new(),
+            live_allocated: RangeSet::new(),
+        };
+        let (run, summary) = Carver::new(input, range).run(&ranged, &mut NoCarveObserver, &cancel);
+        assert_eq!(summary.status, CarveStatus::Completed);
+        let found: Vec<(u64, u64, FileKind)> = run
+            .files
+            .iter()
+            .map(|f| (f.offset() / C, f.len(), f.kind()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (2, jpg.len() as u64, FileKind::Jpeg),
+                (200, gif.len() as u64, FileKind::Gif),
+                (300, mp3.len() as u64, FileKind::Mp3),
+            ]
+        );
+        // the MP3 is complete after any frame: its end is not verified
+        assert!(!run.files[2].end_verified() && run.files[0].end_verified());
+        // I4: the carved GIF lies inside the deleted file's extents
+        let mut set = CarvedSet::new();
+        set.apply(&run);
+        assert!(set
+            .covered()
+            .intersects(200 * C..200 * C + gif.len() as u64));
+        assert!(!set.covered().intersects(100 * C..101 * C));
+    }
 }

@@ -121,7 +121,9 @@ impl LiveIndex {
             let Ok(id) = u32::try_from(i).map(RecordId) else {
                 continue;
             };
-            let Some(rec) = store.record(id) else { continue };
+            let Some(rec) = store.record(id) else {
+                continue;
+            };
             let off = rec.disk_offset();
             let Some(cv) = snapshot
                 .volumes
@@ -268,16 +270,22 @@ impl LiveIndex {
 }
 
 /// C3 for one current volume.
-fn classify_volume(store: &ScanStore, by_offset: &[RecordId], cv: &CurrentVolume, classes: &mut [u8]) {
+fn classify_volume(
+    store: &ScanStore,
+    by_offset: &[RecordId],
+    cv: &CurrentVolume,
+    classes: &mut [u8],
+) {
     let rs = u64::from(cv.record_size);
     // Records in slots: (record, slot number).
     let mut slotted: Vec<(RecordId, u64)> = Vec::new();
     for (range, vpos) in cv.slot_ranges() {
-        let first = by_offset.partition_point(|&id| {
-            store.record(id).map_or(0, |r| r.disk_offset()) < range.start
-        });
+        let first = by_offset
+            .partition_point(|&id| store.record(id).map_or(0, |r| r.disk_offset()) < range.start);
         for &id in by_offset.get(first..).unwrap_or(&[]) {
-            let Some(rec) = store.record(id) else { continue };
+            let Some(rec) = store.record(id) else {
+                continue;
+            };
             let off = rec.disk_offset();
             if off >= range.end {
                 break;
@@ -294,7 +302,9 @@ fn classify_volume(store: &ScanStore, by_offset: &[RecordId], cv: &CurrentVolume
     // Pass 1: in use per the bitmap, or decided by the change time.
     let mut undecided: Vec<(RecordId, u64)> = Vec::new();
     for &(id, n) in &slotted {
-        let Some(rec) = store.record(id) else { continue };
+        let Some(rec) = store.record(id) else {
+            continue;
+        };
         let class = if cv.slot_in_use(n) {
             Some(RecordClass::Live)
         } else {
@@ -318,7 +328,9 @@ fn classify_volume(store: &ScanStore, by_offset: &[RecordId], cv: &CurrentVolume
     // with the in-use flag clear: old only when their base reference
     // resolves to an old record of the same $MFT.
     for (id, _) in undecided {
-        let Some(rec) = store.record(id) else { continue };
+        let Some(rec) = store.record(id) else {
+            continue;
+        };
         let base: FileRef = rec.base();
         let base_old = cv
             .slot_offset(base.number())
@@ -342,11 +354,12 @@ fn classify_volume(store: &ScanStore, by_offset: &[RecordId], cv: &CurrentVolume
     }
     // Records inside $MFTMirr are live.
     for m in &cv.mirror {
-        let first = by_offset.partition_point(|&id| {
-            store.record(id).map_or(0, |r| r.disk_offset()) < m.start
-        });
+        let first = by_offset
+            .partition_point(|&id| store.record(id).map_or(0, |r| r.disk_offset()) < m.start);
         for &id in by_offset.get(first..).unwrap_or(&[]) {
-            let Some(rec) = store.record(id) else { continue };
+            let Some(rec) = store.record(id) else {
+                continue;
+            };
             if rec.disk_offset() >= m.end {
                 break;
             }

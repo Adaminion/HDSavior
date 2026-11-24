@@ -115,7 +115,11 @@ pub(crate) struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     /// Checks the tag and the version (only `version` is understood).
-    pub(crate) fn new(bytes: &'a [u8], tag: &[u8; 4], version: u8) -> Result<Reader<'a>, DecodeError> {
+    pub(crate) fn new(
+        bytes: &'a [u8],
+        tag: &[u8; 4],
+        version: u8,
+    ) -> Result<Reader<'a>, DecodeError> {
         let mut r = Reader { bytes, pos: 0 };
         let got = r.take(4)?;
         if got != tag {
@@ -153,7 +157,9 @@ impl<'a> Reader<'a> {
 
     pub(crate) fn u8(&mut self) -> Result<u8, DecodeError> {
         let s = self.take(1)?;
-        s.first().copied().ok_or_else(|| DecodeError::new("payload is cut short"))
+        s.first()
+            .copied()
+            .ok_or_else(|| DecodeError::new("payload is cut short"))
     }
 
     pub(crate) fn bool(&mut self) -> Result<bool, DecodeError> {
@@ -166,13 +172,17 @@ impl<'a> Reader<'a> {
 
     pub(crate) fn u32(&mut self) -> Result<u32, DecodeError> {
         let s = self.take(4)?;
-        let a: [u8; 4] = s.try_into().map_err(|_| DecodeError::new("payload is cut short"))?;
+        let a: [u8; 4] = s
+            .try_into()
+            .map_err(|_| DecodeError::new("payload is cut short"))?;
         Ok(u32::from_le_bytes(a))
     }
 
     pub(crate) fn u64(&mut self) -> Result<u64, DecodeError> {
         let s = self.take(8)?;
-        let a: [u8; 8] = s.try_into().map_err(|_| DecodeError::new("payload is cut short"))?;
+        let a: [u8; 8] = s
+            .try_into()
+            .map_err(|_| DecodeError::new("payload is cut short"))?;
         Ok(u64::from_le_bytes(a))
     }
 

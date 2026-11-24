@@ -18,7 +18,12 @@
 //!    is skipped (I2 c). A ZIP candidate that runs into the read limit is
 //!    measured once more with the limit raised to its bound. Every read goes
 //!    through [`hds_recover::CarveReader`]: resilient, inside the session
-//!    range, cancellable.
+//!    range, cancellable. A read that meets unreadable sectors moves the
+//!    bound in front of them and the candidate is measured again: a file
+//!    that ends before them is carved, one that needs them is dropped
+//!    (`unreadable`); a lost device ends the job (`source_lost`, S7). As at
+//!    any bound, a format that is complete at more than one place (MP3, a
+//!    PDF revision) can come back shorter; never reaching into them.
 //! 3. **Results (I3, I5).** The job returns a [`CarveRun`]: the kinds it
 //!    replaces and the [`CarvedFile`]s it found (all of them, or those found
 //!    before a cancel or a lost device). [`CarvedSet::apply`] replaces the

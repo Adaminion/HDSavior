@@ -1,12 +1,14 @@
 //! The carving job (ALGORITHMS I1 to I3).
 
+use std::cell::Cell;
 use std::fmt;
+use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use hds_carve::{try_measure, FileKind, Limits, MeasureError};
-use hds_io::{RangeSet, RangedSource};
+use hds_carve::{try_measure, FileKind, Limits, MeasureError, ReadAt};
+use hds_io::{BlockSource, RangeSet, RangedSource};
 use hds_recover::{CarveFailure as ReadFailure, CarveReader};
 use serde::Serialize;
 
@@ -348,6 +350,13 @@ impl Carver {
     }
 
     /// Measures one candidate.
+    ///
+    /// Reads come in blocks, and a block can reach past the end of the
+    /// file into an unreadable sector that the file does not need. When a
+    /// read fails on unreadable sectors, the candidate is measured again
+    /// with its bound moved to the start of the failed read: a file that
+    /// ends before is measured as if the sectors were the next file; one
+    /// that needs them is given up (`unreadable`).
     fn measure(
         &self,
         source: &RangedSource,
@@ -355,49 +364,113 @@ impl Carver {
         offset: u64,
         cancel: &AtomicBool,
     ) -> Outcome {
-        let max_len = self.bound(offset).saturating_sub(offset);
+        let mut max_len = self.bound(offset).saturating_sub(offset);
         let mut limits = Limits::DEFAULT;
-        let mut retried = false;
-        loop {
-            let reader = CarveReader::new(source, offset, max_len, cancel);
+        let mut zip_retried = false;
+        let mut met_bad_sectors = false;
+        for _ in 0..MAX_ATTEMPTS {
+            let reader = Watched {
+                inner: CarveReader::new(source, offset, max_len, cancel),
+                failed: Cell::new(None),
+            };
             match try_measure(kind, &reader, max_len, &limits) {
                 Ok(measured) => {
                     return match CarvedFile::from_measured(offset, kind, &measured) {
-                        Some(file) if file.end() <= offset.saturating_add(max_len) => {
-                            Outcome::File(file)
-                        }
+                        Some(file) if file.len() <= max_len => Outcome::File(file),
                         _ => Outcome::NotMeasurable,
                     };
                 }
-                Err(MeasureError::LimitReached) if kind == FileKind::Zip && !retried => {
+                Err(MeasureError::LimitReached) if kind == FileKind::Zip && !zip_retried => {
                     // I3: a ZIP that hits the read limit (streamed entries
                     // must be read to find their data descriptors) is tried
                     // once more with the limit raised to its bound
-                    retried = true;
+                    zip_retried = true;
                     limits = raised_limits(max_len);
                 }
                 Err(MeasureError::LimitReached | MeasureError::NotMeasurable) => {
-                    return Outcome::NotMeasurable
-                }
-                Err(MeasureError::Io(error)) => {
-                    return match reader.failure() {
-                        Some(ReadFailure::SourceLost) => Outcome::SourceLost(error.to_string()),
-                        Some(ReadFailure::Cancelled) => Outcome::Cancelled,
-                        // unreadable sectors drop the candidate (the file
-                        // would contain zeros where data was), and so does
-                        // anything else a read reported
-                        Some(ReadFailure::BadSectors | ReadFailure::Other) | None => {
-                            if cancel.load(Ordering::Relaxed) {
-                                Outcome::Cancelled
-                            } else {
-                                Outcome::Unreadable
-                            }
-                        }
+                    return if met_bad_sectors {
+                        Outcome::Unreadable
+                    } else {
+                        Outcome::NotMeasurable
                     };
+                }
+                Err(MeasureError::Io(error)) => match reader.inner.failure() {
+                    Some(ReadFailure::SourceLost) => return Outcome::SourceLost(error.to_string()),
+                    Some(ReadFailure::Cancelled) => return Outcome::Cancelled,
+                    _ if cancel.load(Ordering::Relaxed) => return Outcome::Cancelled,
+                    Some(ReadFailure::BadSectors) => {
+                        met_bad_sectors = true;
+                        let first_bad = reader.failed.get().and_then(|(at, len)| {
+                            first_unreadable(source, offset, at, len, cancel)
+                        });
+                        match first_bad {
+                            Some(at) if at > 0 && at < max_len => max_len = at,
+                            _ => return Outcome::Unreadable,
+                        }
+                    }
+                    // anything else a read reported drops the candidate
+                    Some(ReadFailure::Other) | None => return Outcome::Unreadable,
+                },
+            }
+        }
+        Outcome::Unreadable
+    }
+}
+
+/// Attempts per candidate: the ZIP retry and a few moves of the bound in
+/// front of unreadable sectors.
+const MAX_ATTEMPTS: u32 = 6;
+
+/// A [`CarveReader`] that remembers its first failed read (offset and
+/// length, relative to the candidate).
+struct Watched<'a> {
+    inner: CarveReader<'a>,
+    failed: Cell<Option<(u64, usize)>>,
+}
+
+impl ReadAt for Watched<'_> {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let result = self.inner.read_at(offset, buf);
+        if result.is_err() && self.failed.get().is_none() {
+            self.failed.set(Some((offset, buf.len())));
+        }
+        result
+    }
+}
+
+/// The first unreadable sector of the failed read `[at, at + len)` of the
+/// candidate at `start` (offsets relative to it), found by reading it again
+/// one sector at a time; `None` if it cannot be told (or the read now
+/// succeeds, or the device went away, or the job is cancelled).
+fn first_unreadable(
+    source: &RangedSource,
+    start: u64,
+    at: u64,
+    len: usize,
+    cancel: &AtomicBool,
+) -> Option<u64> {
+    let step = usize::try_from(source.sector_size()).ok()?.max(512);
+    let end = at.checked_add(u64::try_from(len).ok()?)?;
+    let probe = CarveReader::new(source, start, end, cancel);
+    let mut sector = vec![0_u8; step];
+    let mut pos = at;
+    while pos < end {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        match probe.read_at(pos, &mut sector) {
+            Ok(0) => return None,
+            Ok(_) => {}
+            Err(_) => {
+                return match probe.failure() {
+                    Some(ReadFailure::BadSectors) => Some(pos),
+                    _ => None,
                 }
             }
         }
+        pos = pos.checked_add(u64::try_from(step).ok()?)?;
     }
+    None
 }
 
 /// The limits of the ZIP retry: as many bytes as the bound allows, and

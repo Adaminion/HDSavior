@@ -192,9 +192,10 @@ impl CurrentVolume {
         let cs = u64::from(self.cluster_size);
         let vcn = pos.checked_div(cs)?;
         let within = pos.checked_rem(cs)?;
-        let run = self.mft_runs.iter().find(|r| {
-            r.vcn <= vcn && r.vcn.checked_add(r.clusters).is_some_and(|end| vcn < end)
-        })?;
+        let run = self
+            .mft_runs
+            .iter()
+            .find(|r| r.vcn <= vcn && r.vcn.checked_add(r.clusters).is_some_and(|end| vcn < end))?;
         let lcn = run.lcn?.checked_add(vcn.checked_sub(run.vcn)?)?;
         lcn.checked_mul(cs)?
             .checked_add(within)?
@@ -605,11 +606,14 @@ impl Stream {
     fn map(&self, vol_offset: u64, cs: u64, pos: u64) -> Option<u64> {
         let vcn = pos.checked_div(cs)?;
         let within = pos.checked_rem(cs)?;
-        let run = self.runs.iter().find(|r| {
-            r.vcn <= vcn && r.vcn.checked_add(r.clusters).is_some_and(|e| vcn < e)
-        })?;
+        let run = self
+            .runs
+            .iter()
+            .find(|r| r.vcn <= vcn && r.vcn.checked_add(r.clusters).is_some_and(|e| vcn < e))?;
         let lcn = run.lcn?.checked_add(vcn.checked_sub(run.vcn)?)?;
-        lcn.checked_mul(cs)?.checked_add(within)?.checked_add(vol_offset)
+        lcn.checked_mul(cs)?
+            .checked_add(within)?
+            .checked_add(vol_offset)
     }
 }
 
@@ -694,6 +698,9 @@ fn holders_of(entries: AttrListEntries<'_>) -> Vec<u64> {
     out
 }
 
+/// Receives the pieces of a stream: bytes and their unreadable parts.
+type Sink<'a> = dyn FnMut(&[u8], &[Range<u64>]) + 'a;
+
 /// Reads a whole stream (at most `len` bytes) and hands each piece to
 /// `sink` with the unreadable parts relative to the piece. Holes and
 /// unmapped clusters read as zeros and are reported unreadable when
@@ -704,7 +711,7 @@ fn read_stream(
     cs: u64,
     stream: &Stream,
     len: u64,
-    sink: &mut dyn FnMut(&[u8], &[Range<u64>]),
+    sink: &mut Sink<'_>,
 ) -> Result<bool, LiveError> {
     if let Some(bytes) = &stream.resident {
         let n = usize::try_from(len).unwrap_or(usize::MAX).min(bytes.len());
@@ -721,9 +728,11 @@ fn read_stream(
         if let Some(d0) = start_disk {
             // Extend while the next bytes map contiguously (whole run).
             let vcn = pos.checked_div(cs).unwrap_or(0);
-            if let Some(run) = stream.runs.iter().find(|r| {
-                r.vcn <= vcn && r.vcn.checked_add(r.clusters).is_some_and(|e| vcn < e)
-            }) {
+            if let Some(run) = stream
+                .runs
+                .iter()
+                .find(|r| r.vcn <= vcn && r.vcn.checked_add(r.clusters).is_some_and(|e| vcn < e))
+            {
                 let run_end = run.vcn.saturating_add(run.clusters).saturating_mul(cs);
                 contiguous = run_end.saturating_sub(pos).min(piece);
             }
@@ -739,14 +748,17 @@ fn read_stream(
                         complete = false;
                         let n = usize::try_from(contiguous).unwrap_or(0);
                         let zeros = vec![0u8; n];
-                        sink(&zeros, &[0..contiguous]);
+                        sink(&zeros, std::slice::from_ref(&(0..contiguous)));
                     }
                 }
             }
         }
         if contiguous == 0 {
             // A hole or unmapped: one cluster (or the rest) of zeros.
-            let n = cs.saturating_sub(pos.checked_rem(cs).unwrap_or(0)).min(piece).max(1);
+            let n = cs
+                .saturating_sub(pos.checked_rem(cs).unwrap_or(0))
+                .min(piece)
+                .max(1);
             let sparse = start_disk.is_none()
                 && stream.runs.iter().any(|r| {
                     r.lcn.is_none()
@@ -759,7 +771,7 @@ fn read_stream(
                 sink(&zeros, &[]);
             } else {
                 complete = false;
-                sink(&zeros, &[0..n]);
+                sink(&zeros, std::slice::from_ref(&(0..n)));
             }
             contiguous = n;
         }
@@ -770,11 +782,7 @@ fn read_stream(
 
 /// Reads and parses a record of size `rs` at `offset`; `None` when it
 /// cannot be read or parsed.
-fn read_record(
-    rd: &VolReader<'_>,
-    offset: u64,
-    rs: u32,
-) -> Result<Option<Vec<u8>>, LiveError> {
+fn read_record(rd: &VolReader<'_>, offset: u64, rs: u32) -> Result<Option<Vec<u8>>, LiveError> {
     match rd.read(offset, u64::from(rs))? {
         Some(b) if b.bad.is_empty() => Ok(Some(b.data)),
         _ => Ok(None),
@@ -892,7 +900,8 @@ fn read_volume(
     let map_mft = |f: &SystemFile, n: u64| -> Option<u64> {
         f.data.map(start, cs, n.checked_mul(u64::from(rs))?)
     };
-    let Some((mft, mut complete)) = read_system_file(rd, start, cs, rs, (0, mft_at), &map_mft)? else {
+    let Some((mft, mut complete)) = read_system_file(rd, start, cs, rs, (0, mft_at), &map_mft)?
+    else {
         return Ok(None);
     };
     let (initialized, real) = match mft.data.sizes {
@@ -935,7 +944,9 @@ fn read_volume(
         complete &= ok;
         for r in fill_bad {
             let lo = usize::try_from(r.start).unwrap_or(usize::MAX);
-            let hi = usize::try_from(r.end).unwrap_or(usize::MAX).min(bitmap.len());
+            let hi = usize::try_from(r.end)
+                .unwrap_or(usize::MAX)
+                .min(bitmap.len());
             if let Some(s) = bitmap.get_mut(lo..hi) {
                 s.fill(0xFF);
             }

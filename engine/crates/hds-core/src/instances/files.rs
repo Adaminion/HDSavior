@@ -52,14 +52,14 @@ impl GroupIndex {
                 .filter(|(_, r)| !r.is_extension());
             let mut matched = None;
             if let Some((b, br)) = base {
-                if x.is_in_use() && br.is_in_use() && br.sequence() == bref.sequence() {
-                    matched = Some(b);
-                } else if !x.is_in_use()
+                let both_in_use =
+                    x.is_in_use() && br.is_in_use() && br.sequence() == bref.sequence();
+                let both_free = !x.is_in_use()
                     && !br.is_in_use()
                     && br.has_attributes()
                     && (br.sequence() == bref.sequence()
-                        || br.sequence() == hds_ntfs::next_seq(bref.sequence()))
-                {
+                        || br.sequence() == hds_ntfs::next_seq(bref.sequence()));
+                if both_in_use || both_free {
                     matched = Some(b);
                 } else if !x.is_in_use() && br.is_in_use() {
                     continue; // a leftover
@@ -161,10 +161,6 @@ pub(crate) struct Facts {
     /// Highest mapped cluster + 1 over the `$DATA` runs (0: none).
     pub end_cluster: u64,
     pub real_size: Option<u64>,
-    /// MFT-change time of the base record.
-    pub changed: Option<u64>,
-    /// Extension of the best name, lower case, without the dot.
-    pub ext: Option<String>,
 }
 
 /// One `$DATA` or `$I30` run with its VCN.
@@ -180,7 +176,11 @@ fn sorted_extents<'a>(mut v: Vec<NonResidentExtent<'a>>) -> Vec<NonResidentExten
 }
 
 /// The non-resident unnamed `$DATA` extents of a group.
-fn data_extents<'a>(store: &'a ScanStore, idx: &GroupIndex, g: &Group) -> Vec<NonResidentExtent<'a>> {
+fn data_extents<'a>(
+    store: &'a ScanStore,
+    idx: &GroupIndex,
+    g: &Group,
+) -> Vec<NonResidentExtent<'a>> {
     let mut v = Vec::new();
     for id in idx.records(g) {
         for e in store.data_extents(id) {
@@ -228,9 +228,9 @@ pub(crate) fn index_runs(store: &ScanStore, idx: &GroupIndex, g: &Group) -> Vec<
 pub(crate) fn map_pos(runs: &[VRun], cs: u64, pos: u64) -> Option<u64> {
     let vcn = pos.checked_div(cs)?;
     let within = pos.checked_rem(cs)?;
-    let r = runs.iter().find(|r| {
-        r.vcn <= vcn && r.vcn.checked_add(r.run.length).is_some_and(|e| vcn < e)
-    })?;
+    let r = runs
+        .iter()
+        .find(|r| r.vcn <= vcn && r.vcn.checked_add(r.run.length).is_some_and(|e| vcn < e))?;
     let lcn = r.run.lcn?.checked_add(vcn.checked_sub(r.vcn)?)?;
     lcn.checked_mul(cs)?.checked_add(within)
 }
@@ -250,7 +250,6 @@ pub(crate) fn facts(store: &ScanStore, idx: &GroupIndex, g: &Group) -> Facts {
         in_use: base.is_in_use(),
         is_dir: is_directory(store, g.base),
         fixups_ok: true,
-        changed: base.mft_changed(),
         ..Facts::default()
     };
     let mut malformed = false;
@@ -274,7 +273,6 @@ pub(crate) fn facts(store: &ScanStore, idx: &GroupIndex, g: &Group) -> Facts {
     f.has_data = !exts.is_empty();
     let mut complete = !exts.is_empty() && !malformed;
     let mut expected = 0u64;
-    let mut mapped = 0u64;
     let mut saw_v0 = false;
     for e in &exts {
         if e.start_vcn != expected {
@@ -304,7 +302,6 @@ pub(crate) fn facts(store: &ScanStore, idx: &GroupIndex, g: &Group) -> Facts {
             clusters = clusters.saturating_add(run.length);
             match run.lcn {
                 Some(l) => {
-                    mapped = mapped.saturating_add(run.length);
                     f.end_cluster = f.end_cluster.max(l.saturating_add(run.length));
                     if first && e.start_vcn == 0 {
                         f.first_lcn = Some(l);
@@ -325,10 +322,8 @@ pub(crate) fn facts(store: &ScanStore, idx: &GroupIndex, g: &Group) -> Facts {
             complete = false;
         }
     }
-    let _ = mapped;
     f.complete = complete;
     f.compressed |= wof;
-    f.ext = best_extension(store, idx, g);
     f
 }
 

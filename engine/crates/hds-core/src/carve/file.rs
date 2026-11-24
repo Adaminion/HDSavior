@@ -6,7 +6,7 @@ use hds_carve::{Confidence, FileKind, Measured};
 use hds_io::out::Timestamps;
 use hds_io::RangeSet;
 use hds_recover::{
-    rate, Flag, FileSource, FlagSet, PlanFile, PlanFolder, Rating, RatingContext, Run,
+    rate, FileSource, Flag, FlagSet, PlanFile, PlanFolder, Rating, RatingContext, Run,
 };
 
 use super::CarveGeometry;
