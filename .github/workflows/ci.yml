@@ -100,8 +100,15 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Flutter analyze and test
+      - name: Build the engine for the app's real-engine tests
+        working-directory: engine
+        run: cargo build -p hds-engine
+
+      - name: Flutter analyze and test (including the real engine on the basic fixture)
         working-directory: app
+        env:
+          HDSAVIOR_ENGINE: ${{ github.workspace }}/engine/target/debug/hdsavior-engine
+          HDSAVIOR_TEST_IMAGE: ${{ github.workspace }}/fixtures-out/basic.img
         run: |
           flutter pub get
           flutter analyze
@@ -141,6 +148,22 @@ jobs:
       - name: Raw disk, destination guard and output primitives on virtual disks
         shell: pwsh
         run: scripts/windows/ci-io-probe.ps1 -Probe engine/target/release/examples/winprobe.exe
+
+      - name: Build the engine (release)
+        working-directory: engine
+        shell: bash
+        run: cargo build --release -p hds-engine
+
+      - name: Round trip on a volume Windows quick-formatted (scan, recover, compare; source untouched)
+        shell: pwsh
+        run: scripts/windows/ci-roundtrip.ps1 -Engine engine/target/release/hdsavior-engine.exe
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: roundtrip
+          path: ${{ runner.temp }}/roundtrip
+          if-no-files-found: ignore
 
   windows-app:
     name: Windows app build (Flutter, requireAdministrator manifest, engine bundling)
