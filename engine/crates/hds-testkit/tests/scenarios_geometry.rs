@@ -296,3 +296,69 @@ fn geometry_without_the_usual_evidence() {
         assert_eq!(read_structure(built, records[0].offset, 1024)[..4], *b"FILE");
     });
 }
+
+#[test]
+fn the_expected_geometry_and_its_validation() {
+    for (name, cluster) in [
+        ("cluster_512", 512u32),
+        ("cluster_1k", 1024),
+        ("cluster_2k", 2048),
+        ("cluster_8k", 8192),
+        ("cluster_64k", 65_536),
+    ] {
+        each(name, |built| {
+            let m = &built.manifest;
+            let main = m.main_instance().expect("a main instance");
+            let g = main.geometry.as_ref().unwrap();
+            assert_eq!((g.cluster_size, g.volume_offset, g.inherited), (cluster, 0, false), "{name}");
+            assert!(g.voting_directories >= 3, "{name}: four directories with index blocks survive");
+            assert_eq!((g.validated, main.protected), (Some(true), Some(true)), "{name}");
+            let old = m.instance("old");
+            assert_eq!(g.total_clusters, Some(old.geometry.total_clusters), "{name}: the boot sectors agree");
+        });
+    }
+    each("only_resident_survivors", |built| {
+        let m = &built.manifest;
+        let main = m.main_instance().unwrap();
+        let g = main.geometry.as_ref().unwrap();
+        // nothing votes and nothing can be checked: not validated (F6)
+        assert_eq!((g.voting_directories, g.mft_map_records, g.signature_checkable), (0, 0, 0));
+        assert_eq!((g.validated, main.protected), (Some(false), Some(false)));
+        assert_eq!(g.cluster_size, 8192);
+    });
+    each("signature_anchors", |built| {
+        let m = &built.manifest;
+        let main = m.main_instance().unwrap();
+        let g = main.geometry.as_ref().unwrap();
+        // no index vote, no MFT map in the range (the old $MFTMirr lies in
+        // front of it), validated by the files' signatures alone
+        assert_eq!((g.volume_offset, g.voting_directories, g.mft_map_records), (63 * 512, 0, 0));
+        assert!(g.signature_checkable >= 20 && g.signature_matches == g.signature_checkable);
+        assert_eq!(g.validated, Some(true));
+        let mirror = m.records.iter().filter(|r| r.instance == m.instance("old").id && r.role == RecordRole::Mirror);
+        assert!(mirror.into_iter().all(|r| r.offset < m.scan_range.0 && r.expect.class.is_none()), "never read");
+    });
+    each("fragmented_mft", |built| {
+        let m = &built.manifest;
+        // no old record at the new MFT's origin: main by its volume offset
+        let main = m.main_instance().unwrap();
+        assert!(!main.anchor);
+        assert_eq!(main.geometry.as_ref().unwrap().volume_offset, m.scan_range.0);
+        // the four fragments are one instance, and D4 (a) says so: the
+        // references between every pair of fragments resolve
+        let old = m.instance("old").id;
+        assert!(m.records.iter().filter(|r| r.instance == old && r.expect.class == Some(hds_testkit::manifest::RecordClass::Old)).all(|r| r.expect.instance == Some(main.id)));
+        let fragments: Vec<_> = m.fragments.iter().filter(|f| f.records >= 16).collect();
+        assert_eq!(fragments.len(), 3, "256-511, 512-5119 and 5120-5375 survive");
+        let records: Vec<Vec<&RecordFact>> = fragments.iter().map(|f| common::fragment_records(m, f)).collect();
+        let mut tied = 0;
+        for i in 0..records.len() {
+            for j in i + 1..records.len() {
+                let (counted, resolving) = common::references_between(m, &records[i], &records[j]);
+                assert!(counted == 0 || resolving * 10 >= counted * 9, "fragments {i} and {j}: {resolving} of {counted}");
+                tied += usize::from(resolving > 0);
+            }
+        }
+        assert!(tied >= 2, "references tie the fragments together");
+    });
+}

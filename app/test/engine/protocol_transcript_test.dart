@@ -26,6 +26,7 @@ final Map<String, void Function(JsonObject result)> resultParsers = {
   'session_attach_source': SessionAttachResult.fromJson,
   'catalog_info': CatalogInfo.fromJson,
   'geometry_set': CatalogInfo.fromJson,
+  'instance_set': CatalogInfo.fromJson,
   'list_children': RowsPage.fromJson,
   'node_info': NodeInfo.fromJson,
   'search': RowsPage.fromJson,

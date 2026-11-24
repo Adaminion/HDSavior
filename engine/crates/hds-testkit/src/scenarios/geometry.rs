@@ -290,7 +290,7 @@ pub fn old_mft_elsewhere(seed: u64) -> Built {
     params = params.mft_at(lcn, 1024);
     let (old, _) = old_volume(&mut disk, params, &TreeSpec::default());
     reformat(&mut disk, old);
-    disk.expect_kind(old, Some(InstanceKind::Main));
+    disk.expect_kind(old, InstanceKind::Main);
     disk.finish()
 }
 
@@ -298,11 +298,12 @@ pub fn old_mft_elsewhere(seed: u64) -> Built {
 /// scanned.
 ///
 /// **Tests ALGORITHMS F2 (boot sector found as a *backup*: volume start =
-/// hit − total sectors), F5 (volume size from the boot hit that agrees
-/// with the geometry, not from the new partition).** A 128 MiB volume; a
-/// 96 MiB partition was formatted over its start. The old backup boot
-/// sector in the last sector of the disk survives and still describes the
-/// old volume: 262 143 sectors, hidden sectors 0. Old files behind 96 MiB
+/// hit − total sectors), F5 (the boot hits of the new, smaller volume
+/// agree with the old geometry too, but four old files end behind it, so
+/// only the old backup boot sector qualifies).** A 128 MiB volume; a 96 MiB
+/// partition was formatted over its start. The old backup boot sector in
+/// the last sector of the disk survives and still describes the old
+/// volume: 262 143 sectors, hidden sectors 0. Four old files behind 96 MiB
 /// are inside the range and recoverable; nothing is out of bounds.
 pub fn old_volume_larger_whole_disk(seed: u64) -> Built {
     let size = 128 * MIB;
@@ -315,8 +316,11 @@ pub fn old_volume_larger_whole_disk(seed: u64) -> Built {
     let tree = populate(disk.volume(old), &TreeSpec::default());
     let v = disk.volume(old);
     let cs = v.cluster_size();
-    let behind = 100 * MIB / cs;
-    v.add_file(tree.folders[1], "behind-the-new-partition.bin", FileSpec::tagged(derive(seed, "behind"), 64 * cs).runs(vec![Run::at(behind, 64)]));
+    for (i, mib) in [100u64, 104, 108, 112].into_iter().enumerate() {
+        let name = if i == 0 { "behind-the-new-partition.bin".to_string() } else { format!("also-behind-{i}.bin") };
+        let file = FileSpec::tagged(derive(seed, &name), 64 * cs).runs(vec![Run::at(mib * MIB / cs, 64)]);
+        v.add_file(tree.folders[1], name.as_str(), file);
+    }
     disk.render(old);
     let new = disk.format(
         VolumeParams::new(0, 96 * MIB).label("new").formatted_at(disk.volume_ref(old).clock() + time::DAY).mft_capacity(256),
@@ -413,6 +417,6 @@ pub fn signature_anchors(seed: u64) -> Built {
     disk.fill(old_mft, 256 * 1024, 0);
     write_mbr(&mut disk, 512, &[Partition { offset: MIB, size: size - MIB }]);
     disk.set_scan_range(MIB, size);
-    disk.expect_kind(old, Some(InstanceKind::Main));
+    disk.expect_kind(old, InstanceKind::Main);
     disk.finish()
 }

@@ -191,6 +191,15 @@ fn names_that_live_in_extension_records() {
 #[test]
 fn base_and_extension_records_in_different_mft_fragments() {
     each("extensions_in_other_fragment", |built| {
+        // D4 (a): the base references between the fragments resolve
+        let m = &built.manifest;
+        let fragments: Vec<_> = m.fragments.iter().filter(|f| f.records >= 16).collect();
+        assert_eq!(fragments.len(), 2);
+        let (a, b) = (common::fragment_records(m, fragments[0]), common::fragment_records(m, fragments[1]));
+        let (counted, resolving) = common::references_between(m, &a, &b);
+        assert!(resolving >= 3 && resolving == counted, "{resolving} of {counted} references resolve");
+        let main = m.main_instance().unwrap();
+        assert!(a.iter().chain(&b).all(|r| r.expect.instance == Some(main.id)));
         let m = &built.manifest;
         let g = &m.instance("old").geometry;
         assert_eq!(g.mft_extents.len(), 2);

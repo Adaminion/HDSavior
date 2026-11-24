@@ -5,6 +5,9 @@ import 'package:material_ui/material_ui.dart';
 
 import 'state/state.dart';
 import 'ui/app_shell.dart';
+import 'ui/format.dart';
+import 'ui/strings.dart';
+import 'ui/theme.dart';
 
 /// The application: one window with five screens on top of an
 /// [AppController].
@@ -13,9 +16,14 @@ import 'ui/app_shell.dart';
 /// cleanly when the user closes the window (the engine then saves a running
 /// scan's session and removes an unfinished output file).
 class HdSaviorApp extends StatefulWidget {
-  const HdSaviorApp({super.key, required this.controller});
+  HdSaviorApp({super.key, required this.controller, Formats? formats})
+    : formats = formats ?? Formats('en_US');
 
   final AppController controller;
+
+  /// How dates and numbers are written: the user's regional format
+  /// (`main.dart` passes the system's locale; tests use `en_US`).
+  final Formats formats;
 
   @override
   State<HdSaviorApp> createState() => _HdSaviorAppState();
@@ -47,22 +55,19 @@ class _HdSaviorAppState extends State<HdSaviorApp> {
     super.dispose();
   }
 
-  static ThemeData _theme(Brightness brightness) => ThemeData(
-    colorScheme: ColorScheme.fromSeed(
-      seedColor: const Color(0xFF2F6F8F),
-      brightness: brightness,
-    ),
-    visualDensity: VisualDensity.compact,
-  );
-
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'HDSavior',
-      debugShowCheckedModeBanner: false,
-      theme: _theme(Brightness.light),
-      darkTheme: _theme(Brightness.dark),
-      home: AppShell(app: widget.controller, closing: _closing),
+    return FormatsScope(
+      formats: widget.formats,
+      child: MaterialApp(
+        title: S.appName,
+        debugShowCheckedModeBanner: false,
+        // Light and dark follow the system.
+        themeMode: ThemeMode.system,
+        theme: AppTheme.light(),
+        darkTheme: AppTheme.dark(),
+        home: AppShell(app: widget.controller, closing: _closing),
+      ),
     );
   }
 }

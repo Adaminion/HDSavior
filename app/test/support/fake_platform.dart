@@ -26,13 +26,26 @@ final class InertPlatformServices implements PlatformServices {
   /// The folders [openFolder] was asked to show.
   final List<String> openedFolders = [];
 
+  /// The files [openFile] was asked to open.
+  final List<String> openedFiles = [];
+
+  /// What [openFolder] and [openFile] answer: `false` pretends that no file
+  /// manager could be started.
+  bool canOpen = true;
+
   @override
   Future<void> createDirectory(String path) async => createdDirectories.add(path);
 
   @override
   Future<bool> openFolder(String path) async {
     openedFolders.add(path);
-    return true;
+    return canOpen;
+  }
+
+  @override
+  Future<bool> openFile(String path) async {
+    openedFiles.add(path);
+    return canOpen;
   }
 }
 

@@ -59,6 +59,7 @@ MANIFEST_VERSION = 1
 EPOCH_DIFF = 116444736000000000        # FILETIME of 1970-01-01
 ROOT_RECORD = 5
 FIRST_USER_RECORD = 24                 # records below this are NTFS metafiles
+NTFS3G_FIRST_USER_RECORD = 64          # the first record ntfs-3g gives a file on a fresh volume
 
 
 class Fail(Exception):
@@ -125,19 +126,22 @@ class Tree:
         self.deleted = {}         # path -> entry with its last known state
         self.fixed_times = {}     # path -> (created, modified, accessed) overrides
         self.notes = []
+        # creation times are spread over [start year, start year + span years)
+        self.time_window = (2012, 10)
 
     def real(self, path):
         return self.root + "/" + path
 
     def dump(self):
         return {"live": list(self.live.values()), "deleted": list(self.deleted.values()),
-                "fixed_times": self.fixed_times, "notes": self.notes}
+                "fixed_times": self.fixed_times, "notes": self.notes, "time_window": list(self.time_window)}
 
     def restore(self, saved):
         self.live = {e["path"]: e for e in saved["live"]}
         self.deleted = {e["path"]: e for e in saved["deleted"]}
         self.fixed_times = {p: tuple(v) for p, v in saved["fixed_times"].items()}
         self.notes = saved["notes"]
+        self.time_window = tuple(saved["time_window"])
 
     # ---- creation --------------------------------------------------------
     def _add(self, path, typ, size=None, sha=None, ctype=None, tags=()):
@@ -189,13 +193,30 @@ class Tree:
         """Register a file that was written by special means (sparse writes, truncation ...)."""
         return self._add(path, "file", size, data_sha, ctype, tags)
 
+    def rename(self, path, new_path):
+        """Move an entry (and everything below it) to another folder; it keeps its MFT record."""
+        if new_path in self.live or new_path in self.deleted:
+            fail("rename target %r exists" % new_path)
+        ino = os.lstat(self.real(path)).st_ino
+        os.rename(self.real(path), self.real(new_path))
+        if os.lstat(self.real(new_path)).st_ino != ino:
+            fail("%r changed its MFT record when it was moved" % path)
+        moved = {}
+        for p in list(self.live):
+            if p == path or p.startswith(path + "/"):
+                e = self.live.pop(p)
+                e["path"] = new_path + p[len(path):]
+                moved[e["path"]] = e
+        self.live.update(moved)
+
     # ---- timestamps ------------------------------------------------------
     def times_for(self, path):
         if path in self.fixed_times:
             return self.fixed_times[path]
-        base = filetime(2012, 1, 1)
+        start, span = self.time_window
+        base = filetime(start, 1, 1)
         year = 365 * 86400 * 10000000
-        cr = base + C.rint("time/created/" + path, 0, 10 * year)
+        cr = base + C.rint("time/created/" + path, 0, span * year)
         mt = cr + C.rint("time/modified/" + path, 0, 3 * year)
         at = mt + C.rint("time/accessed/" + path, 0, year)
         return cr, mt, at
@@ -320,7 +341,20 @@ def add_prelude(t, boundary):
 
     Samples first (so their MFT records are the lowest user records), then the
     directories whose records an accident destroys while their children,
-    created after record number `boundary`, survive.
+    created after record number `boundary`, survive.  The Windows-like wipe
+    destroys old records 0..boundary (255 when the new $MFT starts where the
+    old one did).
+
+    How the destroyed folders can still be named afterwards:
+      - the 48 extra top-level folders make the root index three INDX blocks
+        long; the first block is overwritten, the later ones survive;
+      - Projects/p01-alpha ... are listed in Projects' INDX block, which lies
+        in a data cluster and survives although Projects' record does not;
+      - Projects/p01-alpha/src and small-parent/inner are listed only in the
+        resident index root of a parent whose record is destroyed: nameless;
+      - "Moved Early" is created early (low record) and later moved into
+        "Later Parent", which is created after the boundary: its record
+        survives and its resident index root still names "Moved Early".
     """
     add_samples(t, "", tags=("contiguous",))
     t.mkdir("Projects")
@@ -330,6 +364,7 @@ def add_prelude(t, boundary):
         t.mkdir("Projects/p%02d-%s/src" % (i + 1, PROJECTS[i]))
     t.mkdir("small-parent")
     t.mkdir("small-parent/inner")
+    t.mkdir("Moved Early")
     for name in TOP_FOLDERS:
         t.mkdir(name)
     t.mkdir("early-junk")
@@ -359,6 +394,11 @@ def add_prelude(t, boundary):
     t.text("small-parent/inner/deep-note.txt", 1200)
     t.blob("small-parent/inner/payload.bin", 50000)
     t.text("small-parent/sibling.txt", 400)
+    t.mkdir("Later Parent")
+    t.rename("Moved Early", "Later Parent/Moved Early")
+    t.text("Later Parent/Moved Early/kept-note.txt", 1500)
+    t.typed("Later Parent/Moved Early/kept-scan.png", 45000)
+    t.text("Later Parent/readme.txt", 210)
     t.typed("Music/extra-tone.wav", 90000)
     t.sample("Videos/second-copy.mp4", "clip.mp4")
     t.typed("Documents/manual.pdf", 120000)
@@ -567,6 +607,8 @@ def trash_late(t):
 def profile_full(t, opts, phase):
     if phase == 2:
         return trash_late(t)
+    if opts["prelude"]:
+        add_prelude(t, opts["prelude"])
     add_samples(t, "media")
     add_typed(t, 140)
     add_names(t, True)
@@ -578,17 +620,12 @@ def profile_full(t, opts, phase):
     trash_early(t)
 
 
-def profile_wiped(t, opts, phase):
-    if phase == 1:
-        add_prelude(t, 255)
-    profile_full(t, opts, phase)
-
-
 def profile_standard(t, opts, phase):
-    """Prelude plus a medium-sized general tree (cluster-change, post-write)."""
+    """A medium-sized general tree (cluster-change, post-write, live-collision)."""
     if phase == 2:
         return trash_late(t)
-    add_prelude(t, 255)
+    if opts["prelude"]:
+        add_prelude(t, opts["prelude"])
     add_samples(t, "media")
     add_typed(t, 70)
     add_names(t, False)
@@ -604,6 +641,8 @@ def profile_tiny(t, opts, phase):
     """A small tree for the cluster-size, record-size and partition-offset scenarios."""
     if phase == 2:
         return trash_late(t)
+    if opts["prelude"]:
+        add_prelude(t, opts["prelude"])
     add_samples(t, "media")
     add_typed(t, 14)
     add_names(t, False)
@@ -644,6 +683,8 @@ def profile_fragmented(t, opts, phase):
     if phase == 2:
         return          # nothing may be created after the ballast is deleted: it would reuse its record
     cs = t.cs
+    if opts["prelude"]:
+        add_prelude(t, opts["prelude"])
     add_typed(t, 14)
     add_names(t, False)
     add_sizes(t, [("big-1MiB", 1 << 20)])
@@ -718,12 +759,182 @@ def profile_fragmented(t, opts, phase):
                    "content are still intact before the accident" % total)
 
 
+# ---- profiles for the scenarios with more than one file system ---------------
+
+G1_FOLDERS = ["G1 Archive %02d" % i for i in range(24)]
+
+
+def profile_gen1(t, opts, phase):
+    """g1: the file system formatted over by g2 (generations).  A few thousand files.
+
+    Its folders come first, so their records are among the lowest (the format
+    over g1 destroys them).  Six "G1 Late" folders are created when the MFT
+    has reached about record 400: g2 later puts its own records there, while
+    their children, created last, survive behind g2's records and name those
+    slots as their parent.  Creation times 2008-2013.
+    """
+    if phase == 2:
+        return
+    t.time_window = (2008, 6)
+    for name in G1_FOLDERS:
+        t.mkdir(name)
+    t.mkdir("G1 Mail")
+    t.mkdir("G1 Mail/Inbox")
+    kinds = ["png", "pdf", "bmp", "zip", "wav"]
+
+    def archive_file(i, k):
+        p = "%s/g1-%02d-%03d" % (G1_FOLDERS[i], i, k)
+        if k % 10 == 3:
+            t.typed(p + "." + kinds[(i + k) % len(kinds)], 9000 + 1700 * ((i * 7 + k) % 23))
+        elif k % 3 == 0:
+            t.text(p + ".txt", 300 + 97 * ((i + k) % 40))
+        else:
+            t.blob(p + ".bin", 2000 + 611 * ((i * 13 + k) % 50))
+
+    for i in range(len(G1_FOLDERS)):
+        for k in range(13):
+            archive_file(i, k)
+    late = ["G1 Late %d" % i for i in range(6)]
+    for name in late:
+        t.mkdir(name)
+    for i in range(len(G1_FOLDERS)):
+        for k in range(13, 100):
+            archive_file(i, k)
+    for k in range(150):
+        t.text("G1 Mail/Inbox/message-%04d.eml" % k, 900 + 31 * k)
+    t.typed("G1 Mail/attachment-large.pdf", 2 << 20)
+    for i, name in enumerate(late):
+        for k in range(8):
+            t.text("%s/late-%d-%d.txt" % (name, i, k), 1000 + 77 * k)
+
+
+def profile_gen2(t, opts, phase):
+    """g2: the lost file system of the generations scenarios (a few hundred entries).
+
+    Same prelude as the other scenarios (its first records are destroyed by
+    the accident), then a few folders of its own.  Creation times 2019-2022,
+    or, with opts["restored"], the same spread as g1 (2008-2013): files
+    restored from a backup keep their old creation times.
+    """
+    if phase == 2:
+        return trash_late(t)
+    t.time_window = (2008, 6) if opts["restored"] else (2019, 4)
+    if opts["prelude"]:
+        add_prelude(t, opts["prelude"])
+    t.mkdir("G2 Documents")
+    for k in range(90):
+        p = "G2 Documents/report-%03d" % k
+        if k % 6 == 0:
+            t.typed(p + ".pdf", 20000 + 900 * k)
+        else:
+            t.text(p + ".txt", 400 + 53 * k)
+    t.mkdir("G2 Photos")
+    for k in range(30):
+        t.typed("G2 Photos/photo-%03d.png" % k, 30000 + 2100 * k)
+    t.blob("G2 Photos/album.bin", 3 << 20)
+    add_trash(t)
+    trash_early(t)
+
+
+def profile_inner(t, opts, phase):
+    """The volume inside a disk-image file (embedded): more entries than its host."""
+    if phase == 2:
+        return
+    t.time_window = (2016, 4)
+    t.mkdir("Guest Documents")
+    for k in range(320):
+        t.text("Guest Documents/guest-note-%04d.txt" % k, 200 + 37 * (k % 60))
+    t.mkdir("Guest Pictures")
+    for k in range(120):
+        t.typed("Guest Pictures/guest-pic-%03d.png" % k, 7000 + 450 * (k % 30))
+    t.mkdir("Guest Projects")
+    for i in range(10):
+        d = "Guest Projects/guest-proj-%02d" % i
+        t.mkdir(d)
+        for k in range(25):
+            t.text("%s/guest-src-%02d.c" % (d, k), 800 + 70 * k)
+    t.blob("Guest Projects/guest-build.bin", 1 << 20)
+
+
+def write_container(t, path, source, companion, tags):
+    """Copy a raw volume image into a file of the mounted host volume.
+
+    Zero 64 KiB blocks are skipped with a seek, so the driver leaves holes
+    (sparse runs); after every MiB of the image, 256 KiB are appended to a
+    companion file, so the two files take turns at the allocation cursor and
+    the container ends up in several fragments.
+    """
+    block = 65536
+    h = hashlib.sha256()
+    size = os.path.getsize(source)
+    with open(source, "rb") as src, open(t.real(path), "wb") as dst, open(t.real(companion), "wb") as comp:
+        pos = 0
+        while pos < size:
+            data = src.read(block)
+            h.update(data)
+            if data.count(0) != len(data):
+                dst.seek(pos)
+                dst.write(data)
+                dst.flush()
+            pos += len(data)
+            if pos % (1 << 20) == 0:
+                comp.write(C.rnd("%s/%d" % (companion, pos), 1 << 18))
+                comp.flush()
+        dst.truncate(size)
+    t.record_stat(path, h.hexdigest(), size, tags=tags)
+    with open(t.real(companion), "rb") as f:
+        data = f.read()
+    t.record_stat(companion, sha256_hex(data), len(data))
+
+
+def profile_host(t, opts, phase):
+    """The host of embedded: a few hundred entries and one disk-image file (opts["source"])."""
+    if phase == 2:
+        return trash_late(t)
+    if opts["prelude"]:
+        add_prelude(t, opts["prelude"])
+    t.mkdir("Host Documents")
+    for k in range(120):
+        t.text("Host Documents/host-letter-%03d.txt" % k, 500 + 41 * k)
+    add_typed(t, 14)
+    t.mkdir("Virtual Machines")
+    write_container(t, "Virtual Machines/old-laptop.img", opts["source"], "Virtual Machines/old-laptop.swap",
+                    tags=("container", "sparse", "split"))
+    t.text("Virtual Machines/notes.txt", 700)
+    add_trash(t)
+    trash_early(t)
+
+
+def profile_repart(t, opts, phase):
+    """The large old volume of repartition: data all over the volume."""
+    if phase == 2:
+        return trash_late(t)
+    if opts["prelude"]:
+        add_prelude(t, opts["prelude"])
+    add_samples(t, "media")
+    add_typed(t, 70)
+    add_names(t, False)
+    add_many(t, 800)
+    t.mkdir("big")
+    for i in range(10):
+        t.blob("big/chunk-%02d.bin" % i, (3 << 20) + 77777 * i)
+    t.mkdir("late")
+    for i in range(200):
+        t.typed("late/late-%03d.%s" % (i, ["png", "pdf", "zip", "txt"][i % 4]), 30000 + 1300 * (i % 50))
+    add_trash(t)
+    trash_early(t)
+
+
 PROFILES = {
     "full": profile_full,
-    "wiped": profile_wiped,
     "standard": profile_standard,
     "tiny": profile_tiny,
     "fragmented": profile_fragmented,
+    "gen1": profile_gen1,
+    "gen2": profile_gen2,
+    "inner": profile_inner,
+    "host": profile_host,
+    "repart": profile_repart,
 }
 
 
@@ -731,7 +942,8 @@ def cmd_populate(args):
     state = load_state(args.state)
     old = state["old_volume"]
     t = Tree(args.root, args.samples, old["cluster_size"], old["mft_record_size"])
-    opts = {"compression": args.compression}
+    opts = {"compression": args.compression, "prelude": args.prelude, "restored": args.restored,
+            "source": args.source}
     if args.phase == 2:
         t.restore(state.pop("tree"))
     PROFILES[args.profile](t, opts, args.phase)
@@ -1475,6 +1687,8 @@ def check_tags(vol, e, attrs):
         fail("%r should have a named data stream" % path)
     if "dos-name" in tags and "dos_name" not in e:
         fail("%r should have a DOS name" % path)
+    if "split" in tags and (od["resident"] or od["fragments"] < 2):
+        fail("%r should be stored in at least two fragments" % path)
 
 
 EXPECT_PRE = {}
@@ -1979,19 +2193,21 @@ def cmd_crosscheck(args):
 # 5. The accident
 # ==========================================================================
 
-def empty_file_record(n, record_size):
-    """An unused, never-used MFT record exactly as ntfs-3g formats one.
+def empty_file_record(n, record_size, lsn=0):
+    """An unused, never-used MFT record as ntfs-3g and Windows 7 format one.
 
     Verified byte for byte against the unused records ntfs-3g writes when it
     extends the MFT (records 27.. of a fresh volume): "FILE", update sequence
     array at 0x30 with number 2, sequence number 1, flags 0, first attribute
     offset = end of the update sequence array rounded up to 8, an end marker
-    as the only "attribute", and the record's own number at 0x2C.
+    as the only "attribute", and the record's own number at 0x2C.  The unused
+    slots 16-255 of the Windows 7-era sample (vsstest, docs/notes) are the same
+    bytes except for the LSN, which is non-zero there (logged initialisation).
     """
     usa_count = record_size // 512 + 1
     attrs = (0x30 + 2 * usa_count + 7) & ~7
     rec = bytearray(record_size)
-    struct.pack_into("<4sHHQHHHHIIQHHI", rec, 0, b"FILE", 0x30, usa_count, 0, 1, 0, attrs, 0,
+    struct.pack_into("<4sHHQHHHHIIQHHI", rec, 0, b"FILE", 0x30, usa_count, lsn, 1, 0, attrs, 0,
                      attrs + 8, record_size, 0, 0, 0, n)
     struct.pack_into("<H", rec, 0x30, 2)
     struct.pack_into("<I", rec, attrs, 0xFFFFFFFF)
@@ -2002,58 +2218,165 @@ def empty_file_record(n, record_size):
     return bytes(rec)
 
 
-def cmd_wipe(args):
-    """Overwrite old MFT record slots first..last that the re-format left alone.
+# The LSNs of the blank records: the Windows 7-era sample has 2099858 in slot 16
+# and about 19 more per slot.  Any non-zero value is as good; these are fixed so
+# that builds are reproducible.
+WIN7_BLANK_LSN_BASE = 0x200000
+WIN7_BLANK_LSN_STEP = 19
 
-    A Windows format writes a 256-record initial MFT; mkntfs writes 27 records.
-    Slots that mkntfs already overwrote are left as they are, the others get
-    an empty unused FILE record carrying the slot's number.
+
+def mft_byte_ranges(vol):
+    """Volume-relative byte ranges of a volume's $MFT data runs."""
+    return [(lcn * vol.cs, length * vol.cs) for lcn, length in vol.mft_runs]
+
+
+def inside(ranges, off, length):
+    return any(o <= off and off + length <= o + n for o, n in ranges)
+
+
+def cmd_wipe(args):
+    """Rewrite the new $MFT's slots up to 255 the way Windows' format and first mount do.
+
+    Windows leaves a 256-record $MFT behind (records 0-255 written, unused
+    slots zero on Windows 10/11, blank FILE records on Windows 7); mkntfs
+    writes 27 records (64 with 64 KiB clusters).  Every slot from the end of
+    the new $MFT's initialized size up to `last` is written here, at the place
+    the new $MFT's slot has (contiguous from its first cluster, as Windows lays
+    it out).  Two promises are checked first, and the build stops if either
+    fails: the new volume uses none of those bytes for anything but its own
+    $MFT, and the bytes held nothing of the old file system but MFT records
+    (the model covers the rewrite of old MFT records, not damage to old file
+    data, which Windows would make visible by allocating the slots).
     """
     state = load_state(args.state)
-    old = state["old_volume"]
     new = RawVolume(args.volume)
-    cs, rs = old["cluster_size"], old["mft_record_size"]
-    lcn, length = old["mft_runs"][0]
-    if lcn != old["mft_lcn"] or length * cs < (args.last + 1) * rs:
-        fail("old MFT records 0..%d are not contiguous" % args.last)
-    if new.boot["mft_lcn"] * new.cs != lcn * cs or new.rs != rs:
-        fail("the new MFT does not start where the old one did; this wipe models a same-geometry format")
-    new.close()
+    pre = RawVolume(args.pre_volume)
+    if new.rs != pre.rs:
+        fail("old and new MFT record sizes differ; the wipe models slots of one size")
+    rs = new.rs
+    lcn0, _ = new.mft_runs[0]
+    if lcn0 != new.boot["mft_lcn"]:
+        fail("the new $MFT does not begin at the boot sector's MFT cluster")
+    mft_byte = lcn0 * new.cs
+    first_slot = new.nrecords
+    if first_slot > args.last:
+        fail("the new $MFT already has %d records" % first_slot)
+    bitmap = Bitmap(new)
+    new_mft = mft_byte_ranges(new)
+    old_mft = mft_byte_ranges(pre)
+    for slot in range(first_slot, args.last + 1):
+        off = mft_byte + slot * rs
+        if bitmap.allocated(off, rs) and not inside(new_mft, off, rs):
+            fail("new MFT slot %d (byte %d) lies in a cluster the new volume uses for something else" % (slot, off))
+        if not inside(old_mft, off, rs):
+            fail("new MFT slot %d (byte %d) lies outside the old $MFT: the wipe would destroy old file data"
+                 % (slot, off))
+    window = (mft_byte, mft_byte + (args.last + 1) * rs)
+    old_in_window = [n for n in range(pre.nrecords)
+                     if window[0] <= pre.record_offset(n) < window[1]]
     by_format = []
     by_wipe = []
-    same = []
-    with open(args.pre_volume, "rb") as pre, open(args.volume, "r+b") as img:
-        for n in range(args.first, args.last + 1):
-            off = lcn * cs + n * rs
-            pre.seek(off)
-            before = pre.read(rs)
-            img.seek(off)
-            now = img.read(rs)
-            if now != before:
+    with open(args.pre_volume, "rb") as fpre, open(args.volume, "r+b") as img:
+        before = {}
+        for n in old_in_window:
+            fpre.seek(pre.record_offset(n))
+            before[n] = fpre.read(rs)
+            img.seek(pre.record_offset(n))
+            if img.read(rs) != before[n]:
                 by_format.append(n)
-                continue
-            rec = empty_file_record(n, rs)
-            img.seek(off)
+        for slot in range(first_slot, args.last + 1):
+            if args.fill == "zeros":
+                rec = bytes(rs)
+            else:
+                rec = empty_file_record(slot, rs, WIN7_BLANK_LSN_BASE + WIN7_BLANK_LSN_STEP * slot)
+            img.seek(mft_byte + slot * rs)
             img.write(rec)
-            by_wipe.append(n)
-            if rec == before:
-                same.append(n)
-    state["accident"]["steps"].append("wipe-mft-records")
-    state["accident"]["wiped_records"] = {
-        "first": args.first, "last": args.last,
+        for n in old_in_window:
+            if n in by_format:
+                continue
+            img.seek(pre.record_offset(n))
+            if img.read(rs) != before[n]:
+                by_wipe.append(n)
+    new.close()
+    pre.close()
+    fills = {"zeros": "zero bytes (the Windows 10/11 form)",
+             "blank": "an unused FILE record with its own slot number, sequence 1, flags 0, no attributes and "
+                      "a non-zero LSN (the Windows 7 form)"}
+    info = {
+        "first": 0, "last": args.last, "fill": args.fill,
+        "slots_written": [first_slot, args.last],
+        "byte_range": [args.volume_offset + window[0] + first_slot * rs, args.volume_offset + window[1]],
         "overwritten_by_format": by_format, "overwritten_by_wipe": by_wipe,
-        "method": "each slot the re-format had not touched was overwritten with an empty unused FILE record "
-                  "(sequence 1, flags 0, own record number) as ntfs-3g formats fresh records",
+        "method": "slots %d-%d of the new $MFT (contiguous from its first cluster, where Windows keeps a "
+                  "256-record $MFT; mkntfs initialised %d) were overwritten with %s"
+                  % (first_slot, args.last, first_slot, fills[args.fill]),
     }
-    state["notes"].append(
-        "Windows-style wipe: old MFT record slots %d-%d were overwritten in place (bytes %d..%d of the volume). "
-        "Slots %s had already been overwritten by mkntfs; slots %s received an empty unused FILE record%s."
-        % (args.first, args.last, lcn * cs + args.first * rs, lcn * cs + (args.last + 1) * rs,
-           ranges(by_format), ranges(by_wipe),
-           " (for slots %s that is byte-identical to the unused record that was there before)" % ranges(same)
-           if same else ""))
+    if args.record == "accident":
+        state["accident"]["steps"].append("wipe-mft-records")
+        state["accident"]["wiped_records"] = info
+    else:
+        state["history"][-1]["wiped_records"] = info
     save_state(args.state, state)
-    log("wiped old MFT record slots %s (already overwritten by the format: %s)" % (ranges(by_wipe), ranges(by_format)))
+    log("wrote new MFT slots %d-%d (%s); old records destroyed by the format: %s, by the wipe: %s"
+        % (first_slot, args.last, args.fill, ranges(by_format) or "none", ranges(by_wipe) or "none"))
+
+
+def last_write(vol):
+    """Latest MFT-change time in any record of a volume's $MFT (the wall clock of its last write).
+
+    The MFT-change time is the one time a writer cannot set: ntfs-3g stamps it
+    with the clock whenever a record changes, also when other times are set.
+    """
+    latest = 0
+    for n in range(vol.nrecords):
+        r = vol.record(n)
+        if r is None or not r["valid"]:
+            continue
+        for a in r["attributes"]:
+            if a["type"] == 0x10 and "standard_information" in a:
+                latest = max(latest, a["standard_information"]["mft_changed"])
+        for fn in r["names"]:
+            latest = max(latest, fn["mft_changed"])
+    now = int(time.time() * 10000000) + EPOCH_DIFF
+    if latest > now + 600 * 10000000:
+        fail("an MFT-change time lies in the future (%d)" % latest)
+    if not latest:
+        fail("no MFT-change time found")
+    return latest
+
+
+def cmd_lastwrite(args):
+    """Record the old volume's last write before it is formatted over; print it in whole Unix seconds.
+
+    make-fixtures.sh then waits until the clock has passed that second, so the
+    format (which stamps whole seconds) is strictly later than every old write.
+    """
+    state = load_state(args.state)
+    vol = RawVolume(args.volume)
+    latest = last_write(vol)
+    vol.close()
+    if args.record == "accident":
+        state["accident"]["last_old_write"] = latest
+    else:
+        state.setdefault("history", []).append({"event": "re-format", "formatted_over": args.record,
+                                                "last_old_write": latest})
+    save_state(args.state, state)
+    print((latest - EPOCH_DIFF) // 10000000)
+
+
+STASHED_KEYS = ("old_volume", "expected", "deleted", "profile", "captured", "analyzed")
+
+
+def cmd_stash(args):
+    """Set the file system just built aside, so that the scenario can build the next one."""
+    state = load_state(args.state)
+    if not state.get("analyzed"):
+        fail("stash must run after analyze")
+    fs = {k: state.pop(k) for k in STASHED_KEYS if k in state}
+    fs.update({"name": args.name, "kind": args.kind, "pre_volume": args.pre_volume,
+               "container": args.container or None})
+    state.setdefault("other_fs", []).append(fs)
+    save_state(args.state, state)
 
 
 def cmd_newfiles(args):
@@ -2095,6 +2418,69 @@ def cmd_newfiles(args):
     total = sum(e["size"] or 0 for e in t.live.values())
     log("new volume: %d new files and folders (%d bytes) written, %d of them deleted again"
         % (len(t.live) + len(t.deleted), total + sum(e["size"] or 0 for e in t.deleted.values()), len(t.deleted)))
+
+
+def cmd_collide(args):
+    """Write to the new volume so that new folders take the record numbers of destroyed old folders.
+
+    ntfs-3g hands out the records of a fresh volume one after the other from
+    record 64.  For every slot from 64 up to the highest old folder that the
+    accident destroyed although some of its children survived, a folder is
+    created when the old record in that slot was such a folder, and a small
+    file otherwise.  Both file systems start record sequences at 1, so each of
+    these new folders is (record N, sequence 1), exactly what the surviving
+    old children name as their parent.  Each slot is checked as it is handed
+    out.  Then files go into some of the new folders, a few large files are
+    written, and some files are created and deleted again (deleted records of
+    the new volume whose clusters overwrote old data).
+    """
+    state = load_state(args.state)
+    new = state["new_volume"]
+    boundary = state["boundary"]
+    live = [e for e in state["expected"]]
+    by_path = {e["path"]: e for e in live}
+    targets = {}
+    for e in live:
+        parent = parent_of(e["path"])
+        if parent and e["mft_record"] > boundary:
+            d = by_path[parent]
+            if FIRST_USER_RECORD <= d["mft_record"] <= boundary:
+                targets[d["mft_record"]] = d
+    if len(targets) < 10:
+        fail("only %d destroyed old folders with surviving children" % len(targets))
+    t = Tree(args.root, args.samples, new["cluster_size"], new["mft_record_size"])
+    slot = NTFS3G_FIRST_USER_RECORD
+    folders = []
+    while slot <= max(targets):
+        if slot in targets:
+            e = t.mkdir("New Folder %03d" % slot, tags=("collides",))
+            folders.append(e)
+        else:
+            e = t.text("new-file-%03d.txt" % slot, 100 + slot)
+        if e["mft_record"] != slot:
+            fail("the new volume handed out record %d where %d was expected" % (e["mft_record"], slot))
+        slot += 1
+    for i, e in enumerate(folders[::3]):
+        t.text(e["path"] + "/inside-%02d.txt" % i, 700 + 13 * i)
+    t.mkdir("new-big")
+    for i in range(4):
+        t.blob("new-big/new-blob-%d.bin" % i, (2 << 20) + 300000 * i)
+    for i in range(5):
+        t.blob("new-big/temp-%d.bin" % i, 900000 + 200000 * i)
+    copied = filetime(2024, 6, 15, 10, 0, 0)
+    for i, path in enumerate(list(t.live)):
+        cr = copied + i * 3 * 10000000 + C.rint("collide/created/" + path, 0, 9999999)
+        t.fixed_times[path] = (cr, cr, cr)
+    for i in range(5):
+        t.delete("new-big/temp-%d.bin" % i, "new")
+    t.stamp_all()
+    state["new_expected"] = list(t.live.values())
+    state["new_deleted"] = list(t.deleted.values())
+    state["collided_slots"] = sorted(targets)
+    save_state(args.state, state)
+    log("new volume: %d new folders took the record numbers of destroyed old folders (%s); %d entries "
+        "written, %d of them deleted again"
+        % (len(folders), ranges(sorted(targets)), len(t.live) + len(t.deleted), len(t.deleted)))
 
 
 def cmd_capture_new(args):
@@ -2275,58 +2661,94 @@ def count_changed(fd_a, fd_b, off, length, unit):
     return changed
 
 
-@expect_post("user-records-survive")
+def _live(ctx):
+    return [e for e in ctx["entries"] if not e["deleted"]]
+
+
+def _written_after(state):
+    return any(s in state["accident"]["steps"] for s in ("new-files-written", "live-collision"))
+
+
+@expect_post("prelude-lost")
 def _(state, ctx):
-    lost = [e["path"] for e in ctx["entries"] if not e["deleted"] and not e["after"]["record_intact"]]
-    if lost:
-        fail("a same-geometry mkntfs quick format should leave every user record alone, but lost %r" % lost[:5])
-    damaged = [e["path"] for e in ctx["entries"]
-               if e["type"] == "file" and not e["deleted"] and not e["after"]["content_intact"]]
+    """The Windows-like wipe destroyed exactly the prelude; its folders' children survive in all three ways."""
+    bound = state["boundary"]
+    live = _live(ctx)
+    kept_low = [e["path"] for e in live if e["mft_record"] <= bound and e["after"]["record_intact"]]
+    if kept_low:
+        fail("live entries with records up to %d kept their record: %r" % (bound, kept_low[:5]))
+    if not _written_after(state):
+        lost_high = [e["path"] for e in live if e["mft_record"] > bound and not e["after"]["record_intact"]]
+        if lost_high:
+            fail("live entries with records above %d lost their record: %r" % (bound, lost_high[:5]))
+    by_path = {e["path"]: e for e in live}
+    kinds = {"indx": [], "index_root": [], "unnamed": []}
+    for d in live:
+        if d["type"] != "dir" or d["after"]["record_intact"]:
+            continue
+        if not any(c["after"]["record_intact"] for c in live if parent_of(c["path"]) == d["path"]):
+            continue
+        usable = [x for x in d["after"].get("named_by", []) if x["usable"]]
+        if not usable:
+            kinds["unnamed"].append(d["path"])
+        for src in set(x["source"] for x in usable):
+            kinds[src].append(d["path"])
+        for x in usable:
+            if x["name"] != base_of(d["path"]):
+                fail("%r is named %r by a surviving index entry" % (d["path"], x["name"]))
+    missing = [k for k, v in kinds.items() if not v]
+    if _written_after(state):
+        # new data lands first where the old volume's first data was: the INDX blocks of the
+        # destroyed folders (allocated among the first old data) are overwritten
+        missing = [k for k in missing if k != "indx"]
+    if missing:
+        fail("destroyed folders with surviving children: %s; missing kinds: %s"
+             % (", ".join("%d %s" % (len(v), k) for k, v in kinds.items()), missing))
+    top_named = [p for p in kinds["indx"] if "/" not in p]
+    top_unnamed = [p for p in kinds["unnamed"] if "/" not in p]
+    if state["old_volume"]["mft_lcn"] * state["old_volume"]["cluster_size"] == \
+            state["new_volume"]["mft_lcn"] * state["new_volume"]["cluster_size"] and \
+            state["old_volume"]["cluster_size"] == state["new_volume"]["cluster_size"] and \
+            state["old_volume"]["total_sectors"] == state["new_volume"]["total_sectors"] and \
+            not _written_after(state):
+        # same geometry: the new root index block lands on the old root's first block (with clusters
+        # larger than an index block, the format rewrites the whole cluster and with it the later blocks)
+        if state["old_volume"]["cluster_size"] <= state["old_volume"]["index_block_size"] and \
+                (len(top_named) < 3 or len(top_unnamed) < 3):
+            fail("top-level lost folders: %d named by a surviving block of the old root index, %d not; several "
+                 "of both kinds are required" % (len(top_named), len(top_unnamed)))
+    below = [e for e in live if e["after"]["record_intact"] and not e["after"]["ancestry"]["path_reconstructible"]]
+    if not below:
+        fail("no surviving entry lies below a folder that cannot be named")
+    del by_path
+    first = dict((k, " (e.g. %s)" % v[0] if v else "") for k, v in kinds.items())
+    return ("old MFT records 0-%d destroyed (%s); destroyed folders with surviving children: %d named by a "
+            "surviving INDX block%s, %d by the index root of a surviving parent%s, %d not named anywhere%s; "
+            "top-level: %d named by blocks of the old root index, %d not; %d surviving entries cannot get "
+            "their full path back (e.g. %s, which keeps %r)"
+            % (bound, state["accident"]["wiped_records"]["fill"] if state["accident"]["wiped_records"] else "-",
+               len(kinds["indx"]), first["indx"], len(kinds["index_root"]), first["index_root"],
+               len(kinds["unnamed"]), first["unnamed"], len(top_named), len(top_unnamed), len(below),
+               below[0]["path"], below[0]["after"]["ancestry"]["surviving_suffix"]))
+
+
+@expect_post("content-survives")
+def _(state, ctx):
+    damaged = [e["path"] for e in _live(ctx) if e["type"] == "file" and e["after"]["record_intact"]
+               and not e["after"]["content_intact"]]
     if damaged:
-        fail("a same-geometry mkntfs quick format should leave all file content alone, but damaged %r" % damaged[:5])
-    return "every live file's and folder's MFT record and every file's content are byte-identical after the accident"
+        fail("files whose record survived lost content: %r" % damaged[:5])
+    n = sum(1 for e in _live(ctx) if e["type"] == "file" and e["after"]["record_intact"])
+    return "all %d live files whose record survived keep their content byte for byte" % n
 
 
-@expect_post("wiped")
+@expect_post("carving-samples")
 def _(state, ctx):
-    ent = ctx["entries"]
-    destroyed = set(state["destroyed_records"])
-    low = [e for e in ent if e["mft_record"] <= 255]
-    if any(e["after"]["record_intact"] for e in low if not e["deleted"]):
-        fail("a live entry with a record number up to 255 kept its record")
-    if any(not e["after"]["record_intact"] for e in ent if e["mft_record"] > 255 and not e["deleted"]
-           and not any(x <= 255 for x in e["ondisk"].get("extension_records", []))):
-        fail("an entry with a record number above 255 lost its record")
-    carve = [e for e in low if "sample" in e["tags"] and e["after"]["content_intact"]
-             and e["ondisk"]["fragments"] == 1]
+    carve = [e for e in _live(ctx) if "sample" in e["tags"] and not e["after"]["record_intact"]
+             and e["after"]["content_intact"] and e["ondisk"]["fragments"] == 1]
     if len(carve) < 18:
         fail("only %d destroyed samples are still intact and contiguous" % len(carve))
-    paths = {e["path"]: e for e in ent}
-    named, unnamed = [], []
-    for d in ent:
-        if d["type"] != "dir" or d["deleted"] or d["after"]["record_intact"]:
-            continue
-        kids = [c for c in ent if parent_of(c["path"]) == d["path"] and not c["deleted"] and c["after"]["record_intact"]]
-        if kids:
-            (named if d["after"]["index_entry_intact"] else unnamed).append(d["path"])
-    if not named or not unnamed:
-        fail("lost-folder cases missing: %d destroyed folders with surviving children are still named by an "
-             "INDX block, %d are not" % (len(named), len(unnamed)))
-    del paths
-    top_named = [p for p in named if "/" not in p]
-    top_unnamed = [p for p in unnamed if "/" not in p]
-    if len(top_named) < 3 or len(top_unnamed) < 3:
-        fail("top-level lost folders: %d still named by a surviving block of the old root index, %d not; "
-             "several of both kinds are required" % (len(top_named), len(top_unnamed)))
-    return ("old MFT records %s destroyed; %d samples lost their record but keep intact, unfragmented content "
-            "(carving); %d destroyed folders have surviving children and are still named by a surviving INDX "
-            "block (e.g. %s); %d destroyed folders have surviving children and no surviving name (e.g. %s); "
-            "of the top-level ones %d are named by blocks of the old root index that survived (e.g. %s) and "
-            "%d are not (e.g. %s): their entries were in the first block, which the new root index overwrote, "
-            "or in the index root inside old record 5"
-            % (ranges(destroyed), len(carve), len(named), [p for p in named if "/" in p][0], len(unnamed),
-               [p for p in unnamed if "/" in p][0], len(top_named), top_named[0], len(top_unnamed),
-               top_unnamed[0]))
+    return "%d samples lost their record but keep intact, unfragmented content (carving)" % len(carve)
 
 
 @expect_post("cluster-change")
@@ -2334,21 +2756,20 @@ def _(state, ctx):
     old, new = state["old_volume"], state["new_volume"]
     if old["cluster_size"] == new["cluster_size"]:
         fail("old and new cluster size are both %d" % old["cluster_size"])
-    ent = ctx["entries"]
-    lost = [e for e in ent if not e["deleted"] and not e["after"]["record_intact"]]
-    kept = [e for e in ent if not e["deleted"] and e["after"]["record_intact"]]
-    damaged = [e for e in ent if e["type"] == "file" and not e["deleted"] and not e["after"]["content_intact"]]
+    ent = _live(ctx)
+    lost = [e for e in ent if not e["after"]["record_intact"]]
+    kept = [e for e in ent if e["after"]["record_intact"]]
     if not lost or not kept:
         fail("cluster-change: %d live entries lost their record, %d kept it" % (len(lost), len(kept)))
-    return ("old cluster size %d, new cluster size %d; the new MFT starts at byte %d (old: byte %d); old MFT "
-            "records %s destroyed; %d live entries lost their record, %d files lost content"
+    return ("old cluster size %d, new cluster size %d; the new MFT starts at byte %d (old: byte %d), so its "
+            "slots 0-255 cover old records %s; %d live entries lost their record"
             % (old["cluster_size"], new["cluster_size"], new["mft_lcn"] * new["cluster_size"],
-               old["mft_lcn"] * old["cluster_size"], ranges(state["destroyed_records"]), len(lost), len(damaged)))
+               old["mft_lcn"] * old["cluster_size"], ranges(state["destroyed_records"]), len(lost)))
 
 
 @expect_post("post-write")
 def _(state, ctx):
-    ent = [e for e in ctx["entries"] if e["type"] == "file" and not e["deleted"]]
+    ent = [e for e in _live(ctx) if e["type"] == "file"]
     damaged = [e for e in ent if not e["after"]["content_intact"]]
     intact = [e for e in ent if e["after"]["content_intact"] and e["after"]["record_intact"]]
     # the trap: the MFT record survived, the content did not, and the new
@@ -2358,10 +2779,14 @@ def _(state, ctx):
     if not damaged or not intact or not ghost or not visible:
         fail("post-write: %d damaged files, %d intact, %d damaged-but-unallocated, %d damaged-and-allocated; "
              "all four kinds are required" % (len(damaged), len(intact), len(ghost), len(visible)))
+    hidden = [e for e in ghost if e["after"]["damage_evidence"] == ["none"]]
+    if hidden:
+        fail("damage without any evidence in the new file system: %r" % [e["path"] for e in hidden[:5]])
     return ("%d old files lost content to new data, %d old files are fully intact; of the files whose record "
-            "survived, %d are overwritten by data the new file system still has allocated and %d by new files "
-            "that were deleted again (their clusters are free in the new $Bitmap, e.g. %s)"
-            % (len(damaged), len(intact), len(visible), len(ghost), ghost[0]["path"]))
+            "survived, %d are overwritten by data the new file system still has allocated and %d only by new "
+            "files that were deleted again (free in the new $Bitmap; their deleted records in the new MFT "
+            "still map the clusters, e.g. %s)" % (len(damaged), len(intact), len(visible), len(ghost),
+                                                   ghost[0]["path"]))
 
 
 @expect_post("partition")
@@ -2379,7 +2804,142 @@ def _(state, ctx):
                                                        part[0]["length"]))
 
 
-def scan_check(volume, entries, now):
+@expect_post("generations")
+def _(state, ctx):
+    g1 = [x for x in ctx["other_entries"] if x["file_system"] == "g1" and not x["deleted"]]
+    g2 = _live(ctx)
+    v1 = [v for v in ctx["views"] if v.name == "g1"][0]
+    v2 = ctx["views"][0]
+    if v1.pre.mft_runs[0][0] * v1.pre.cs != v2.pre.mft_runs[0][0] * v2.pre.cs:
+        fail("g1's and g2's $MFT do not start at the same byte")
+    survivors = [x for x in g1 if x["after"]["record_intact"]]
+    top2 = max(e["mft_record"] for e in ctx["entries"])
+    if not survivors or min(x["mft_record"] for x in survivors) <= top2:
+        fail("g1 records must survive only behind g2's records (g2 ends at record %d)" % top2)
+    ok = [x for x in survivors if x["type"] == "file" and x["after"]["content_intact"]]
+    reused = [x for x in survivors if x["type"] == "file" and x["after"]["clusters_reused_by_newer"]]
+    broken = [x for x in reused if not x["after"]["content_intact"]]
+    if not ok or not reused or not broken:
+        fail("g1: %d files intact, %d with clusters reused by g2, %d of them damaged; all three are required"
+             % (len(ok), len(reused), len(broken)))
+    nobody = [x for x in broken if x["after"]["damage_evidence"] == ["none"]]
+    g1_changed = max(x["mft_changed"] for x in survivors)
+    g2_changed = min(e["mft_changed"] for e in g2 if e["after"]["record_intact"])
+    g1_last = state["history"][0]["last_old_write"]
+    if not g1_changed <= g1_last < g2_changed:
+        fail("MFT-change times do not separate the generations")
+    taken = [x for x in g1 if "parent_reference_taken_by" in x["after"] or "parent_slot_contradiction" in x["after"]]
+    if not taken:
+        fail("no g1 entry names a parent slot that now holds a g2 record")
+    return ("g1 (%d entries) was formatted over by g2 (%d entries) at the same MFT origin; %d g1 entries keep "
+            "their record, all numbered above g2's last record %d; %d g1 files are intact, %d had clusters "
+            "reused by g2 and %d of those lost content (%d without evidence in g2's surviving records: g2 "
+            "files deleted before the accident); %d g1 entries name a parent slot that g2 took over; every g1 "
+            "MFT-change time is older than every g2 one"
+            % (len(g1), len(g2), len(survivors), top2, len(ok), len(reused), len(broken), len(nobody),
+               len(taken)))
+
+
+@expect_post("restored-times")
+def _(state, ctx):
+    g1 = [x for x in ctx["other_entries"] if x["file_system"] == "g1" and x["type"] == "file"]
+    g2 = [e for e in _live(ctx) if e["type"] == "file"]
+    c1 = sorted(x["created"] for x in g1)
+    c2 = sorted(e["created"] for e in g2)
+    median1 = c1[len(c1) // 2]
+    older = sum(1 for c in c2 if c < median1)
+    if not (c2[0] < c1[-1] and c1[0] < c2[-1]) or older < len(c2) // 4:
+        fail("creation times of g2's restored files do not overlap g1's")
+    return ("creation times cannot tell the generations apart: g1 files were created %s .. %s, the restored "
+            "g2 files %s .. %s, and %d of %d g2 files are older than g1's median; only the MFT-change times "
+            "separate them" % (time.strftime("%Y-%m-%d", time.gmtime(unix_ms(c1[0]) // 1000)),
+                               time.strftime("%Y-%m-%d", time.gmtime(unix_ms(c1[-1]) // 1000)),
+                               time.strftime("%Y-%m-%d", time.gmtime(unix_ms(c2[0]) // 1000)),
+                               time.strftime("%Y-%m-%d", time.gmtime(unix_ms(c2[-1]) // 1000)), older, len(c2)))
+
+
+@expect_post("embedded")
+def _(state, ctx):
+    inner = [x for x in ctx["other_entries"] if x["file_system"] == "inner"]
+    host = _live(ctx)
+    view = [v for v in ctx["views"] if v.name == "inner"][0]
+    cont = [e for e in host if e["path"] == view.container][0]
+    if not cont["after"]["record_intact"] or not cont["after"]["content_intact"]:
+        fail("the container file did not survive the accident")
+    if len(inner) <= len(host):
+        fail("the inner volume has %d entries, its host %d" % (len(inner), len(host)))
+    if any(not x["after"]["record_intact"] or (x["type"] == "file" and not x["after"]["content_intact"])
+           for x in inner):
+        fail("the accident damaged the inner volume")
+    holes = sum(1 for lcn, _ in cont["ondisk"]["runs"] if lcn is None)
+    inside_mft = inside(view.container_ranges(), view.main_point(view.pre.mft_runs[0][0] * view.pre.cs), 1)
+    if not inside_mft:
+        fail("the inner $MFT does not lie in the container's clusters")
+    return ("%s (%d bytes, %d fragments, %d sparse holes) holds an NTFS volume with %d entries, more than the "
+            "%d of its host; container and inner volume are intact after the accident"
+            % (cont["path"], cont["size"], cont["ondisk"]["fragments"], holes, len(inner), len(host)))
+
+
+@expect_post("repartition")
+def _(state, ctx):
+    pt = ctx["partition_table"]
+    if pt is None or len(pt["partitions"]) != 2:
+        fail("the final image should have two partitions")
+    lo, hi = ctx["scan_range"]
+    p1 = pt["partitions"][0]
+    if (p1["offset"], p1["offset"] + p1["length"]) != (lo, hi) or lo != ctx["volume_offset"]:
+        fail("the scan range is not the first new partition at the old volume's start")
+    files = [e for e in _live(ctx) if e["type"] == "file" and e["after"]["record_intact"]
+             and not e["ondisk"]["resident"]]
+    inside_ok = [e for e in files if e["after"]["data_inside_scan_range"] and e["after"]["content_intact"]]
+    outside = [e for e in files if not e["after"]["data_inside_scan_range"]]
+    outside_ok = [e for e in outside if e["after"]["content_intact"]]
+    outside_bad = [e for e in outside if not e["after"]["content_intact"]]
+    straddle = [e for e in outside if any(lo <= ctx["volume_offset"] + o * state["old_volume"]["cluster_size"] < hi
+                                          for o, _ in [(r[0], r[1]) for r in e["ondisk"]["runs"] if r[0] is not None])]
+    if not inside_ok or not outside_ok or not outside_bad or not straddle:
+        fail("repartition: %d intact files inside the first partition, %d intact and %d damaged files reaching "
+             "beyond it, %d straddling its end; all four are required"
+             % (len(inside_ok), len(outside_ok), len(outside_bad), len(straddle)))
+    end = ctx["volume_offset"] + ctx["volume_length"]
+    with open(ctx["image_path"], "rb") as f:
+        f.seek(end - state["old_volume"]["sector_size"])
+        backup = I.parse_boot_sector(f.read(512), 0)
+    if not backup or not backup["valid"] or backup["total_sectors"] != state["old_volume"]["total_sectors"]:
+        fail("the old volume's backup boot sector at its last sector did not survive")
+    return ("old volume %d bytes at byte %d replaced by two partitions (%s); scan range = the first one; %d "
+            "intact files lie wholly inside it, %d files reach beyond it (%d of them intact, %d damaged by the "
+            "second partition's format, %d straddle its end); the old backup boot sector survives at byte %d"
+            % (ctx["volume_length"], ctx["volume_offset"],
+               ", ".join("%d+%d" % (p["offset"], p["length"]) for p in pt["partitions"]), len(inside_ok),
+               len(outside), len(outside_ok), len(outside_bad), len(straddle), end - 512))
+
+
+@expect_post("live-collision")
+def _(state, ctx):
+    hit = [e for e in ctx["entries"] if "parent_reference_taken_by" in e["after"]
+           and e["after"]["parent_reference_taken_by"]["file_system"] == "new"
+           and e["after"]["parent_reference_taken_by"]["in_use"]]
+    folders = set(e["after"]["parent_reference_taken_by"]["path"] for e in hit)
+    want = set("New Folder %03d" % n for n in state["collided_slots"])
+    if folders != want:
+        fail("old children whose parent reference resolves to a live new folder: %d folders, expected %d"
+             % (len(folders), len(want)))
+    ghosts = [e for e in _live(ctx) if e["type"] == "file" and e["after"]["record_intact"]
+              and not e["after"]["content_intact"] and "post-format-record" in e["after"]["damage_evidence"]
+              and not e["after"]["overlaps_new_allocation"]]
+    if not ghosts:
+        fail("no old file was overwritten only by a new file that was deleted again")
+    named = sum(1 for d in _live(ctx) if d["mft_record"] in state["collided_slots"]
+                and any(x["usable"] for x in d["after"].get("named_by", [])))
+    return ("%d new folders took the (record, sequence 1) of destroyed old folders: %d surviving old entries "
+            "name a live new folder as their parent (e.g. %s -> %s); %d of those old folders are still named "
+            "by a surviving index entry; %d old files were overwritten only by new files deleted again"
+            % (len(folders), len(hit), hit[0]["path"], hit[0]["after"]["parent_reference_taken_by"]["path"],
+               named, len(ghosts)))
+
+
+def scan_check(volume, entries, now, label="main"):
     """The fixture as HDSavior will meet it: recover from a blind scan of the final image.
 
     Every 512-byte offset is tested for a FILE record (no boot sector, no
@@ -2437,10 +2997,10 @@ def scan_check(volume, entries, now):
     if wrong:
         fail("a blind scan of the final image disagrees with the manifest for %d files, e.g. %r"
              % (len(wrong), wrong[:5]))
-    return ("a scan of the final image at every 512-byte offset (no boot sector, no $MFT runlist used) finds "
-            "a matching in-use FILE record for %d of %d live files and reads %d of them back bit-identical: "
-            "exactly the files marked record_intact and content_intact"
-            % (found, sum(1 for e in entries if e["type"] == "file" and not e["deleted"]), good))
+    return ("%s: a scan of the final image at every 512-byte offset (no boot sector, no $MFT runlist used) "
+            "finds a matching in-use FILE record for %d of %d live files and reads %d of them back "
+            "bit-identical: exactly the files marked record_intact and content_intact"
+            % (label, found, sum(1 for e in entries if e["type"] == "file" and not e["deleted"]), good))
 
 
 def write_manifest(path, manifest):
@@ -2452,7 +3012,8 @@ def write_manifest(path, manifest):
     """
     lines = []
     for key, value in manifest.items():
-        if key in ("entries", "new_files", "verified", "notes", "samples_skipped") and value:
+        if key in ("entries", "other_entries", "new_files", "verified", "notes", "samples_skipped",
+                   "file_systems", "new_volumes", "history") and value:
             body = ",\n".join("  " + json.dumps(x, ensure_ascii=True, separators=(", ", ": ")) for x in value)
             lines.append(' %s: [\n%s\n ]' % (json.dumps(key), body))
         elif key in ("old_volume", "new_volume", "image", "summary", "tools", "accident"):
@@ -2470,69 +3031,257 @@ def write_manifest(path, manifest):
     os.replace(tmp, path)
 
 
-def cmd_finalize(args):
-    state = load_state(args.state)
-    if not state.get("analyzed"):
-        fail("finalize must run after analyze")
-    pre = RawVolume(args.pre_volume)
-    pre.load_all()
-    new = RawVolume(args.volume)
-    new.load_all()
-    fd_pre, fd_post = pre.fd, new.fd
-    vol_off = args.volume_offset
-    vol_len = os.fstat(fd_post).st_size
-    rs = pre.rs
+class RangeIndex:
+    """A set of byte ranges with a fast "does [off, off+length) touch any of them?"."""
 
-    # the image must hold the volume byte for byte at its offset
-    fd_img = os.open(args.image, os.O_RDONLY)
-    if not same_bytes(fd_post, fd_img, 0, vol_len, vol_off):
-        fail("%s does not contain the volume at byte %d" % (args.image, vol_off))
-    image_size = os.fstat(fd_img).st_size
-    h = hashlib.sha256()
-    pos = 0
-    while pos < image_size:
-        b = os.pread(fd_img, 8 << 20, pos)
-        h.update(b)
-        pos += len(b)
-    os.close(fd_img)
-    partition_table = read_partition_table(args.image, state["old_volume"]["sector_size"]) if vol_off else None
+    def __init__(self, ranges):
+        merged = []
+        for off, length in sorted(r for r in ranges if r[1] > 0):
+            if merged and off <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], off + length)
+            else:
+                merged.append([off, off + length])
+        self.starts = [m[0] for m in merged]
+        self.ends = [m[1] for m in merged]
 
-    # ---- which old MFT records did the accident destroy? ----------------------
-    destroyed = []
+    def hits(self, off, length):
+        import bisect
+        i = bisect.bisect_right(self.starts, off + length - 1) - 1
+        return i >= 0 and self.ends[i] > off
+
+    def any(self, ranges):
+        return any(self.hits(o, n) for o, n in ranges)
+
+
+def si_times(record):
+    for a in record["attributes"]:
+        if a["type"] == 0x10 and "standard_information" in a:
+            return a["standard_information"]
+    return None
+
+
+class CurrentVolume:
+    """A file system the accident made, as the final image holds it (main coordinates).
+
+    "Main coordinates" are byte offsets inside the lost file system's volume
+    file (old_volume.offset in the image is main coordinate 0).
+    """
+
+    def __init__(self, path, offset_in_file, base, name):
+        self.name = name
+        self.vol = RawVolume(path, offset_in_file)
+        self.vol.load_all()
+        self.base = base
+        b = self.vol.boot
+        self.size = b["total_sectors"] * b["bytes_per_sector"]
+        self.bitmap = Bitmap(self.vol)
+        si = si_times(self.vol.record(3))
+        if si is None:
+            fail("%s: $Volume has no $STANDARD_INFORMATION" % name)
+        self.format_time = si["created"]
+        # the boot sector and its backup, the last sector of the partition, which
+        # lies outside the volume and therefore outside its $Bitmap
+        self.boot_sectors = [(base, b["bytes_per_sector"]), (base + self.size, b["bytes_per_sector"])]
+        self.mft = [(base + o, n) for o, n in mft_byte_ranges(self.vol)]
+        # C3: deleted records of the new volume (post_format) and the clusters they mapped
+        self.post_format = []
+        self.post_format_records = []
+        for n in range(FIRST_USER_RECORD, self.vol.nrecords):
+            r = self.vol.record(n)
+            if r is None or not r["valid"] or r["in_use"] or (r["base_record"], r["base_sequence"]) != (0, 0):
+                continue
+            si = si_times(r)
+            if si is None or si["mft_changed"] < self.format_time:
+                continue
+            self.post_format_records.append(n)
+            try:
+                st = self.vol.stream(n, "", self.vol.gather(n, []))
+            except Fail:
+                st = None                       # its extension records are gone: nothing to map
+            if st is not None and not st["resident"]:
+                self.post_format += [(base + o, length) for o, length in self.vol.extents(st)]
+
+    def allocated(self, off, length):
+        lo, hi = max(off, self.base), min(off + length, self.base + self.size)
+        return lo < hi and self.bitmap.allocated(lo - self.base, hi - lo)
+
+    def describe(self, vol_off):
+        g = self.vol.geometry()
+        g["offset"] = vol_off + self.base
+        g["length"] = self.size + g["sector_size"]
+        g["format_time"] = self.format_time
+        g["format_time_unix_ms"] = unix_ms(self.format_time)
+        return g
+
+
+class FsView:
+    """One old file system of the scenario: its image right before it was lost, and now.
+
+    `pre_path` and `post_path` are files in the file system's own coordinates
+    (byte 0 = its boot sector).  `runs`, for a file system stored inside a
+    file of the main one, are that file's data runs: own byte X lies at main
+    byte lcn * cluster + X % cluster; without runs own and main coordinates
+    are the same.
+    """
+
+    def __init__(self, name, kind, pre_path, post_path, state_entries, old_volume, runs=None, run_cs=0,
+                 container=None):
+        self.name = name
+        self.kind = kind
+        self.pre_path = pre_path
+        self.pre = RawVolume(pre_path)
+        self.pre.load_all()
+        self.post_fd = os.open(post_path, os.O_RDONLY)
+        self.entries = state_entries
+        self.old_volume = old_volume
+        self.runs = runs
+        self.run_cs = run_cs
+        self.container = container
+        self.now = OldLayout(self.pre, self.post_fd)
+        self.by_path = {e["path"]: e for e in state_entries}
+
+    def to_main(self, off, length):
+        """[(main offset, length)] of own bytes [off, off+length); holes are left out."""
+        if self.runs is None:
+            return [(off, length)]
+        out = []
+        cs = self.run_cs
+        pos = 0
+        end = off + length
+        for lcn, n in self.runs:
+            lo, hi = max(off, pos * cs), min(end, (pos + n) * cs)
+            if lo < hi and lcn is not None:
+                out.append((lcn * cs + lo - pos * cs, hi - lo))
+            pos += n
+        return out
+
+    def main_point(self, off):
+        m = self.to_main(off, 1)
+        if not m:
+            fail("%s: byte %d lies in a hole of its container" % (self.name, off))
+        return m[0][0]
+
+    def container_ranges(self):
+        return [r for lcn, n in self.runs if lcn is not None for r in [(lcn * self.run_cs, n * self.run_cs)]]
+
+
+def resolves(record, number, sequence, want_directory):
+    """ALGORITHMS reference rule: does reference (number, sequence) resolve to this record?"""
+    if record is None or not record["valid"] or record["record_number"] not in (None, number):
+        return False
+    if want_directory and not record["is_directory"]:
+        return False
+    if record["in_use"]:
+        return record["sequence"] == sequence
+    nxt = 1 if sequence == 0xFFFF else sequence + 1
+    return record["sequence"] == nxt and bool(record["attributes"])
+
+
+def index_entries_of(fs, others, accident_time, current):
+    """Directory entries that name something, from INDX blocks and index roots that survived.
+
+    Returns (entries, surviving_block_triples).  An entry is "usable" in the
+    sense of ALGORITHMS C4 / E6: older than the accident's format and not in a
+    block the new file system has allocated.  Blocks that belong to another
+    file system of the scenario (an older one at the same place, or the volume
+    inside a container file) are left to that file system.
+    """
+    out = []
+    triples = set()
+    blocks = 0
+    for blk in I.scan_image(fs.pre_path, kinds=("INDX",)):
+        if not blk["valid"]:
+            continue
+        off, size = blk["offset"], blk["block_size"]
+        foreign = False
+        for o in others:
+            if o is fs:
+                continue
+            if o.runs is not None and fs.runs is None and inside(o.container_ranges(), off, size):
+                foreign = True
+            elif o.runs is None and fs.runs is None and o.kind == "older" and fs.kind != "older" \
+                    and same_bytes(o.pre.fd, fs.pre.fd, off, size):
+                foreign = True
+        if foreign:
+            continue
+        blocks += 1
+        if not same_bytes(fs.pre.fd, fs.post_fd, off, size):
+            continue
+        main = fs.to_main(off, size)
+        allocated = any(c.allocated(o, n) for c in current for o, n in main)
+        for x in blk["entries"]:
+            fn = x["file_name"]
+            if not fn:
+                continue
+            triples.add((x["record"], x["sequence"], fn["name"]))
+            out.append({"record": x["record"], "sequence": x["sequence"], "name": fn["name"],
+                        "namespace": fn["namespace_name"], "parent_record": fn["parent_record"],
+                        "parent_sequence": fn["parent_sequence"], "source": "indx",
+                        "offset": fs.main_point(off),
+                        "usable": not allocated and fn["mft_changed"] < accident_time,
+                        "directory": bool(fn["file_attributes"] & 0x10000000)})
+    return out, triples, blocks
+
+
+def index_root_entries(fs, record_changed, accident_time):
+    out = []
+    for n in range(fs.pre.nrecords):
+        r = fs.pre.record(n)
+        if record_changed.get(n, True) or r is None or not r["valid"] or not r["is_directory"]:
+            continue
+        for a in r["attributes"]:
+            if a["type"] != 0x90 or a["name"] != "$I30" or "index_root" not in a:
+                continue
+            for x in a["index_root"]["entries"]:
+                fn = x["file_name"]
+                if not fn or x["record"] == n:
+                    continue
+                out.append({"record": x["record"], "sequence": x["sequence"], "name": fn["name"],
+                            "namespace": fn["namespace_name"], "parent_record": fn["parent_record"],
+                            "parent_sequence": fn["parent_sequence"], "source": "index_root",
+                            "offset": fs.main_point(fs.pre.record_offset(n)),
+                            "usable": fn["mft_changed"] < accident_time,
+                            "directory": bool(fn["file_attributes"] & 0x10000000)})
+    return out
+
+
+def file_extents(fs, e):
+    """Own-coordinate byte ranges of an entry's data: its runs, or the record holding resident data."""
+    od = e["ondisk"]
+    if e["type"] != "file" or "resident" not in od:
+        return None
+    if od["resident"]:
+        holder = e["mft_record"]
+        return [(fs.pre.record_offset(holder), fs.pre.rs)]
+    cs = fs.pre.cs
+    return [(lcn * cs, n * cs) for lcn, n in od["runs"] if lcn is not None]
+
+
+def assess_fs(fs, ctx):
+    """The "after" facts of every entry of one old file system (first pass)."""
+    pre, rs = fs.pre, fs.pre.rs
     record_changed = {}
+    destroyed = []
     for n in range(pre.nrecords):
         off = pre.record_offset(n)
-        changed = os.pread(fd_pre, rs, off) != os.pread(fd_post, rs, off)
+        changed = os.pread(pre.fd, rs, off) != os.pread(fs.post_fd, rs, off)
         record_changed[n] = changed
         if changed:
             destroyed.append(n)
-    state["destroyed_records"] = destroyed
-
-    # ---- which old INDX blocks survive? -------------------------------------
-    surviving = set()
-    indx_before = indx_after = 0
-    for blk in I.scan_image(args.pre_volume, kinds=("INDX",)):
-        if not blk["valid"]:
-            continue
-        indx_before += 1
-        if not same_bytes(fd_pre, fd_post, blk["offset"], blk["block_size"]):
-            continue
-        indx_after += 1
-        for x in blk["entries"]:
-            if x["file_name"]:
-                surviving.add((x["record"], x["sequence"], x["file_name"]["name"]))
-
-    bitmap = Bitmap(new)
-    now = OldLayout(pre, fd_post)
-
-    # ---- per entry ------------------------------------------------------------
+    fs.record_changed = record_changed
+    fs.destroyed = destroyed
+    fs.index_entries, triples, fs.indx_blocks = index_entries_of(fs, ctx["fs"], ctx["accident_time"],
+                                                                  ctx["current"])
+    fs.indx_blocks_surviving = len(set(x["offset"] for x in fs.index_entries if x["source"] == "indx"))
+    fs.index_entries += index_root_entries(fs, record_changed, ctx["accident_time"])
     siblings = {}
-    for e in state["expected"] + state["deleted"]:
+    for e in fs.entries:
         folded = siblings.setdefault(parent_of(e["path"]), {})
         folded[base_of(e["path"]).upper()] = folded.get(base_of(e["path"]).upper(), 0) + 1
-    entries = []
-    for e in state["expected"] + state["deleted"]:
-        od = e["ondisk"]
+    current = ctx["current"]
+    out_entries = []
+    for e in fs.entries:
+        od = dict(e["ondisk"])
         out = {"path": e["path"], "type": e["type"], "size": e["size"], "sha256": e["sha256"],
                "mft_record": e["mft_record"], "mft_sequence": e["mft_sequence"],
                "created": e["created"], "modified": e["modified"], "accessed": e["accessed"],
@@ -2546,79 +3295,346 @@ def cmd_finalize(args):
             out["dos_name"] = e["dos_name"]
         if "streams" in e:
             out["streams"] = e["streams"]
+        out["file_system"] = fs.name
+        if fs.container:
+            out["embedded_in"] = fs.container
         recs = [e["mft_record"]] + od.get("extension_records", [])
         state_ok = not e.get("deleted") or od["record_state"] == "intact"
         after = {"record_intact": state_ok and not any(record_changed.get(n, True) for n in recs)}
+        if state_ok:
+            si = si_times(pre.record(e["mft_record"]))
+            out["mft_changed"] = si["mft_changed"] if si else None
+        else:
+            out["mft_changed"] = None
+        own = file_extents(fs, dict(e, ondisk=od)) if state_ok else None
+        main = [m for o, n in (own or []) for m in fs.to_main(o, n)]
+        e["_main"] = main
         if e["type"] == "file":
             if not state_ok:
                 after["content_intact"] = False
                 after["overlaps_new_allocation"] = None
             else:
-                # Read the file once more, from where the old MFT said it was, out of the
-                # final image: does it still give the manifest's hash?
                 stream = pre.stream(e["mft_record"], "", pre.gather(e["mft_record"], od["extension_records"]))
                 try:
-                    data = now.read_stream(stream)
+                    data = fs.now.read_stream(stream)
                 except (Fail, IndexError, struct.error):      # overwritten compressed data
                     data = b""
                 after["content_intact"] = len(data) == e["size"] and sha256_hex(data) == e["sha256"]
-                if stream["resident"]:
-                    # resident content lives in the record that holds $DATA
-                    after["overlaps_new_allocation"] = bitmap.allocated(pre.record_offset(stream["holders"][0]), rs)
-                else:
-                    ext = [(lcn * pre.cs, length * pre.cs) for lcn, length in stream["runs"] if lcn is not None]
-                    after["clusters_changed"] = sum(count_changed(fd_pre, fd_post, off, length, pre.cs)
-                                                    for off, length in ext)
-                    after["overlaps_new_allocation"] = any(bitmap.allocated(off, length) for off, length in ext)
+                if not stream["resident"]:
+                    after["clusters_changed"] = sum(count_changed(pre.fd, fs.post_fd, o, n, pre.cs)
+                                                    for o, n in own)
+                after["overlaps_new_allocation"] = any(c.allocated(o, n) for c in current for o, n in main)
                 if e.get("deleted") and after["content_intact"] and not od.get("content_intact_before_accident"):
                     fail("%r: content that was damaged before the accident reads back intact after it" % e["path"])
         else:
             after["content_intact"] = None
             after["overlaps_new_allocation"] = None
-        after["index_entry_intact"] = (e["mft_record"], e["mft_sequence"], base_of(e["path"])) in surviving
+        after["index_entry_intact"] = (e["mft_record"], e["mft_sequence"], base_of(e["path"])) in triples
+        if e["type"] == "file" and state_ok:
+            lo, hi = ctx["scan_range"]
+            after["data_inside_scan_range"] = all(lo <= ctx["vol_off"] + o and ctx["vol_off"] + o + n <= hi
+                                                  for o, n in main)
+        else:
+            after["data_inside_scan_range"] = None
         if "record_offset" in od:
-            od["record_offset"] += vol_off
+            od["record_offset"] = ctx["vol_off"] + fs.main_point(od["record_offset"] - 0)
         out["ondisk"] = od
         out["after"] = after
-        entries.append(out)
-    entries.sort(key=lambda x: x["path"])
+        out_entries.append(out)
+        if after["record_intact"]:
+            ctx["owners"][od["record_offset"]] = {"file_system": fs.name, "path": e["path"],
+                                                  "mft_record": e["mft_record"], "deleted": out["deleted"]}
+    fs.out = out_entries
+    fs.out_by_path = {x["path"]: x for x in out_entries}
+    return out_entries
 
-    # ---- new files (post-write) ---------------------------------------------
+
+def finish_fs(fs, ctx):
+    """Second pass: what needs every file system's first pass (names, ancestry, collisions, evidence)."""
+    all_entries = [(o, x) for o in ctx["fs"] for x in o.index_entries]
+    current = ctx["current"]
+    post_format = RangeIndex([r for c in current for r in c.post_format])
+    boots = RangeIndex([r for c in current for r in c.boot_sectors])
+    newer = ctx["newer_ranges"] if fs.kind == "older" else None
+    for out in fs.out:
+        e = fs.by_path[out["path"]]
+        after = out["after"]
+        # ---- names of a destroyed folder that survive elsewhere
+        if out["type"] == "dir" and not after["record_intact"] and out["mft_sequence"] is not None:
+            key = (out["mft_record"], out["mft_sequence"])
+            lo, hi = ctx["scan_range"]
+            after["named_by"] = sorted(
+                ({"name": x["name"], "namespace": x["namespace"], "source": x["source"],
+                  "offset": ctx["vol_off"] + x["offset"], "parent_record": x["parent_record"],
+                  "parent_sequence": x["parent_sequence"], "usable": x["usable"],
+                  "inside_scan_range": lo <= ctx["vol_off"] + x["offset"] < hi}
+                 for o, x in all_entries if o is fs and (x["record"], x["sequence"]) == key),
+                key=lambda x: (x["source"], x["offset"], x["name"]))
+            foreign = sorted(set((o.name, x["name"]) for o, x in all_entries
+                                 if o is not fs and (x["record"], x["sequence"]) == key))
+            if foreign:
+                after["foreign_index_entries"] = [{"file_system": f, "name": n} for f, n in foreign]
+        # ---- damage evidence and reuse by a newer generation
+        if out["type"] == "file" and after["record_intact"]:
+            main = e["_main"]
+            if not after["content_intact"]:
+                ev = []
+                if after["overlaps_new_allocation"]:
+                    ev.append("current-allocation")
+                if post_format.any(main):
+                    ev.append("post-format-record")
+                if boots.any(main):
+                    ev.append("current-boot-sector")
+                if newer is not None and newer.any(main):
+                    ev.append("newer-file")
+                after["damage_evidence"] = ev or ["none"]
+            if fs.kind == "older":
+                after["clusters_reused_by_newer"] = ctx["newer_bitmap"] is not None and any(
+                    ctx["newer_bitmap"].allocated(o, n) for o, n in main)
+    # ---- ancestry: can the path be rebuilt, and what survives of it?
+    lo, hi = ctx["scan_range"]
+
+    def known(o, whole):
+        """Does a scan learn this entry's name and parent: from its record, or from an index entry?"""
+        a = o["after"]
+        ro = o["ondisk"].get("record_offset")
+        if a["record_intact"] and (whole or (ro is not None and lo <= ro < hi)):
+            return True
+        return any(x["usable"] and (whole or x["inside_scan_range"]) for x in a.get("named_by", []))
+
+    def ancestry(out, whole):
+        comps = out["path"].split("/")
+        lost = None
+        for i in range(1, len(comps)):
+            if not known(fs.out_by_path["/".join(comps[:i])], whole):
+                lost = i
+        # a folder whose record is gone still gets its name (and parent) from a usable index entry
+        return {"path_reconstructible": known(out, whole) and lost is None,
+                "lost_ancestor": "/".join(comps[:lost]) if lost else None,
+                "surviving_suffix": "/".join(comps[lost:]) if lost else out["path"]}
+
+    partial = (lo, hi) != (0, ctx["image_size"])
+    for out in fs.out:
+        after = out["after"]
+        after["ancestry"] = ancestry(out, False)
+        if partial:
+            whole = ancestry(out, True)
+            if whole != after["ancestry"]:
+                after["ancestry_whole_image"] = whole
+        # ---- what the parent reference meets in the parent's slot now
+        parent = parent_of(out["path"])
+        if not after["record_intact"] or not parent:
+            continue
+        pe = fs.out_by_path[parent]
+        if pe["after"]["record_intact"] or pe["mft_sequence"] is None:
+            continue
+        slot = fs.pre.record_offset(pe["mft_record"])
+        if slot is None:
+            continue
+        rec = I.parse_file_record(os.pread(fs.post_fd, fs.pre.rs, slot), 0)
+        if rec is None or not rec["valid"] or not rec["attributes"]:
+            continue
+        where = ctx["vol_off"] + fs.main_point(slot)
+        owner = ctx["owners"].get(where, {"file_system": "unknown", "path": None})
+        info = {"file_system": owner["file_system"], "path": owner["path"], "mft_record": pe["mft_record"],
+                "mft_sequence": rec["sequence"], "in_use": rec["in_use"], "is_directory": rec["is_directory"],
+                "record_offset": where}
+        if resolves(rec, pe["mft_record"], pe["mft_sequence"], True):
+            after["parent_reference_taken_by"] = info
+        elif rec["in_use"]:
+            after["parent_slot_contradiction"] = info
+
+
+def describe_fs(fs, ctx, kind):
+    g = dict(fs.old_volume)
+    pre_vol = fs.pre
+    si = si_times(pre_vol.record(3))
+    g.update({"name": fs.name, "kind": kind,
+              "format_time": si["created"] if si else None,
+              "format_time_unix_ms": unix_ms(si["created"]) if si else None,
+              "last_write": last_write(pre_vol),
+              "last_write_unix_ms": unix_ms(last_write(pre_vol))})
+    if fs.runs is None:
+        g["offset"] = ctx["vol_off"]
+    else:
+        g["offset"] = None
+        g["container"] = fs.container
+        g["container_runs"] = [[lcn, n] for lcn, n in fs.runs]
+        g["container_cluster_size"] = fs.run_cs
+    g["length"] = os.fstat(pre_vol.fd).st_size
+    return g
+
+
+def read_through(fd, runs, cs, size, out_path):
+    """Write the content of a file described by runs (holes as zeros) to out_path."""
+    with open(out_path, "wb") as f:
+        pos = 0
+        for lcn, n in runs:
+            if pos >= size:
+                break
+            take = min(n * cs, size - pos)
+            if lcn is None:
+                f.seek(pos + take)
+            else:
+                f.seek(pos)
+                f.write(os.pread(fd, take, lcn * cs))
+            pos += take
+        f.truncate(size)
+
+
+def cmd_finalize(args):
+    state = load_state(args.state)
+    if not state.get("analyzed"):
+        fail("finalize must run after analyze")
+    work = os.path.dirname(os.path.abspath(args.state))
+    vol_off = args.volume_offset
+    vol_len = os.path.getsize(args.volume)
+
+    # the image must hold the volume byte for byte at its offset
+    fd_vol = os.open(args.volume, os.O_RDONLY)
+    fd_img = os.open(args.image, os.O_RDONLY)
+    if not same_bytes(fd_vol, fd_img, 0, vol_len, vol_off):
+        fail("%s does not contain the volume at byte %d" % (args.image, vol_off))
+    image_size = os.fstat(fd_img).st_size
+    h = hashlib.sha256()
+    pos = 0
+    while pos < image_size:
+        b = os.pread(fd_img, 8 << 20, pos)
+        h.update(b)
+        pos += len(b)
+    os.close(fd_img)
+    os.close(fd_vol)
+    partition_table = read_partition_table(args.image, state["old_volume"]["sector_size"]) if vol_off else None
+
+    # ---- the file systems the accident made ----------------------------------
+    current = [CurrentVolume(args.volume, 0, 0, "new")]
+    for extra in args.new_volume:
+        base = int(extra)
+        current.append(CurrentVolume(args.volume, base, base, "new-%d" % len(current)))
+    accident_time = current[0].format_time
+    if accident_time % 10000000:
+        fail("the new volume's creation time %d is not a whole second" % accident_time)
+    last_old = state["accident"].get("last_old_write")
+    if last_old is None:
+        fail("the old volume's last write was not recorded before the accident")
+    if not accident_time > last_old:
+        fail("the accident's format (%d) is not later than the last write to the old volume (%d)"
+             % (accident_time, last_old))
+    for c in current[1:]:
+        if not c.format_time > last_old:
+            fail("%s was formatted before the last write to the old volume" % c.name)
+    if args.scan_range:
+        lo, n = [int(x) for x in args.scan_range.split(":")]
+        scan_range = (lo, lo + n)
+    else:
+        scan_range = (vol_off, vol_off + vol_len) if vol_off else (0, image_size)
+
+    # ---- the old file systems -----------------------------------------------
+    main = FsView(state["fs_name"], "main", args.pre_volume, args.volume, state["expected"] + state["deleted"],
+                  state["old_volume"])
+    views = [main]
+    for o in state.get("other_fs", []):
+        if o["kind"] == "older":
+            views.append(FsView(o["name"], "older", o["pre_volume"], args.volume, o["expected"] + o["deleted"],
+                                o["old_volume"]))
+        else:
+            holder = [e for e in state["expected"] if e["path"] == o["container"]]
+            if len(holder) != 1:
+                fail("container %r is not a file of the main file system" % o["container"])
+            st = main.pre.stream(holder[0]["mft_record"], "",
+                                 main.pre.gather(holder[0]["mft_record"], holder[0]["ondisk"]["extension_records"]))
+            runs = st["runs"]
+            extracted = os.path.join(work, "%s.%s.after.img" % (state["scenario"], o["name"]))
+            read_through(os.open(args.volume, os.O_RDONLY), runs, main.pre.cs, st["size"], extracted)
+            views.append(FsView(o["name"], "embedded", o["pre_volume"], extracted, o["expected"] + o["deleted"],
+                                o["old_volume"], runs=runs, run_cs=main.pre.cs, container=o["container"]))
+    ctx = {"fs": views, "current": current, "accident_time": accident_time, "vol_off": vol_off,
+           "scan_range": scan_range, "owners": {}, "newer_bitmap": None, "newer_ranges": None,
+           "image_size": image_size}
+
+    # new files written after the accident
     new_files = []
     for e in state.get("new_expected", []) + state.get("new_deleted", []):
+        nv = current[0].vol
+        r = nv.record(e["mft_record"])
         nf = {"path": e["path"], "type": e["type"], "size": e["size"], "sha256": e["sha256"],
               "mft_record": e["mft_record"], "deleted": bool(e.get("deleted")),
               "created": e["created"], "modified": e["modified"], "accessed": e["accessed"],
-              "content_type": e["content_type"]}
-        r = new.record(e["mft_record"])
+              "content_type": e["content_type"], "tags": e["tags"], "file_system": "new",
+              "record_offset": vol_off + nv.record_offset(e["mft_record"])}
         if not e.get("deleted"):
             if not r or not r["in_use"] or base_of(e["path"]) not in [fn["name"] for fn in r["names"]]:
                 fail("new file %r: record %d of the new MFT does not hold it" % (e["path"], e["mft_record"]))
+            nf["mft_sequence"] = r["sequence"]
             if e["type"] == "file":
-                s = new.stream(e["mft_record"])
-                data = new.read_stream(s)
-                if data is None or sha256_hex(data) != e["sha256"]:
+                data = nv.read_stream(nv.stream(e["mft_record"]))
+                if sha256_hex(data) != e["sha256"]:
                     fail("new file %r: raw content does not match the driver's SHA-256" % e["path"])
+            ctx["owners"][nf["record_offset"]] = {"file_system": "new", "path": e["path"],
+                                                  "mft_record": e["mft_record"], "deleted": False}
+        else:
+            if not r or r["in_use"] or e["mft_record"] not in current[0].post_format_records:
+                fail("deleted new file %r: record %d is not a post-format record of the new MFT"
+                     % (e["path"], e["mft_record"]))
+            nf["mft_sequence"] = (r["sequence"] - 1) & 0xFFFF
         new_files.append(nf)
     new_files.sort(key=lambda x: x["path"])
 
-    new_geo = new.geometry()
+    entries = assess_fs(main, ctx)
+    for v in views[1:]:
+        assess_fs(v, ctx)
+    if any(v.kind == "older" for v in views):
+        # for an older generation: what the newer one (the lost file system) had allocated before the
+        # accident, and the data of its files that intact records still describe (ALGORITHMS G2)
+        ctx["newer_bitmap"] = Bitmap(main.pre)
+        ctx["newer_ranges"] = RangeIndex(
+            [m for x in main.out if x["after"]["record_intact"] and not x["deleted"]
+             for m in main.by_path[x["path"]]["_main"]])
+    for v in views:
+        finish_fs(v, ctx)
+    for v in views:
+        for e in v.entries:
+            e.pop("_main", None)
+    entries.sort(key=lambda x: x["path"])
+    other_entries = sorted([x for v in views[1:] for x in v.out], key=lambda x: (x["file_system"], x["path"]))
+    state["destroyed_records"] = main.destroyed
+
+    new_geo = current[0].describe(vol_off)
     if new_geo["serial"] == state["old_volume"]["serial"]:
         fail("old and new volume have the same serial number")
     new_geo["mkntfs_args"] = state["new_volume"]["mkntfs_args"]
-    new_geo["offset"] = vol_off
-    new_geo["length"] = vol_len
+    new_geo["length"] = vol_len if len(current) == 1 else current[0].size + new_geo["sector_size"]
     state["new_volume"] = new_geo
-    ctx = {"entries": entries, "partition_table": partition_table, "volume_offset": vol_off,
-           "volume_length": vol_len}
+    accident = dict(state["accident"])
+    accident["last_old_write_unix_ms"] = unix_ms(last_old)
+    accident["format_time"] = accident_time
+    accident["format_time_unix_ms"] = unix_ms(accident_time)
+    file_systems = [describe_fs(v, ctx, v.kind) for v in views]
+    history = []
+    for hst in state.get("history", []):
+        hst = dict(hst)
+        # the re-format's time is the creation time of the file system it made
+        made = [d for d in file_systems if d["kind"] == "main"][0]
+        hst["format_time"] = made["format_time"]
+        hst["format_time_unix_ms"] = made["format_time_unix_ms"]
+        hst["last_old_write_unix_ms"] = unix_ms(hst["last_old_write"])
+        if not hst["format_time"] > hst["last_old_write"]:
+            fail("the re-format over %s is not later than its last write" % hst["formatted_over"])
+        history.append(hst)
+
+    ctx.update({"entries": entries, "other_entries": other_entries, "partition_table": partition_table,
+                "volume_offset": vol_off, "volume_length": vol_len, "views": views, "new_files": new_files,
+                "image_size": image_size, "image_path": args.image})
     for name in state["expect"]:
         if name in EXPECT_POST:
             msg = EXPECT_POST[name](state, ctx)
             log("verified: " + msg)
             state["verified"].append(msg)
-    msg = scan_check(args.volume, entries, now)
-    log("verified: " + msg)
-    state["verified"].append(msg)
+    for v in views:
+        if v.runs is None:
+            msg = scan_check(args.volume, [x for x in v.out], v.now, v.name)
+            log("verified: " + msg)
+            state["verified"].append(msg)
 
     live = [e for e in entries if not e["deleted"]]
     files = [e for e in live if e["type"] == "file"]
@@ -2627,18 +3643,25 @@ def cmd_finalize(args):
         "folders": len(live) - len(files),
         "deleted_entries": len(entries) - len(live),
         "bytes_in_files": sum(e["size"] for e in files),
-        "old_mft_records": pre.nrecords,
-        "old_mft_fragments": len(pre.mft_runs),
-        "destroyed_records": len(destroyed),
+        "old_mft_records": main.pre.nrecords,
+        "old_mft_fragments": len(main.pre.mft_runs),
+        "destroyed_records": len(main.destroyed),
         "live_entries_with_destroyed_record": sum(1 for e in live if not e["after"]["record_intact"]),
         "live_files_with_damaged_content": sum(1 for e in files if not e["after"]["content_intact"]),
         "live_files_fully_intact": sum(1 for e in files if e["after"]["content_intact"] and e["after"]["record_intact"]),
         "samples_with_destroyed_record_still_contiguous_and_intact": sum(
             1 for e in files if "sample" in e["tags"] and not e["after"]["record_intact"]
             and e["after"]["content_intact"] and e["ondisk"]["fragments"] == 1),
-        "old_indx_blocks": indx_before,
-        "old_indx_blocks_surviving": indx_after,
+        "old_indx_blocks": main.indx_blocks,
+        "old_indx_blocks_surviving": main.indx_blocks_surviving,
         "new_files": len(new_files),
+        "live_entries_with_reconstructible_path": sum(1 for e in live if e["after"]["ancestry"]["path_reconstructible"]),
+        "live_entries_below_a_lost_folder": sum(1 for e in live if e["after"]["record_intact"]
+                                               and not e["after"]["ancestry"]["path_reconstructible"]),
+        "destroyed_folders_named_by_index_entries": sum(1 for e in live if e["type"] == "dir"
+                                                       and any(x["usable"] for x in e["after"].get("named_by", []))),
+        "entries_whose_parent_reference_is_taken": sum(1 for e in entries if "parent_reference_taken_by" in e["after"]),
+        "other_entries": len(other_entries),
     }
     old_geo = dict(state["old_volume"])
     old_geo["offset"] = vol_off
@@ -2655,21 +3678,32 @@ def cmd_finalize(args):
                   "pre_image": args.pre_image_name or None, "partition_table": partition_table},
         "old_volume": old_geo,
         "new_volume": new_geo,
-        "accident": state["accident"],
-        "destroyed_records": destroyed,
+        "new_volumes": [c.describe(vol_off) for c in current],
+        "scan_range": {"offset": scan_range[0], "length": scan_range[1] - scan_range[0],
+                       "what": args.scan_range_what},
+        "accident": accident,
+        "history": history,
+        "file_systems": file_systems,
+        "destroyed_records": main.destroyed,
         "summary": summary,
         "verified": state["verified"],
         "notes": state["notes"],
         "samples_skipped": state.get("samples_skipped", []),
         "new_files": new_files,
         "entries": entries,
+        "other_entries": other_entries,
     }
     write_manifest(args.manifest, manifest)
-    pre.close()
-    new.close()
-    log("manifest: %s (%d files, %d folders, %d deleted entries, %d old MFT records destroyed)"
+    for v in views:
+        v.pre.close()
+        os.close(v.post_fd)
+        if v.runs is not None:
+            os.remove(os.path.join(work, "%s.%s.after.img" % (state["scenario"], v.name)))
+    for c in current:
+        c.vol.close()
+    log("manifest: %s (%d files, %d folders, %d deleted entries, %d old MFT records destroyed%s)"
         % (os.path.basename(args.manifest), summary["files"], summary["folders"], summary["deleted_entries"],
-           len(destroyed)))
+           len(main.destroyed), ", %d entries of other file systems" % len(other_entries) if other_entries else ""))
 
 
 # ==========================================================================
@@ -2692,6 +3726,7 @@ def cmd_init(args):
     state = {"scenario": args.scenario, "description": args.description,
              "expect": [x for x in args.expect.split(",") if x],
              "notes": [], "verified": [], "samples_skipped": skipped,
+             "fs_name": args.fs_name, "boundary": args.boundary, "history": [],
              "accident": {"steps": [], "wiped_records": None}}
     save_state(args.state, state)
 
@@ -2795,6 +3830,9 @@ def main():
     p.add_argument("--description", required=True)
     p.add_argument("--expect", default="")
     p.add_argument("--samples", required=True)
+    p.add_argument("--fs-name", default="main", help="name of the lost file system in the manifest")
+    p.add_argument("--boundary", type=int, default=0,
+                   help="highest old record number the accident is expected to destroy (0: none promised)")
     p.set_defaults(fn=cmd_init)
 
     p = sub.add_parser("format")
@@ -2811,6 +3849,10 @@ def main():
     p.add_argument("--profile", choices=sorted(PROFILES), required=True)
     p.add_argument("--compression", action="store_true")
     p.add_argument("--phase", type=int, choices=(1, 2), required=True)
+    p.add_argument("--prelude", type=int, default=0,
+                   help="create the prelude first, pushing later entries past this record number")
+    p.add_argument("--restored", action="store_true", help="gen2: creation times as restored from a backup")
+    p.add_argument("--source", default="", help="host: the volume image stored as a file")
     p.set_defaults(fn=cmd_populate)
 
     p = sub.add_parser("capture")
@@ -2831,17 +3873,39 @@ def main():
 
     p = sub.add_parser("wipe")
     p.add_argument("--state", required=True)
-    p.add_argument("--pre-volume", required=True)
-    p.add_argument("--volume", required=True)
-    p.add_argument("--first", type=int, default=0)
+    p.add_argument("--pre-volume", required=True, help="the file system being formatted over, same coordinates")
+    p.add_argument("--volume", required=True, help="the freshly formatted volume")
+    p.add_argument("--volume-offset", type=int, default=0, help="where the volume will sit in the image")
     p.add_argument("--last", type=int, default=255)
+    p.add_argument("--fill", choices=("zeros", "blank"), default="zeros")
+    p.add_argument("--record", choices=("accident", "history"), default="accident")
     p.set_defaults(fn=cmd_wipe)
+
+    p = sub.add_parser("lastwrite")
+    p.add_argument("--state", required=True)
+    p.add_argument("--volume", required=True)
+    p.add_argument("--record", default="accident", help="'accident' or the name of the file system formatted over")
+    p.set_defaults(fn=cmd_lastwrite)
+
+    p = sub.add_parser("stash")
+    p.add_argument("--state", required=True)
+    p.add_argument("--name", required=True)
+    p.add_argument("--kind", choices=("older", "embedded"), required=True)
+    p.add_argument("--pre-volume", required=True)
+    p.add_argument("--container", default="")
+    p.set_defaults(fn=cmd_stash)
 
     p = sub.add_parser("newfiles")
     p.add_argument("--state", required=True)
     p.add_argument("--root", required=True)
     p.add_argument("--samples", required=True)
     p.set_defaults(fn=cmd_newfiles)
+
+    p = sub.add_parser("collide")
+    p.add_argument("--state", required=True)
+    p.add_argument("--root", required=True)
+    p.add_argument("--samples", required=True)
+    p.set_defaults(fn=cmd_collide)
 
     p = sub.add_parser("capture-new")
     p.add_argument("--state", required=True)
@@ -2878,6 +3942,10 @@ def main():
     p.add_argument("--image", required=True)
     p.add_argument("--pre-image-name", default="")
     p.add_argument("--manifest", required=True)
+    p.add_argument("--new-volume", action="append", default=[],
+                   help="byte offset, inside the volume file, of a further volume the accident made")
+    p.add_argument("--scan-range", default="", help="START:LENGTH in the image (default: the old partition)")
+    p.add_argument("--scan-range-what", default="the old volume's partition")
     p.set_defaults(fn=cmd_finalize)
 
     args = ap.parse_args()

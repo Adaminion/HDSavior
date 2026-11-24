@@ -21,6 +21,8 @@ import 'selection_model.dart';
 ///   the selection is kept.
 /// * A `stale_catalog` answer to any request made through [guarded] triggers
 ///   a [refresh], which adopts the engine's current catalog.
+/// * [guardRevision] tells when the destination guard's answers may have
+///   changed, so that verdicts on destinations are asked for again.
 class CatalogController extends ChangeNotifier {
   CatalogController(
     this._api, {
@@ -47,6 +49,7 @@ class CatalogController extends ChangeNotifier {
   CatalogInfo? _info;
   Future<void>? _refreshing;
   int _changes = 0;
+  int _guardRevision = 0;
 
   /// The current catalog, `null` if there is none (nothing scanned yet, or a
   /// scan is running).
@@ -69,16 +72,38 @@ class CatalogController extends ChangeNotifier {
   /// it changes.
   int get epochChanges => _changes;
 
+  /// Changes whenever the destination guard may answer differently: a
+  /// catalog arrived or went away, a new epoch began, the protected ranges
+  /// changed, or a geometry was set. The guard protects the session range
+  /// and every lost volume the catalog knows (docs/ARCHITECTURE.md, S2), and
+  /// `check_destination` counts the catalog files at a location, so a
+  /// verdict must be asked for again when this changes ("ask again after
+  /// `scan_done`, `session_load`, `session_attach_source`, `geometry_set`
+  /// and `instance_set`").
+  int get guardRevision => _guardRevision;
+
+  /// The ranges of the source that no destination may touch; empty without
+  /// a catalog.
+  List<ProtectedRange> get protectedRanges => _info?.protected ?? const [];
+
   /// Takes over [next] as the current catalog (from `scan_done`,
-  /// `session_load`, `session_attach_source`, `geometry_set`, `carve_done`,
-  /// `catalog_info`).
-  void adopt(CatalogInfo next) {
+  /// `session_load`, `session_attach_source`, `geometry_set`,
+  /// `instance_set`, `carve_done`, `catalog_info`).
+  void adopt(CatalogInfo next) => _adopt(next, guardChanged: false);
+
+  void _adopt(CatalogInfo next, {required bool guardChanged}) {
     final previous = _info;
     _info = next;
-    if (previous == null || previous.epoch != next.epoch) {
+    final newEpoch = previous == null || previous.epoch != next.epoch;
+    if (newEpoch) {
       _epochEnded();
     } else {
       rows.invalidate();
+    }
+    if (guardChanged ||
+        newEpoch ||
+        !listEquals(previous.protected, next.protected)) {
+      _guardRevision++;
     }
     notifyListeners();
   }
@@ -89,6 +114,7 @@ class CatalogController extends ChangeNotifier {
     if (_info == null) return;
     _info = null;
     _epochEnded();
+    _guardRevision++;
     notifyListeners();
   }
 
@@ -230,9 +256,11 @@ class CatalogController extends ChangeNotifier {
   );
 
   /// `geometry_set`: overrides the geometry of the file system [instance]
-  /// (an `Instance.id`). The epoch stays; ratings are recomputed, so rows
-  /// are fetched again; carved files are discarded when the main instance
-  /// changes. Can take long: progress arrives as `task_progress`.
+  /// (an `Instance.id`; a pair equal to one of its `geometryCandidates`
+  /// selects that candidate). The epoch stays; ratings and the protected
+  /// ranges are recomputed, so rows are fetched again and destinations are
+  /// checked again; carved files are discarded when the geometry of the main
+  /// instance changes. Can take long: progress arrives as `task_progress`.
   Future<CatalogInfo> setGeometry({
     required int instance,
     required int clusterSize,
@@ -247,11 +275,34 @@ class CatalogController extends ChangeNotifier {
       );
       // "Carved nodes are discarded when the main instance changes."
       if (instance == main) carvedNodesReplaced();
-      adopt(info);
+      _adopt(info, guardChanged: true);
       return info;
     } finally {
       _task?.value = null;
     }
+  }
+
+  /// `instance_set`: overrules the engine's verdict about the file system
+  /// [instance] (an `Instance.id`).
+  ///
+  /// * [InstanceOverride.main]: "this is the one I want" - it becomes the
+  ///   main instance (`instances[0]`), the previous main one becomes
+  ///   `other`.
+  /// * [InstanceOverride.other]: "treat as a separate volume" - an
+  ///   `embedded` or `older` instance becomes a volume of its own whose
+  ///   files are read with its own geometry and can be recovered.
+  /// * [InstanceOverride.auto]: withdraws the override (`Instance.manual`).
+  ///
+  /// The catalog is rebuilt with a new epoch: the selection and every
+  /// cached row are dropped and the browser returns to the main root.
+  /// Carved files are discarded. `strays` cannot be changed (`bad_request`).
+  Future<CatalogInfo> setInstanceKind({
+    required int instance,
+    required InstanceOverride kind,
+  }) async {
+    final info = await _api.instanceSet(instance: instance, kind: kind);
+    _adopt(info, guardChanged: true);
+    return info;
   }
 
   @override

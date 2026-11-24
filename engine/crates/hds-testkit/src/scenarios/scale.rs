@@ -283,7 +283,7 @@ impl ScaleLayout {
     }
 
     fn file_deleted(&self, file: u64) -> bool {
-        mix64(self.spec.seed ^ 0xDE1E_7ED0 ^ file) % 100 == 0
+        mix64(self.spec.seed ^ 0xDE1E_7ED0 ^ file).is_multiple_of(100)
     }
 
     /// `(size, slot)` of a file: `slot` is `Some` for the non-resident ones.
@@ -624,6 +624,7 @@ fn geometry(l: &ScaleLayout, boot: &crate::ondisk::boot::BootParams) -> Geometry
             offset: l.mft_lcn * CLUSTER,
         }],
         mftmirr_lcn: boot.mftmirr_lcn,
+        mftmirr_clusters: (4 * RECORD).div_ceil(CLUSTER),
         mft_records: l.mft_clusters * CLUSTER / RECORD,
         mft_initialized_records: l.mft_clusters * CLUSTER / RECORD,
     }
@@ -839,6 +840,7 @@ fn full_manifest(l: &ScaleLayout, summary: &ScaleManifest, mut current: Manifest
             },
             expect: Expect {
                 presence: if intact { Presence::Shown } else { Presence::Gone },
+                instance: None,
                 path: None,
                 flags_set: Vec::new(),
                 flags_clear: Vec::new(),
@@ -881,24 +883,21 @@ fn full_manifest(l: &ScaleLayout, summary: &ScaleManifest, mut current: Manifest
     records.sort_by_key(|r| r.offset);
     index_blocks.append(&mut current.index_blocks);
     index_blocks.sort_by_key(|b| b.offset);
-    Manifest {
-        manifest_version: 1,
-        scenario: "scale".into(),
-        description: "Old volume with a fixed tree shape, quick-formatted; see hds_testkit::scenarios::scale.".into(),
-        rules: vec!["A4".into(), "A8".into()],
-        seed: l.spec.seed,
-        image_size: l.partition_bytes,
-        sector_size: 512,
-        scan_range: (0, l.partition_bytes),
-        partitions: Vec::new(),
-        instances,
-        entries,
-        records,
-        index_blocks,
-        boot_sectors: current.boot_sectors,
-        overwritten_set: current.overwritten_set,
-        notes: vec!["Expected paths and flags are not stated for this image; counts are in ScaleManifest.".into()],
-    }
+    let mut m = Manifest::blank("scale", l.partition_bytes);
+    m.description = "Old volume with a fixed tree shape, quick-formatted; see hds_testkit::scenarios::scale.".into();
+    m.rules = vec!["A4".into(), "A8".into()];
+    m.seed = l.spec.seed;
+    m.instances = instances;
+    m.entries = entries;
+    m.records = records;
+    m.index_blocks = index_blocks;
+    m.boot_sectors = current.boot_sectors;
+    m.notes = vec![
+        "Health flags that follow from an entry alone (deleted, sparse, ...) are not stated for this image; \
+         counts are in ScaleManifest."
+            .into(),
+    ];
+    m
 }
 
 /// Writes the million-record volume to `path` (a sparse file of 5 GiB, of
@@ -922,5 +921,8 @@ pub fn scale_in_memory(spec: &ScaleSpec) -> Built {
     let layout = ScaleLayout::new(spec);
     let mut image = Image::new(layout.image_size());
     let (_, manifest) = write_scale(spec, &mut image, true).expect("writing to memory cannot fail");
-    Built { image, manifest: manifest.expect("collected") }
+    let mut manifest = manifest.expect("collected");
+    let undecided = crate::expect::derive(&mut manifest, &image, &std::collections::BTreeMap::new());
+    assert!(undecided.is_empty(), "the scale volume leaves {undecided:?} open");
+    Built { image, manifest }
 }

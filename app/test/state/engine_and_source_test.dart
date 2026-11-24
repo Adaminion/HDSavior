@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hdsavior/engine/engine.dart';
 import 'package:hdsavior/state/state.dart';
 
+import '../engine/protocol_examples.dart';
 import '../support/fake_app.dart';
 import '../support/scripted_transport.dart';
 
@@ -289,18 +290,132 @@ void main() {
       expect(app().source.appDataCheck!.verdict, DestinationVerdict.ok);
     });
 
-    test('suggestSessionPath names the source and the time', () async {
+    test('asked again whenever a catalog arrives, a geometry is set or a file system changes', () async {
+      int appDataChecks() => fake.engine.requests
+          .where((r) => r.command == 'check_destination' && r.args['purpose'] == 'app_data')
+          .length;
+      await fake.openDisk();
+      expect(appDataChecks(), 1);
+      await fake.run(() => app().scan.start(range: app().source.current!.partitions.single.range));
+      expect(appDataChecks(), 1, reason: 'there was no catalog to lose');
+      await fake.finishJob();
+      expect(appDataChecks(), 2, reason: 'a catalog arrived');
+      expect(app().source.canWriteAppData, isTrue);
+      await app().catalog.setGeometry(instance: 0, clusterSize: 8192, volumeOffset: 1048576);
+      expect(app().source.appDataCheck, isNull, reason: 'unknown while it is asked again');
+      expect(app().source.canWriteAppData, isFalse);
+      await pumpEventQueue();
+      expect(appDataChecks(), 3);
+      expect(app().source.canWriteAppData, isTrue);
+      await app().catalog.setInstanceKind(instance: 1, kind: InstanceOverride.other);
+      await pumpEventQueue();
+      expect(appDataChecks(), 4);
+      await app().catalog.refresh();
+      await pumpEventQueue();
+      expect(appDataChecks(), 4, reason: 'nothing the guard depends on changed');
+      await fake.run(() => app().scan.start(range: app().source.current!.partitions.single.range));
+      expect(appDataChecks(), 5, reason: 'the catalog went away when the new scan was accepted');
+      expect(app().source.canWriteAppData, isTrue);
+    });
+
+    test('the verdict follows the catalog: a directory that turns out to be inside the lost volume', () async {
+      final inLostVolume = FakeApp(sessionDirectory: r'L:\HDSavior\Sessions');
+      addTearDown(inLostVolume.dispose);
+      await inLostVolume.start();
+      await inLostVolume.openDisk();
+      final source = inLostVolume.app.source;
+      expect(source.appDataCheck!.verdict, DestinationVerdict.sameDisk, reason: 'nobody knows yet how far the lost volume reaches');
+      expect(source.canWriteAppData, isFalse, reason: 'only an "ok" lets the app write there');
+      await inLostVolume.scan();
+      expect(source.appDataCheck!.verdict, DestinationVerdict.overlapsSource);
+      expect(source.appDataCheck!.reason, ProtectionReason.lostVolume);
+      expect(await source.ensureSessionDirectory(), isFalse);
+      expect(inLostVolume.platform.createdDirectories, isEmpty);
+    });
+
+    test('a verdict that a newer question has overtaken never counts, not even for a moment', () async {
+      // Engine answers arrive in order, but the client may already have asked
+      // again (a catalog arrived) when an older answer comes in. An old "ok"
+      // must not let the app create its directory until the new answer is in.
+      final examples = ProtocolExamples.load();
+      final transport = ScriptedTransport();
+      final scripted = AppController(transport: transport, platform: InertPlatformServices());
+      addTearDown(scripted.dispose);
+      unawaited(scripted.start());
+      await pumpEventQueue();
+      transport.connection.respond(transport.connection.lastId, examples.object('hello.result'));
+      await pumpEventQueue();
+      transport.connection.respond(transport.connection.lastId, {'disks': <Object?>[]});
+      await pumpEventQueue();
+
+      final opening = scripted.source.openImage(r'D:\disk.img');
+      await pumpEventQueue();
+      transport.connection.respond(transport.connection.lastId, examples.object('open_source.result'));
+      await opening;
+      await pumpEventQueue();
+      final first = transport.connection.lastRequest;
+      expect(first['cmd'], 'check_destination');
+      expect((first['args']! as Map)['purpose'], 'app_data');
+
+      // A catalog arrives before the first answer: the guard may answer differently now.
+      scripted.catalog.adopt(CatalogInfo.fromJson(JsonObject.root(examples.object('CatalogInfo'), 'c')));
+      final ok = examples.object('check_destination.result');
+      transport.connection.respond(first['id']! as int, ok);
+      await pumpEventQueue();
+      expect(scripted.source.appDataCheck, isNull, reason: 'the answer to the older question');
+      expect(scripted.source.canWriteAppData, isFalse);
+      expect(await scripted.source.ensureSessionDirectory(), isFalse);
+
+      final second = transport.connection.lastRequest;
+      expect(second['cmd'], 'check_destination');
+      expect(second['id'], isNot(first['id']));
+      transport.connection.respond(second['id']! as int, {
+        ...ok,
+        'verdict': 'overlaps_source',
+        'reason': 'lost_volume',
+        'message': 'inside the lost volume',
+      });
+      await pumpEventQueue();
+      expect(scripted.source.appDataCheck!.reason, ProtectionReason.lostVolume);
+      expect(scripted.source.canWriteAppData, isFalse);
+    });
+
+    test('suggestSessionPath names model, serial, range start and local time', () async {
       expect(app().source.suggestSessionPath(), isNull);
       await fake.openDisk();
       expect(
-        app().source.suggestSessionPath(now: DateTime.utc(2026, 11, 24, 3, 15, 0)),
-        '${fake.platform.defaultSessionDirectory}\\Disk 1 WDC WD40EZRZ-00GXCB0 20261124-031500.hdsc',
+        app().source.suggestSessionPath(now: DateTime(2026, 11, 24, 3, 15, 0)),
+        '${fake.platform.defaultSessionDirectory}\\WDC WD40EZRZ-00GXCB0 WD-WCC7K0000000 at 0 2026-11-24 031500.hdsc',
+      );
+      final partition = app().source.current!.partitions.single;
+      expect(
+        app().source.suggestSessionPath(range: partition.range, now: DateTime(2026, 11, 24, 3, 15, 0)),
+        endsWith('\\WDC WD40EZRZ-00GXCB0 WD-WCC7K0000000 at ${partition.offset} 2026-11-24 031500.hdsc'),
       );
       await app().source.openImage(r'D:\images\my: "old" <disk>?.img');
-      final path = app().source.suggestSessionPath(now: DateTime.utc(2026, 1, 2, 3, 4, 5))!;
+      final path = app().source.suggestSessionPath(now: DateTime(2026, 1, 2, 3, 4, 5))!;
       final name = path.substring(fake.platform.defaultSessionDirectory.length + 1);
-      expect(name, 'Image my old disk .img 20260102-030405.hdsc');
+      expect(name, 'Image my old disk .img at 0 2026-01-02 030405.hdsc');
       expect(name, isNot(matches(r'[<>:"/\\|?*]')));
+    });
+
+    test('prepareSessionFile checks with purpose session and creates the directory only on ok', () async {
+      await fake.openDisk();
+      final plan = await app().source.prepareSessionFile(now: DateTime(2026, 11, 24, 3, 15, 0));
+      expect(plan.check.isOk, isTrue);
+      expect(plan.fileName, 'WDC WD40EZRZ-00GXCB0 WD-WCC7K0000000 at 0 2026-11-24 031500.hdsc');
+      expect(fake.lastArgs('check_destination'), {'path': plan.path, 'purpose': 'session'});
+      expect(fake.platform.createdDirectories, [fake.platform.defaultSessionDirectory]);
+    });
+
+    test('prepareSessionFile creates nothing when the guard refuses', () async {
+      await fake.dispose();
+      fake = FakeApp(sessionDirectory: r'E:\HDSavior\Sessions'); // on the disk being rescued
+      await fake.start();
+      await fake.openDisk();
+      final plan = await app().source.prepareSessionFile();
+      expect(plan.check.verdict, DestinationVerdict.overlapsSource);
+      expect(fake.platform.createdDirectories, isEmpty);
     });
   });
 

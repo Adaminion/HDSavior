@@ -216,6 +216,127 @@ void main() {
     });
   });
 
+  group('file systems (instance_set)', () {
+    setUp(() async {
+      fake = FakeApp();
+      await fake.start();
+      await fake.scan();
+    });
+
+    test('"this is the one I want": a new epoch with the chosen main file system', () async {
+      final older = catalog().info!.instances.firstWhere((i) => i.kind == InstanceKind.older);
+      final list = await loaded(catalog().rows.open(ChildrenQuery(node: root())));
+      catalog().selection.setChecked(fake.landmarks.documents, [root()], true);
+      app().browse.open(FolderLocation(fake.landmarks.documents, [root()]));
+      final epoch = catalog().epoch;
+      final guard = catalog().guardRevision;
+
+      final info = await catalog().setInstanceKind(instance: older.id, kind: InstanceOverride.main);
+      expect(fake.lastArgs('instance_set'), {'instance': older.id, 'kind': 'main'});
+      expect(info.epoch, isNot(epoch));
+      expect(catalog().info, same(info));
+      final main = catalog().info!.mainInstance!;
+      expect(main.root, older.root);
+      expect(main.records, older.records);
+      expect(main.manual, isTrue);
+      expect(catalog().info!.instances.firstWhere((i) => i.root == 0).kind, InstanceKind.other);
+      expect(catalog().selection.isEmpty, isTrue, reason: 'the ids of the old epoch are void');
+      expect(list.isClosed, isTrue);
+      expect(app().browse.folder, FolderLocation(older.root), reason: 'back to the root of the new main file system');
+      expect(catalog().guardRevision, greaterThan(guard));
+
+      // The ids of the new catalog count now.
+      await catalog().setInstanceKind(instance: main.id, kind: InstanceOverride.auto);
+      expect(fake.lastArgs('instance_set'), {'instance': main.id, 'kind': 'auto'});
+      expect(catalog().info!.mainInstance!.root, 0);
+      expect(catalog().info!.mainInstance!.manual, isFalse);
+      expect(app().browse.folder, FolderLocation(catalog().info!.mainInstance!.root));
+    });
+
+    test('"treat as a separate volume" turns an embedded file system into one whose files can be recovered', () async {
+      final embedded = catalog().info!.instances.firstWhere((i) => i.kind == InstanceKind.embedded);
+      final before = await app().api.selectionSummary(epoch: catalog().epoch!, include: [embedded.root], exclude: []);
+      expect(before.unsupported, before.files, reason: 'browse only');
+
+      await catalog().setInstanceKind(instance: embedded.id, kind: InstanceOverride.other);
+      final now = catalog().info!.instances.firstWhere((i) => i.root == embedded.root);
+      expect(now.kind, InstanceKind.other);
+      expect(now.manual, isTrue);
+      expect(now.embeddedIn, isNull);
+      catalog().selection.setChecked(now.root, const [], true);
+      await pumpEventQueue();
+      final after = app().recover.summary!;
+      expect(after.files, before.files);
+      // Only what is unsupported for reasons of its own (compressed, ...) stays so.
+      expect(after.unsupported, lessThan(before.files ~/ 10));
+      expect(after.bytes, greaterThan(before.bytes), reason: 'their content will be written now');
+    });
+
+    test('a refused change leaves everything as it was', () async {
+      final strays = catalog().info!.instances.firstWhere((i) => i.kind == InstanceKind.strays);
+      catalog().selection.setChecked(root(), const [], true);
+      final epoch = catalog().epoch;
+      final guard = catalog().guardRevision;
+      await expectLater(
+        catalog().setInstanceKind(instance: strays.id, kind: InstanceOverride.other),
+        throwsA(engineError(EngineErrorCode.badRequest)),
+      );
+      expect(catalog().epoch, epoch);
+      expect(catalog().selection.include, [root()]);
+      expect(catalog().guardRevision, guard);
+    });
+  });
+
+  group('the guard revision', () {
+    setUp(() async {
+      fake = FakeApp();
+      await fake.start();
+      await fake.scan();
+    });
+
+    test('changes with the catalog, its epoch, its protected ranges and a geometry; not with a mere refresh', () async {
+      final start = catalog().guardRevision;
+      expect(catalog().protectedRanges, catalog().info!.protected);
+      expect(catalog().protectedRanges.first.reason, ProtectionReason.sessionRange);
+
+      await catalog().refresh();
+      expect(catalog().guardRevision, start, reason: 'same epoch, same protected ranges');
+      await app().carve.start(kinds: ['png']);
+      await fake.finishJob();
+      expect(catalog().guardRevision, start, reason: 'carving keeps the epoch and the ranges');
+
+      // Selecting a candidate changes no range, but the files lie elsewhere now.
+      final other = catalog().info!.instances.firstWhere((i) => i.kind == InstanceKind.other);
+      await catalog().setGeometry(
+        instance: other.id,
+        clusterSize: other.geometry.clusterSize,
+        volumeOffset: other.geometry.volumeOffset,
+      );
+      expect(catalog().guardRevision, start + 1);
+
+      // A geometry that is not validated drops a protected lost volume.
+      final ranges = catalog().protectedRanges.length;
+      await catalog().setGeometry(instance: 0, clusterSize: 8192, volumeOffset: 1048576);
+      expect(catalog().protectedRanges, hasLength(ranges - 1));
+      expect(catalog().guardRevision, start + 2);
+
+      // Other protected ranges in the same epoch, learnt from a refresh.
+      await app().api.geometrySet(instance: 0, clusterSize: 4096, volumeOffset: 1048576);
+      expect(catalog().guardRevision, start + 2, reason: 'the controller has not seen it yet');
+      await catalog().refresh();
+      expect(catalog().protectedRanges, hasLength(ranges));
+      expect(catalog().guardRevision, start + 3);
+
+      fake.engine.bumpEpoch();
+      await catalog().refresh();
+      expect(catalog().guardRevision, start + 4);
+
+      await app().source.close();
+      expect(catalog().protectedRanges, isEmpty);
+      expect(catalog().guardRevision, start + 5);
+    });
+  });
+
   group('details and preview', () {
     setUp(() async {
       fake = FakeApp();

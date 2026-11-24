@@ -1,6 +1,7 @@
 // One conversation that every engine speaking protocol version 1 must be
 // able to have: open an image, scan it, browse, summarise, read a file,
-// recover. Only what docs/PROTOCOL.md guarantees is asserted.
+// recover, overrule the verdict about a file system. Only what
+// docs/PROTOCOL.md guarantees is asserted.
 //
 // It always runs against the fake engine as a child process. To run it
 // against the real engine as well, set two environment variables:
@@ -10,6 +11,7 @@
 //
 // (The image is only read. Recovered files go to a temporary directory that
 // is deleted afterwards.)
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -56,6 +58,8 @@ Future<void> converse(EngineTransport transport, String imagePath) async {
   await expectLater(api.catalogInfo(), throwsA(fails(EngineErrorCode.noCatalog)));
   final destination = await api.checkDestination(path: temp.path, purpose: DestinationPurpose.recover);
   expect(destination.verdict, isNot(DestinationVerdict.unknown));
+  if (destination.verdict != DestinationVerdict.overlapsSource) expect(destination.reason, isNull);
+  expect(destination.lostFiles, 0, reason: 'no catalog yet');
 
   // --- scan ---------------------------------------------------------------------
   final progress = <ScanProgress>[];
@@ -86,6 +90,11 @@ Future<void> converse(EngineTransport transport, String imagePath) async {
   final info = await api.catalogInfo();
   expect(info.epoch, catalog.epoch);
   expect(info.nodes, catalog.nodes);
+  // The session range first, then lost volumes.
+  expect(info.protected, isNotEmpty);
+  expect(info.protected.first.reason, ProtectionReason.sessionRange);
+  expect(info.protected.first.range, info.range);
+  expect(info.protected.skip(1).map((r) => r.reason), everyElement(ProtectionReason.lostVolume));
   if (info.instances.isEmpty) return; // nothing found: nothing more to ask
   final epoch = info.epoch;
   final root = info.mainInstance!.root;
@@ -151,6 +160,12 @@ Future<void> converse(EngineTransport transport, String imagePath) async {
   );
   if (summary.files > 0 && destination.isOk) {
     final recoverDone = client.on<RecoverDone>().first;
+    // Listening before carve_start: if the recovery is over by then, the
+    // carve job may start and end before carve_start's answer is read.
+    final carveDone = Completer<CarveDone>();
+    final carveSubscription = client.on<CarveDone>().listen((done) {
+      if (!carveDone.isCompleted) carveDone.complete(done);
+    });
     final recovering = await api.recoverStart(epoch: epoch, include: [root], exclude: [], dest: temp.path);
     expect(recovering.job, JobKind.recover);
     expect(recovering.files, summary.files);
@@ -163,12 +178,48 @@ Future<void> converse(EngineTransport transport, String imagePath) async {
     } else {
       // The recovery had already ended; let the carve run end as well.
       await api.jobCancel();
-      await client.on<CarveDone>().first.timeout(const Duration(minutes: 5));
+      await carveDone.future.timeout(const Duration(minutes: 5));
     }
+    await carveSubscription.cancel();
     expect(recovered.status, JobStatus.completed);
     expect(recovered.filesTotal, summary.files);
     expect(recovered.ok + recovered.warnings + recovered.failed + recovered.skipped, recovered.filesTotal);
     expect(recovered.dest, isNotEmpty);
+  }
+
+  // --- instance_set ---------------------------------------------------------------------
+  final now = await api.catalogInfo();
+  final strays = now.instances.where((i) => i.kind == InstanceKind.strays);
+  if (strays.isNotEmpty) {
+    await expectLater(
+      api.instanceSet(instance: strays.first.id, kind: InstanceOverride.main),
+      throwsA(fails(EngineErrorCode.badRequest)),
+    );
+  }
+  final candidates = now.instances.skip(1).where((i) => i.kind != InstanceKind.strays);
+  if (candidates.isNotEmpty) {
+    // Ids (of nodes and of instances) belong to one epoch: an instance is
+    // recognised across epochs by what it holds.
+    (int, int, int) identity(Instance i) => (i.records, i.files, i.bytes);
+    final chosen = candidates.first;
+    final previousMain = now.instances.first;
+    final changed = await api.instanceSet(instance: chosen.id, kind: InstanceOverride.main);
+    expect(changed.epoch, isNot(now.epoch), reason: 'instance_set starts a new epoch');
+    expect(identity(changed.instances.first), identity(chosen), reason: 'instances[0] is the main instance');
+    expect(changed.instances.first.kind, InstanceKind.main);
+    expect(changed.instances.first.manual, isTrue);
+    expect(
+      changed.instances.firstWhere((i) => identity(i) == identity(previousMain)).kind,
+      InstanceKind.other,
+      reason: 'the previous main becomes "other"',
+    );
+    await expectLater(
+      api.listChildren(epoch: now.epoch, node: changed.instances.first.root),
+      throwsA(fails(EngineErrorCode.staleCatalog)),
+    );
+    final withdrawn = await api.instanceSet(instance: changed.instances.first.id, kind: InstanceOverride.auto);
+    expect(identity(withdrawn.instances.first), identity(previousMain), reason: "the engine's own verdict again");
+    expect(withdrawn.instances.every((i) => !i.manual), isTrue);
   }
 
   // --- the end ------------------------------------------------------------------------

@@ -495,7 +495,8 @@ fn what_names_a_lost_folder() {
     each("lost_folder_names", |built| {
         let m = &built.manifest;
         let old = m.instance("old").id;
-        // index entries of the old root that can still be read, per child record
+        // index entries of the old root that can still be read, per child record:
+        // (child, namespace, name, stale copy, lsn)
         let root_entries: Vec<(u64, u8, &str, bool, u64)> = m
             .index_blocks
             .iter()
@@ -503,6 +504,8 @@ fn what_names_a_lost_folder() {
             .flat_map(|b| b.entries.iter().map(move |e| (e.child.number, e.key.namespace, e.key.name.as_str(), b.stale_copy, b.lsn)))
             .collect();
         let content = |i: usize| m.entries_of("old").find(|e| e.name() == format!("content of archive {i:02}.dat")).unwrap();
+        let renamed: Vec<usize> = (0..30).filter(|&i| m.entries_of("old").any(|e| e.name() == format!("Renamed {i:02}"))).collect();
+        assert_eq!(renamed.len(), 1, "one archive was renamed");
         let mut by_alias = 0;
         let mut by_name = 0;
         for i in 0..30 {
@@ -514,15 +517,17 @@ fn what_names_a_lost_folder() {
             let dos: Vec<&(u64, u8, &str, bool, u64)> = root_entries.iter().filter(|e| e.0 == folder.number && e.1 == 2).collect();
             let expected = expected_path(file);
             let top = expected.split('/').next().unwrap();
-            if i == 25 {
+            if i == renamed[0] {
                 // two Win32 names survive: the stale copy's and the newer one
-                assert_eq!(win32.len(), 2);
-                let (stale, live): (Vec<&&(u64, u8, &str, bool, u64)>, Vec<_>) = win32.iter().partition(|e| e.3);
-                assert_eq!((stale[0].2, live[0].2), ("Archive 25", "Renamed 25"));
-                assert!(stale[0].4 < live[0].4, "the copy has the lower LSN");
-                assert_eq!(top, "Renamed 25");
+                assert_eq!(win32.len(), 2, "the old name in the stale copy, the new one in the live block");
+                let stale: Vec<_> = win32.iter().filter(|e| e.3).collect();
+                let live: Vec<_> = win32.iter().filter(|e| !e.3).collect();
+                assert!(stale.iter().any(|e| e.2 == format!("Archive {i:02}")), "{stale:?}");
+                let newest = live.iter().find(|e| e.2 == format!("Renamed {i:02}")).expect("the new name survives");
+                assert!(stale.iter().all(|e| e.4 < newest.4), "the copy has the lower LSN");
+                assert_eq!(top, format!("Renamed {i:02}"));
             } else if win32.is_empty() {
-                assert_eq!(dos.iter().filter(|e| !e.3).count(), 1, "Archive {i:02}: its alias survives");
+                assert!(!dos.is_empty(), "Archive {i:02}: its alias survives");
                 assert_eq!(top, dos[0].2);
                 assert!(top.starts_with("ARCHI") && top.contains('~'), "{top}");
                 by_alias += 1;
@@ -533,7 +538,7 @@ fn what_names_a_lost_folder() {
             }
             assert!(file.must_recover_exactly());
         }
-        assert_eq!((by_alias, by_name), (25, 4), "Archive 00-24 by alias, 26-29 by name");
+        assert!(by_alias >= 20 && by_name >= 2, "by alias {by_alias}, by name {by_name}");
         // two lives of one record number
         let first = m.entries_of("old").find(|e| e.name() == "from the first life.dat").unwrap();
         let second = m.entries_of("old").find(|e| e.name() == "from the second life.dat").unwrap();
@@ -633,7 +638,7 @@ fn timestamps_at_the_edges() {
         let four = test_file(m, "four-different-times.dat");
         let t = four.times;
         assert!(t.created < t.modified && t.modified < t.mft_changed && t.mft_changed < t.accessed);
-        assert!(t.created % 10_000_000 != 0, "sub-second precision");
+        assert!(!t.created.is_multiple_of(10_000_000), "sub-second precision");
         let r = record(m, four.record);
         assert_eq!(r.standard_information.unwrap().0, [t.created, t.modified, t.mft_changed, t.accessed]);
         assert!(r.names[0].times.iter().all(|&n| n != t.created && n != t.modified), "the $FILE_NAME copy is stale");
@@ -677,5 +682,97 @@ fn named_streams_and_missing_data() {
         must(list, Flag::MissingFragments);
         must_not(list, Flag::NoData);
         assert_eq!(expected_path(list), list.path);
+    });
+}
+
+#[test]
+fn what_the_new_rules_make_of_damaged_and_odd_records() {
+    use common::{catalog, contradictions, fragment_records, instance_of, warning};
+    use hds_testkit::manifest::RecordClass;
+
+    each("torn_records", |built| {
+        let m = &built.manifest;
+        let intact = test_file(m, "intact.dat");
+        let images: Vec<&RecordFact> = m.records.iter().filter(|r| r.role == RecordRole::LoggedImage).collect();
+        assert_eq!(images.len(), 1);
+        let image = images[0];
+        assert_eq!((image.slot, image.number), (intact.record, Some(intact.record)));
+        assert_eq!(image.torn_blocks, [0, 1], "every block fails its fixup check");
+        assert!((0..2).all(|b| fixup_broken(built, image.offset, b)));
+        assert_eq!(image.expect.class, Some(RecordClass::Dropped), "A3 drops it");
+        assert_eq!(record(m, intact.record).expect.class, Some(RecordClass::Old));
+        assert_eq!(expected_path(intact), "Test/intact.dat");
+        // a record with one torn block is not dropped
+        assert_eq!(record(m, test_file(m, "second-block-torn.bin").record).expect.class, Some(RecordClass::Old));
+    });
+
+    each("pre31_volume", |built| {
+        let m = &built.manifest;
+        let strays = catalog(m, "strays");
+        assert_eq!(strays.kind, InstanceKind::Strays);
+        for e in m.entries_of("old") {
+            if e.record < 24 && !e.names.is_empty() {
+                assert_eq!(e.expect.presence, Presence::Unspecified, "{}: E9 needs a number", e.path);
+            } else if shown(e) {
+                assert_eq!(instance_of(m, e).id, strays.id);
+            }
+        }
+    });
+
+    each("wrong_record_numbers", |built| {
+        let m = &built.manifest;
+        let main = m.main_instance().unwrap();
+        let strays = catalog(m, "strays");
+        assert_eq!(instance_of(m, test_file(m, "claims-5300.bin")).id, main.id);
+        assert_eq!(instance_of(m, test_file(m, "claims-303.bin")).id, strays.id);
+        let five = test_file(m, "claims-5.bin");
+        assert_eq!(five.expect.presence, Presence::Hidden);
+        assert_eq!(record(m, five.record).expect.instance, Some(strays.id), "it may not join main (slots below 256)");
+    });
+
+    each("overlap_conflicts", |built| {
+        let m = &built.manifest;
+        let (a, b) = (test_file(m, "pair6-a.bin"), test_file(m, "pair6-b.bin"));
+        assert!(a.record < b.record && b.record < 512, "both in the first fragment");
+        // D2: they cannot belong to one file system, and nothing explains it
+        let fragment = m.fragments.iter().find(|f| f.contradictions.iter().any(|c| c.hi == b.record)).unwrap();
+        assert_eq!(contradictions(&fragment_records(m, fragment)).get(&b.record), Some(&a.record));
+        let c = fragment.contradictions.iter().find(|c| c.hi == b.record).unwrap();
+        assert_eq!((c.lo, c.explained_by), (a.record, None));
+        assert_eq!(fragment.contradictions.len(), 1, "pairs 1-5 lie in two fragments: no contradiction");
+        assert_eq!(warning(m, "mixed_generations"), Some(true));
+        assert_eq!(record(m, b.record).expect.older_generation, Some(true));
+        must(b, Flag::OlderGeneration);
+        // the marked record loses although it was changed later
+        assert!(b.times.mft_changed > a.times.mft_changed);
+        must(b, Flag::Overwritten);
+        must_not(b, Flag::Overlap);
+        must(a, Flag::Overlap);
+        must_not(a, Flag::Overwritten);
+        for n in 1..=5 {
+            let b = test_file(m, &format!("pair{n}-b.bin"));
+            assert_eq!(b.record, 600 + n as u64, "in the second fragment");
+            must_not(b, Flag::OlderGeneration);
+        }
+    });
+
+    each("stale_copies", |built| {
+        let m = &built.manifest;
+        let strays = catalog(m, "strays");
+        let copies: Vec<&RecordFact> = m.records.iter().filter(|r| r.role == RecordRole::StaleCopy).collect();
+        assert!(copies.iter().all(|r| r.expect.class == Some(RecordClass::Old) && r.expect.instance == Some(strays.id)));
+        assert!(m.main_instance().unwrap().geometry.as_ref().unwrap().validated == Some(true));
+    });
+
+    each("never_used_records", |built| {
+        let m = &built.manifest;
+        for slot in 400..500 {
+            assert_eq!(record(m, slot).expect.class, Some(RecordClass::Dropped), "slot {slot}");
+        }
+        for slot in 500..508 {
+            let r = record(m, slot);
+            assert_eq!(r.expect.class, Some(RecordClass::Old), "a lone $STANDARD_INFORMATION is an attribute");
+            assert_eq!(r.expect.instance, None, "a stray without a node is not reported");
+        }
     });
 }

@@ -11,13 +11,16 @@ environment:
   flutter: ">=3.47.0"
 
 # Dependencies are kept to the minimum on purpose (see README.md,
-# "Dependencies"): the Material library and the official file-picker plugin.
-# Application state uses ChangeNotifier/ValueNotifier from the SDK.
+# "Dependencies"): the Material library, the official file-picker plugin and
+# intl (dates and numbers in the user's local format; already a dependency
+# of material_ui). Application state uses ChangeNotifier/ValueNotifier from
+# the SDK.
 dependencies:
   flutter:
     sdk: flutter
   material_ui: ^1.11.1
   file_selector: ^1.1.0
+  intl: ^0.20.2
 
 dev_dependencies:
   flutter_test:

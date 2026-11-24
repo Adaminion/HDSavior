@@ -64,6 +64,7 @@ const Set<String> argumentExamples = {
   'session_load.args.source',
   'session_attach_source.args',
   'geometry_set.args',
+  'instance_set.args',
   'list_children.args',
   'node_info.args',
   'search.args',
@@ -329,6 +330,7 @@ void main() {
     void expectInstance(Instance instance) {
       expect(instance.id, 0);
       expect(instance.kind, InstanceKind.main);
+      expect(instance.manual, isFalse);
       expect(instance.label, '');
       expect(instance.root, 0);
       expect(instance.records, 812401);
@@ -364,6 +366,12 @@ void main() {
       expect(catalog.liveVolumes.single.snapshotTime, 1763990000000);
       expect(catalog.range, const ByteRange(1048576, 4000786153472));
       expect(catalog.range.length, 4000785104896);
+      expect(catalog.protected, hasLength(1));
+      expect(catalog.protected.single.start, 1048576);
+      expect(catalog.protected.single.end, 4000786153472);
+      expect(catalog.protected.single.range, catalog.range);
+      expect(catalog.protected.single.reasonName, 'session_range');
+      expect(catalog.protected.single.reason, ProtectionReason.sessionRange);
       expect(catalog.scannedBytes, 4000785104896);
       expect(catalog.scanComplete, isTrue);
       expect(catalog.badBytes, 0);
@@ -568,7 +576,11 @@ void main() {
       final check = parse(examples, 'check_destination.result', DestinationCheck.fromJson);
       expect(check.verdict, DestinationVerdict.ok);
       expect(check.isOk, isTrue);
+      expect(check.reasonName, isNull);
+      expect(check.reason, isNull);
       expect(check.message, '');
+      expect(check.lostFiles, 0);
+      expect(check.lostBytes, 0);
       expect(check.freeBytes, 500000000000);
       expect(check.enoughSpace, isTrue);
       expect(check.fs, 'NTFS');

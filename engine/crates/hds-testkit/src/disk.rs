@@ -4,23 +4,30 @@
 //!
 //! ```
 //! use hds_testkit::disk::Disk;
+//! use hds_testkit::manifest::InstanceKind;
 //! use hds_testkit::volume::params::VolumeParams;
 //! use hds_testkit::volume::spec::FileSpec;
 //!
 //! let mut disk = Disk::new("example", 7, 64 << 20);
-//! // an old volume with a folder and a file in it ...
+//! // an old volume with a folder of files ...
 //! let old = disk.format(VolumeParams::new(0, 64 << 20).label("old"));
 //! let v = disk.volume(old);
 //! let root = v.root();
+//! v.number_from(256); // a Windows quick format rewrites records 0-255
 //! let photos = v.mkdir(root, "Photos");
-//! v.add_file(photos, "a.bin", FileSpec::tagged(1, 100_000));
+//! for i in 0..20u64 {
+//!     v.add_file(photos, format!("p{i:02}.bin").as_str(), FileSpec::tagged(i, 100_000));
+//! }
 //! disk.render(old);
 //! // ... quick-formatted the way Windows does it
 //! let new = disk.format(disk.reformat_params(old).label("new"));
 //! disk.render(new);
 //! let built = disk.finish();
-//! let file = built.manifest.entry("old", "Photos/a.bin");
+//! let m = &built.manifest;
+//! let file = m.entry("old", "Photos/p07.bin");
 //! assert!(file.must_recover_exactly());
+//! assert_eq!(file.expect.path.as_ref().unwrap().join("/"), "Photos/p07.bin");
+//! assert_eq!(m.catalog_of(file).unwrap().kind, InstanceKind::Main);
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,7 +46,7 @@ use crate::rng::derive;
 use crate::time;
 use crate::volume::params::VolumeParams;
 use crate::volume::spec::FileSpec;
-use crate::volume::{Node, NodeId, ParentRef, RenderSink, Source, Volume};
+use crate::volume::{NodeId, ParentRef, RenderSink, Source, Volume};
 
 /// Handle of a volume inside its [`Disk`]; also its instance id in the
 /// manifest.
@@ -91,7 +98,7 @@ impl RenderSink for Sink<'_> {
 struct VolumeState {
     volume: Volume,
     role: Option<InstanceRole>,
-    kind: Option<Option<InstanceKind>>,
+    kind: Option<InstanceKind>,
 }
 
 struct Embedded {
@@ -280,6 +287,27 @@ impl Disk {
         }
     }
 
+    /// Writes a hand-made record at an absolute offset outside any MFT and
+    /// lists it in the manifest as a record of `volume` describing `slot`
+    /// (a logged record image, a record in a backup, …).
+    pub fn place_record(
+        &mut self,
+        offset: u64,
+        volume: VolumeId,
+        slot: u64,
+        model: &crate::ondisk::record::RecordModel,
+        role: RecordRole,
+    ) {
+        let bytes = model.encode().unwrap_or_else(|e| panic!("placed record: {e}"));
+        let mut fact = crate::facts::record_fact(model, &bytes);
+        fact.offset = offset;
+        fact.instance = volume.0 as u32;
+        fact.slot = slot;
+        fact.role = role;
+        self.image.write_at(offset, &bytes);
+        self.registry.records.insert(offset, (bytes, fact));
+    }
+
     /// Registers a boot sector written with [`Disk::write`] (for example a
     /// deliberately broken one) so that the manifest lists it.
     pub fn track_boot_sector(&mut self, fact: BootFact) {
@@ -304,23 +332,29 @@ impl Disk {
         self.volumes[id.0].role = Some(role);
     }
 
-    /// States the instance kind a correct scan assigns to a volume (`None`:
-    /// leave it open).
-    pub fn expect_kind(&mut self, id: VolumeId, kind: Option<InstanceKind>) {
+    /// States the kind of the catalog instance that holds most records of a
+    /// volume. [`Disk::finish`] works the kinds out from ALGORITHMS D; a
+    /// stated kind settles what the rules leave open there (a validation the
+    /// manifest cannot predict) and makes `finish` panic when the rules
+    /// decide otherwise, so a scenario's claim is checked every time it is
+    /// built.
+    pub fn expect_kind(&mut self, id: VolumeId, kind: InstanceKind) {
         self.volumes[id.0].kind = Some(kind);
     }
 
-    /// Stores a finished image as a file of `volume`: a disk image or VM
-    /// file lying on the drive (ALGORITHMS D7). `spec` decides where its
-    /// clusters go; its content is replaced by the inner image.
+    /// Stores another disk as a file of `volume`: a disk image or VM file
+    /// lying on the drive (ALGORITHMS D7). `spec` decides where its clusters
+    /// go; its content is replaced by the inner image. The inner disk's
+    /// volumes become embedded instances of this disk's manifest.
     pub fn embed(
         &mut self,
         volume: VolumeId,
         parent: NodeId,
         name: &str,
-        inner: Built,
+        inner: Disk,
         mut spec: FileSpec,
     ) -> NodeId {
+        let inner = inner.finish_local();
         let bytes = Arc::new(inner.image.to_vec());
         spec.content = ContentSpec::blob(bytes);
         spec.storage = crate::volume::spec::StorageSpec::NonResident;
@@ -329,8 +363,26 @@ impl Disk {
         node
     }
 
-    /// Finishes the image and establishes its ground truth.
+    /// Finishes the image and establishes its ground truth and the
+    /// expectations of a correct scan (see [`crate::manifest`]). Panics when
+    /// the rules leave an instance kind open that the scenario did not state
+    /// with [`Disk::expect_kind`], or when a stated kind contradicts them.
     pub fn finish(self) -> Built {
+        let overrides: BTreeMap<u32, InstanceKind> =
+            self.volumes.iter().enumerate().filter_map(|(i, s)| Some((i as u32, s.kind?))).collect();
+        let Built { image, mut manifest } = self.finish_local();
+        let undecided = crate::expect::derive(&mut manifest, &image, &overrides);
+        assert!(
+            undecided.is_empty(),
+            "scenario {}: ALGORITHMS D leaves {undecided:?} open here; state the kind with Disk::expect_kind",
+            manifest.scenario
+        );
+        Built { image, manifest }
+    }
+
+    /// The image with its ground truth and the expectations that follow
+    /// from each entry alone; [`Disk::finish`] adds the rest.
+    pub(crate) fn finish_local(self) -> Built {
         let range = self.scan_range.unwrap_or((0, self.image.len()));
         for state in &self.volumes {
             assert!(
@@ -342,54 +394,7 @@ impl Disk {
         let image = &self.image;
         let volume_count = self.volumes.len();
 
-        // ---- instances ---------------------------------------------------
-        let overlaps = |a: &Volume, b: &Volume| {
-            let (a0, a1) = (a.offset(), a.offset() + a.params().partition_bytes());
-            let (b0, b1) = (b.offset(), b.offset() + b.params().partition_bytes());
-            a0 < b1 && b0 < a1
-        };
-        let mut generation = vec![0u32; volume_count];
-        for i in (0..volume_count).rev() {
-            // the next volume formatted over this one decides
-            if let Some(j) = (i + 1..volume_count).find(|&j| overlaps(&self.volumes[i].volume, &self.volumes[j].volume)) {
-                generation[i] = generation[j] + 1;
-            }
-        }
-        let mut instances: Vec<Instance> = Vec::with_capacity(volume_count);
-        for (i, state) in self.volumes.iter().enumerate() {
-            let v = &state.volume;
-            let rendered = v.rendered.as_ref().expect("checked");
-            let role = state.role.unwrap_or(if generation[i] == 0 { InstanceRole::Current } else { InstanceRole::Lost });
-            let default_kind = match (role, generation[i]) {
-                (InstanceRole::Lost, 1) => Some(InstanceKind::Main),
-                (InstanceRole::Lost, g) if g >= 2 => Some(InstanceKind::Older),
-                (InstanceRole::Embedded, _) => Some(InstanceKind::Embedded),
-                _ => None,
-            };
-            let times: Vec<u64> = v.nodes.iter().filter(|n| !n.system).map(|n| n.times[2]).collect();
-            let cs = v.cluster_size();
-            instances.push(Instance {
-                id: i as u32,
-                label: v.params().label.clone(),
-                role,
-                expected_kind: state.kind.unwrap_or(default_kind),
-                generation: generation[i],
-                flavor: v.params().flavor,
-                geometry: geometry_of(v),
-                format_time: v.params().format_time,
-                embedded_in: None,
-                offset_in_host: None,
-                live_allocated: if role == InstanceRole::Current {
-                    rendered.used_ranges.iter().map(|&(lcn, n)| (v.lcn_to_offset(lcn), n * cs)).collect()
-                } else {
-                    Vec::new()
-                },
-                live_slots: if role == InstanceRole::Current { ranges(&rendered.slots_in_use) } else { Vec::new() },
-                time_range: times.iter().min().copied().zip(times.iter().max().copied()),
-            });
-        }
-
-        // ---- entries -----------------------------------------------------
+        // ---- entry ids ---------------------------------------------------
         let mut entry_ids: Vec<Vec<Option<u32>>> = Vec::with_capacity(volume_count);
         let mut next_id = 0u32;
         for state in &self.volumes {
@@ -406,17 +411,8 @@ impl Disk {
                 .collect();
             entry_ids.push(ids);
         }
-        let mut entries: Vec<Entry> = Vec::with_capacity(next_id as usize);
-        for (vi, state) in self.volumes.iter().enumerate() {
-            let v = &state.volume;
-            for ni in 0..v.nodes.len() {
-                if let Some(id) = entry_ids[vi][ni] {
-                    entries.push(build_entry(v, vi, ni, id, &entry_ids[vi], image, range, &instances[vi]));
-                }
-            }
-        }
 
-        // ---- structures --------------------------------------------------
+        // ---- structures: what can still be found in the image -----------
         let slot_entry = |instance: u32, slot: u64| -> Option<u32> {
             let v = &self.volumes.get(instance as usize)?.volume;
             let node = v.rendered.as_ref()?.records.get(&slot)?.node?;
@@ -447,6 +443,94 @@ impl Disk {
             }
         }
 
+        // ---- roles (ALGORITHMS C1) ---------------------------------------
+        // A volume is current when its own boot sector is at the range start
+        // or at a partition start of the table, and its record 0 is where
+        // that boot sector says.
+        let starts: BTreeSet<u64> = std::iter::once(range.0)
+            .chain(self.partitions.iter().map(|p| p.offset).filter(|&o| o >= range.0 && o < range.1))
+            .collect();
+        let roles: Vec<InstanceRole> = (0..volume_count)
+            .map(|vi| {
+                if let Some(role) = self.volumes[vi].role {
+                    return role;
+                }
+                let v = &self.volumes[vi].volume;
+                let offset = v.offset();
+                let boot_here = boot_sectors.iter().any(|b| b.offset == offset && !b.backup && b.instance == vi as u32);
+                let record0 = v.record_offset(0);
+                let mft_here = records.iter().any(|r| {
+                    r.offset == record0
+                        && r.instance == vi as u32
+                        && r.slot == 0
+                        && r.role == RecordRole::Base
+                        && r.state == ArtifactState::Intact
+                        && r.flags & 1 == 1
+                });
+                let in_range = record0 >= range.0 && record0 + v.record_size() <= range.1;
+                let outside = offset + v.params().partition_bytes() <= range.0 || offset >= range.1;
+                if starts.contains(&offset) && boot_here && mft_here && in_range {
+                    InstanceRole::Current
+                } else if outside {
+                    InstanceRole::Unscanned
+                } else {
+                    InstanceRole::Lost
+                }
+            })
+            .collect();
+
+        // ---- instances ---------------------------------------------------
+        let overlaps = |a: &Volume, b: &Volume| {
+            let (a0, a1) = (a.offset(), a.offset() + a.params().partition_bytes());
+            let (b0, b1) = (b.offset(), b.offset() + b.params().partition_bytes());
+            a0 < b1 && b0 < a1
+        };
+        let mut generation = vec![0u32; volume_count];
+        for i in (0..volume_count).rev() {
+            // the next volume formatted over this one decides
+            if let Some(j) = (i + 1..volume_count).find(|&j| overlaps(&self.volumes[i].volume, &self.volumes[j].volume)) {
+                generation[i] = generation[j] + 1;
+            }
+        }
+        let mut instances: Vec<Instance> = Vec::with_capacity(volume_count);
+        for (i, state) in self.volumes.iter().enumerate() {
+            let v = &state.volume;
+            let rendered = v.rendered.as_ref().expect("checked");
+            let role = roles[i];
+            let times: Vec<u64> = v.nodes.iter().filter(|n| !n.system).map(|n| n.times[2]).collect();
+            let cs = v.cluster_size();
+            instances.push(Instance {
+                id: i as u32,
+                label: v.params().label.clone(),
+                role,
+                expected_kind: None,
+                generation: generation[i],
+                flavor: v.params().flavor,
+                geometry: geometry_of(v),
+                format_time: v.params().format_time,
+                embedded_in: None,
+                offset_in_host: None,
+                live_allocated: if role == InstanceRole::Current {
+                    rendered.used_ranges.iter().map(|&(lcn, n)| (v.lcn_to_offset(lcn), n * cs)).collect()
+                } else {
+                    Vec::new()
+                },
+                live_slots: if role == InstanceRole::Current { ranges(&rendered.slots_in_use) } else { Vec::new() },
+                time_range: times.iter().min().copied().zip(times.iter().max().copied()),
+            });
+        }
+
+        // ---- entries -----------------------------------------------------
+        let mut entries: Vec<Entry> = Vec::with_capacity(next_id as usize);
+        for (vi, state) in self.volumes.iter().enumerate() {
+            let v = &state.volume;
+            for ni in 0..v.nodes.len() {
+                if let Some(id) = entry_ids[vi][ni] {
+                    entries.push(build_entry(v, vi, ni, id, &entry_ids[vi], image, range));
+                }
+            }
+        }
+
         // ---- embedded file systems ---------------------------------------
         for embedded in &self.embedded {
             let host = &self.volumes[embedded.host_volume].volume;
@@ -467,69 +551,21 @@ impl Disk {
         records.sort_by_key(|r| r.offset);
         index_blocks.sort_by_key(|b| b.offset);
         boot_sectors.sort_by_key(|b| b.offset);
-
-        // ---- overwritten set (ALGORITHMS C5) -------------------------------
-        let mut overwritten: Vec<(u64, u64)> = Vec::new();
-        let mut live: Vec<(u64, u64)> = Vec::new();
-        for (vi, state) in self.volumes.iter().enumerate() {
-            let v = &state.volume;
-            if instances[vi].role != InstanceRole::Current {
-                continue;
-            }
-            // The volume has to be found: a boot sector of it and its record
-            // 0 inside the scan range (C1).
-            let found = boot_sectors
-                .iter()
-                .any(|b| b.instance == vi as u32 && b.offset >= range.0 && b.offset + 512 <= range.1)
-                && records.iter().any(|r| {
-                    r.instance == vi as u32
-                        && r.slot == 0
-                        && r.role == RecordRole::Base
-                        && r.state == ArtifactState::Intact
-                        && r.offset >= range.0
-                        && r.offset < range.1
-                });
-            if !found {
-                continue;
-            }
-            overwritten.extend(instances[vi].live_allocated.iter().copied());
-            live.extend(instances[vi].live_allocated.iter().copied());
-            // files deleted on the current volume: their runlists are the
-            // only trace of what they overwrote
-            for (ni, node) in v.nodes.iter().enumerate() {
-                let Some(id) = entry_ids[vi][ni] else { continue };
-                let entry = &entries[id as usize];
-                if !node.in_use && !node.system && entry.truth.record_state == RecordState::Intact {
-                    overwritten.extend(entry.extents.iter().filter_map(|e| e.offset.map(|o| (o, e.bytes))));
-                }
-            }
-        }
-        let overwritten_set = merge_ranges(overwritten);
-        let live_ranges = merge_ranges(live);
-
-        // ---- expectations that need the whole picture ----------------------
         surviving_index_entries(&mut entries, &records, &index_blocks);
-        global_expectations(&mut entries, &instances, &overwritten_set);
-        expected_paths(&mut entries, &instances, &records, &index_blocks, &live_ranges);
 
-        let manifest = Manifest {
-            manifest_version: 1,
-            scenario: self.name,
-            description: self.description,
-            rules: self.rules,
-            seed: self.seed,
-            image_size: self.image.len(),
-            sector_size: self.sector_size,
-            scan_range: range,
-            partitions: self.partitions,
-            instances,
-            entries,
-            records,
-            index_blocks,
-            boot_sectors,
-            overwritten_set,
-            notes: self.notes,
-        };
+        let mut manifest = Manifest::blank(&self.name, self.image.len());
+        manifest.description = self.description;
+        manifest.rules = self.rules;
+        manifest.seed = self.seed;
+        manifest.sector_size = self.sector_size;
+        manifest.scan_range = range;
+        manifest.partitions = self.partitions;
+        manifest.instances = instances;
+        manifest.entries = entries;
+        manifest.records = records;
+        manifest.index_blocks = index_blocks;
+        manifest.boot_sectors = boot_sectors;
+        manifest.notes = self.notes;
         Built { image: self.image, manifest }
     }
 }
@@ -560,6 +596,7 @@ fn geometry_of(v: &Volume) -> Geometry {
             })
             .collect(),
         mftmirr_lcn: boot.mftmirr_lcn,
+        mftmirr_clusters: v.plan.mftmirr.len,
         mft_records: v.mft_records(),
         mft_initialized_records: v.mft_initialized_records(),
     }
@@ -590,11 +627,6 @@ pub(crate) fn merge_ranges(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     out
 }
 
-fn intersects(sorted: &[(u64, u64)], start: u64, len: u64) -> bool {
-    let at = sorted.partition_point(|&(s, l)| s + l <= start);
-    sorted.get(at).is_some_and(|&(s, _)| s < start + len)
-}
-
 /// State of a structure in the finished image: `None` when its signature is
 /// gone.
 fn artifact_state(image: &Image, offset: u64, bytes: &[u8], magic: &[u8; 4]) -> Option<ArtifactState> {
@@ -608,40 +640,7 @@ fn artifact_state(image: &Image, offset: u64, bytes: &[u8], magic: &[u8; 4]) -> 
     }
 }
 
-fn under_extend(v: &Volume, node: &Node) -> bool {
-    let mut at = node;
-    for _ in 0..64 {
-        let Some(link) = at.names.first() else {
-            return false;
-        };
-        match link.parent {
-            ParentRef::Node(p) => {
-                let parent = v.node(p);
-                if parent.record == 11 {
-                    return true;
-                }
-                if parent.record == 5 || std::ptr::eq(parent, at) {
-                    return false;
-                }
-                at = parent;
-            }
-            ParentRef::Raw(r) => return r.number == 11,
-        }
-    }
-    false
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_entry(
-    v: &Volume,
-    vi: usize,
-    ni: usize,
-    id: u32,
-    ids: &[Option<u32>],
-    image: &Image,
-    range: (u64, u64),
-    instance: &Instance,
-) -> Entry {
+fn build_entry(v: &Volume, vi: usize, ni: usize, id: u32, ids: &[Option<u32>], image: &Image, range: (u64, u64)) -> Entry {
     let node = &v.nodes[ni];
     let rendered = v.rendered.as_ref().expect("checked");
     let cs = v.cluster_size();
@@ -819,19 +818,11 @@ fn build_entry(
     };
 
     // ---- expectations that follow from the entry alone -------------------
-    let mut expect = Expect { presence: Presence::Unspecified, path: None, flags_set: Vec::new(), flags_clear: Vec::new() };
-    let hidden_by_number = node.record < 16 || (node.record < 24 && node.names.is_empty());
-    if instance.role == InstanceRole::Current {
-        expect.presence = Presence::Hidden;
-    } else if record_state != RecordState::Intact || !record_in_range {
-        expect.presence = Presence::Gone;
-    } else if hidden_by_number || under_extend(v, node) {
-        expect.presence = Presence::Hidden;
-    } else {
-        expect.presence = Presence::Shown;
-        if truth.ancestors_intact {
-            expect.path = Some(components.clone());
-        }
+    // Presence, instance, path and the flags that need the whole image are
+    // worked out by `crate::expect` when the manifest is finished.
+    let mut expect =
+        Expect { presence: Presence::Unspecified, instance: None, path: None, flags_set: Vec::new(), flags_clear: Vec::new() };
+    {
         let mut flag = |f: Flag, on: bool| if on { expect.set(f) } else { expect.clear(f) };
         flag(Flag::Deleted, !node.in_use);
         let torn = !node.quirks.torn_blocks.is_empty()
@@ -980,297 +971,6 @@ fn surviving_index_entries(entries: &mut [Entry], records: &[RecordFact], index_
     }
 }
 
-/// Generation, overwritten and overlap flags (ALGORITHMS C5, D9, G2).
-fn global_expectations(entries: &mut [Entry], instances: &[Instance], overwritten_set: &[(u64, u64)]) {
-    // instance kinds
-    for entry in entries.iter_mut().filter(|e| e.expect.presence == Presence::Shown) {
-        let instance = &instances[entry.instance as usize];
-        match instance.expected_kind {
-            Some(kind) => {
-                for (flag, on) in [
-                    (Flag::OlderGeneration, kind == InstanceKind::Older),
-                    (Flag::Embedded, kind == InstanceKind::Embedded),
-                    (Flag::Stray, kind == InstanceKind::Strays),
-                ] {
-                    if on {
-                        entry.expect.set(flag);
-                    } else {
-                        entry.expect.clear(flag);
-                    }
-                }
-            }
-            None => {
-                for flag in [Flag::OlderGeneration, Flag::Embedded, Flag::Stray] {
-                    entry.expect.open(flag);
-                }
-            }
-        }
-    }
-
-    // Overlap conflicts between the files of all non-embedded lost
-    // instances, compared in absolute bytes.
-    let candidates: Vec<usize> = entries
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| {
-            e.kind == EntryKind::File
-                && e.expect.presence == Presence::Shown
-                && instances[e.instance as usize].role == InstanceRole::Lost
-        })
-        .map(|(i, _)| i)
-        .collect();
-    let mut segments: Vec<(u64, u64, usize)> = Vec::new();
-    for &i in &candidates {
-        for extent in &entries[i].extents {
-            if let Some(offset) = extent.offset {
-                segments.push((offset, offset + extent.bytes, i));
-            }
-        }
-    }
-    segments.sort_unstable();
-    let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
-    let mut active: Vec<(u64, usize)> = Vec::new();
-    for &(start, end, i) in &segments {
-        active.retain(|&(active_end, _)| active_end > start);
-        for &(_, j) in &active {
-            if i != j {
-                pairs.insert((i.min(j), i.max(j)));
-            }
-        }
-        active.push((end, i));
-    }
-    let rank = |kind: InstanceKind| match kind {
-        InstanceKind::Main => 0,
-        InstanceKind::Other => 1,
-        InstanceKind::Older => 2,
-        InstanceKind::Strays | InstanceKind::Embedded => 3,
-    };
-    let mut lost: BTreeSet<usize> = BTreeSet::new();
-    let mut overlap: BTreeSet<usize> = BTreeSet::new();
-    let mut uncertain: BTreeSet<usize> = BTreeSet::new();
-    for &(a, b) in &pairs {
-        let (ea, eb) = (&entries[a], &entries[b]);
-        let (Some(ka), Some(kb)) =
-            (instances[ea.instance as usize].expected_kind, instances[eb.instance as usize].expected_kind)
-        else {
-            uncertain.insert(a);
-            uncertain.insert(b);
-            continue;
-        };
-        // winner: instance kind, in use over deleted, later MFT change
-        // time, higher LSN
-        let key = |e: &Entry, k: InstanceKind| (std::cmp::Reverse(rank(k)), !e.deleted, e.times.mft_changed, e.lsn);
-        match key(ea, ka).cmp(&key(eb, kb)) {
-            std::cmp::Ordering::Equal => {
-                overlap.insert(a);
-                overlap.insert(b);
-            }
-            order => {
-                let (winner, loser) = if order == std::cmp::Ordering::Greater { (a, b) } else { (b, a) };
-                lost.insert(loser);
-                if !ea.deleted && !eb.deleted && rank(ka) == rank(kb) {
-                    overlap.insert(winner);
-                }
-            }
-        }
-    }
-    for &i in &candidates {
-        let hit = entries[i]
-            .extents
-            .iter()
-            .any(|e| e.offset.is_some_and(|o| intersects(overwritten_set, o, e.bytes)));
-        let expect = &mut entries[i].expect;
-        if hit || lost.contains(&i) {
-            expect.set(Flag::Overwritten);
-        } else if uncertain.contains(&i) {
-            expect.open(Flag::Overwritten);
-        } else {
-            expect.clear(Flag::Overwritten);
-        }
-        if overlap.contains(&i) {
-            expect.set(Flag::Overlap);
-        } else if uncertain.contains(&i) {
-            expect.open(Flag::Overlap);
-        } else {
-            expect.clear(Flag::Overlap);
-        }
-    }
-}
-
-/// One step of an expected path, from the entry upwards.
-enum Step {
-    Name(String),
-    Lost(u64, u16),
-}
-
-/// Where a correct catalog puts every shown entry of a lost file system
-/// (ALGORITHMS E4 to E6), worked out from what survived:
-///
-/// * the entry's name is one of its best namespace (Win32 or Win32+DOS,
-///   then POSIX, then DOS): one whose parent survived, then the one with
-///   the lowest attribute id;
-/// * a parent whose folder record survived contributes its name;
-/// * a parent whose record is gone is a lost folder: it takes name and
-///   parent from the surviving index entry for it with the highest
-///   `$LogFile` sequence number (DOS names last), else from a stale copy of
-///   its record, else it is `Folder #N` (`Folder #N.s` when lost folders
-///   with several sequence numbers share the number) under `[Lost folders]`;
-/// * reference 5 is the root.
-///
-/// Paths are left open where the rules give no single answer: parent cycles
-/// (E8 cuts them "where the cycle is detected") and index entries of equal
-/// sequence number that disagree.
-fn expected_paths(
-    entries: &mut [Entry],
-    instances: &[Instance],
-    records: &[RecordFact],
-    index_blocks: &[IndexBlockFact],
-    live_ranges: &[(u64, u64)],
-) {
-    type Key = (u32, u64, u16);
-    let lost_instance = |i: u32| instances[i as usize].role == InstanceRole::Lost;
-    // folders by the reference their children use
-    let mut folders: BTreeMap<Key, usize> = BTreeMap::new();
-    for (i, e) in entries.iter().enumerate() {
-        if e.kind == EntryKind::Dir && e.truth.record_state == RecordState::Intact && e.truth.record_in_range {
-            folders.insert((e.instance, e.record, e.sequence), i);
-        }
-    }
-    // names offered by surviving index entries: (lsn, namespace, name, parent)
-    let mut offers: BTreeMap<Key, Vec<(u64, u8, String, FileRef)>> = BTreeMap::new();
-    let mut offer = |instance: u32, lsn: u64, entry: &crate::facts::IndexEntryFact| {
-        if entry.key.flags & crate::ondisk::attr::FN_DIRECTORY != 0 {
-            offers.entry((instance, entry.child.number, entry.child.seq)).or_default().push((
-                lsn,
-                entry.key.namespace,
-                entry.key.name.clone(),
-                entry.key.parent,
-            ));
-        }
-    };
-    for block in index_blocks.iter().filter(|b| b.state == ArtifactState::Intact) {
-        // an index block in space the current file system has allocated
-        // counts as current data (C4)
-        if intersects(live_ranges, block.offset, block.size as u64) {
-            continue;
-        }
-        for e in &block.entries {
-            offer(block.instance, block.lsn, e);
-        }
-    }
-    for record in records.iter().filter(|r| r.state == ArtifactState::Intact) {
-        for e in record.index_root.iter().flatten() {
-            offer(record.instance, record.lsn, e);
-        }
-    }
-    // stale copies of folder records (E6 b): in use, directory
-    let mut copies: BTreeMap<Key, (String, FileRef)> = BTreeMap::new();
-    for record in records {
-        if record.role == RecordRole::StaleCopy && record.state == ArtifactState::Intact && record.flags & 3 == 3 {
-            let names: Vec<NameChoice> =
-                record.names.iter().map(|n| (n.namespace, n.name.clone(), n.parent, n.attr_id)).collect();
-            if let (Some(number), Some(name)) = (record.number, best_name(&names, |_| true)) {
-                copies.entry((record.instance, number, record.sequence)).or_insert(name);
-            }
-        }
-    }
-
-    let survives = |instance: u32, parent: FileRef| parent.number == 5 || folders.contains_key(&(instance, parent.number, parent.seq));
-    let own_name = |e: &Entry| -> Option<(String, FileRef)> {
-        let names: Vec<NameChoice> =
-            e.names.iter().map(|n| (n.namespace, n.name.clone(), n.parent, n.attr_id)).collect();
-        best_name(&names, |parent| survives(e.instance, parent))
-    };
-    let lost_name = |key: Key| -> Result<Option<(String, FileRef)>, ()> {
-        if let Some(list) = offers.get(&key) {
-            let non_dos = list.iter().any(|o| o.1 != 2);
-            let usable: Vec<&(u64, u8, String, FileRef)> = list.iter().filter(|o| !non_dos || o.1 != 2).collect();
-            let top = usable.iter().map(|o| o.0).max().expect("not empty");
-            let mut best: Vec<(&String, FileRef)> = usable.iter().filter(|o| o.0 == top).map(|o| (&o.2, o.3)).collect();
-            best.dedup();
-            return if best.windows(2).all(|w| w[0] == w[1]) { Ok(Some((best[0].0.clone(), best[0].1))) } else { Err(()) };
-        }
-        Ok(copies.get(&key).cloned())
-    };
-
-    let mut chains: Vec<Option<Vec<Step>>> = Vec::with_capacity(entries.len());
-    let mut lost_sequences: BTreeMap<(u32, u64), BTreeSet<u16>> = BTreeMap::new();
-    for e in entries.iter() {
-        if e.expect.presence != Presence::Shown || !lost_instance(e.instance) {
-            chains.push(None);
-            continue;
-        }
-        let chain = (|| {
-            let (name, mut parent) = own_name(e)?;
-            let mut steps = vec![Step::Name(name)];
-            for _ in 0..512 {
-                if parent.number == 5 {
-                    return Some(steps);
-                }
-                let key = (e.instance, parent.number, parent.seq);
-                if let Some(&folder) = folders.get(&key) {
-                    let (name, next) = own_name(&entries[folder])?;
-                    steps.push(Step::Name(name));
-                    parent = next;
-                    continue;
-                }
-                match lost_name(key).ok()? {
-                    Some((name, next)) => {
-                        // a named lost folder still counts as one for the
-                        // "several sequences share a number" rule
-                        lost_sequences.entry((e.instance, parent.number)).or_default().insert(parent.seq);
-                        steps.push(Step::Name(name));
-                        parent = next;
-                    }
-                    None => {
-                        lost_sequences.entry((e.instance, parent.number)).or_default().insert(parent.seq);
-                        steps.push(Step::Lost(parent.number, parent.seq));
-                        return Some(steps);
-                    }
-                }
-            }
-            None
-        })();
-        chains.push(chain);
-    }
-    for (e, chain) in entries.iter_mut().zip(chains) {
-        if e.expect.presence != Presence::Shown || !lost_instance(e.instance) {
-            continue;
-        }
-        e.expect.path = chain.map(|steps| {
-            let mut path: Vec<String> = Vec::with_capacity(steps.len() + 1);
-            for step in steps.into_iter().rev() {
-                match step {
-                    Step::Name(name) => path.push(name),
-                    Step::Lost(number, seq) => {
-                        path.push("[Lost folders]".to_string());
-                        let several = lost_sequences.get(&(e.instance, number)).is_some_and(|s| s.len() > 1);
-                        path.push(if several { format!("Folder #{number}.{seq}") } else { format!("Folder #{number}") });
-                    }
-                }
-            }
-            path
-        });
-    }
-}
-
-/// A `$FILE_NAME` to choose from: namespace, name, parent, attribute id.
-type NameChoice = (u8, String, FileRef, u16);
-
-/// ALGORITHMS E4: among the names of the best namespace (Win32 or
-/// Win32+DOS, then POSIX, then DOS) one whose parent passes `survives`,
-/// then the lowest attribute id.
-fn best_name(names: &[NameChoice], survives: impl Fn(FileRef) -> bool) -> Option<(String, FileRef)> {
-    let rank = |namespace: u8| match namespace {
-        1 | 3 => 0,
-        0 => 1,
-        _ => 2,
-    };
-    let best = names.iter().map(|n| rank(n.0)).min()?;
-    let chosen = names.iter().filter(|n| rank(n.0) == best).min_by_key(|n| (!survives(n.2), n.3))?;
-    Some((chosen.1.clone(), chosen.2))
-}
-
 /// Maps offsets of a file's content to absolute offsets of the host image.
 struct HostMap {
     /// `(file offset, absolute offset, length)` of every allocated run.
@@ -1352,7 +1052,7 @@ fn adopt_embedded(
         instance.id += instance_base;
         instance.label = format!("{}/{}", m.scenario, instance.label);
         instance.role = InstanceRole::Embedded;
-        instance.expected_kind = Some(InstanceKind::Embedded);
+        instance.expected_kind = None;
         instance.embedded_in = Some(host_entry);
         let inner_offset = instance.geometry.volume_offset;
         instance.offset_in_host = Some(inner_offset);
@@ -1416,42 +1116,16 @@ fn adopt_embedded(
             e.truth.record_state = RecordState::Destroyed;
         }
         e.truth.content_intact = entry.truth.content_intact.map(|c| c && content_ok);
-        // Files of an embedded file system are browse-only (ALGORITHMS D7).
-        // A healthy volume inside the image is "current" only in the inner
-        // manifest; seen from the host it is an embedded instance whose
-        // files are shown unless they are system files.
-        let inner_current = m.instances[entry.instance as usize].role == InstanceRole::Current;
-        let inner_presence = if !inner_current {
-            entry.expect.presence
-        } else if entry.truth.record_state != RecordState::Intact {
-            Presence::Gone
-        } else if entry.record < 16 || entry.components.first().is_some_and(|c| c == "$Extend") {
-            Presence::Hidden
-        } else {
-            Presence::Shown
-        };
-        let shown = inner_presence == Presence::Shown && intact;
+        // What a correct catalog makes of the entry inside the host image is
+        // worked out by `crate::expect` with everything else; the flags that
+        // follow from the entry alone travel with it.
         e.expect = Expect {
-            presence: match inner_presence {
-                Presence::Shown if !intact => Presence::Gone,
-                other => other,
-            },
-            path: match (shown, inner_current) {
-                (true, true) if entry.truth.ancestors_intact => Some(entry.components.clone()),
-                (true, false) => entry.expect.path.clone(),
-                _ => None,
-            },
-            flags_set: Vec::new(),
-            flags_clear: Vec::new(),
+            presence: Presence::Unspecified,
+            instance: None,
+            path: None,
+            flags_set: entry.expect.flags_set.clone(),
+            flags_clear: entry.expect.flags_clear.clone(),
         };
-        if shown {
-            e.expect.set(Flag::Embedded);
-            if entry.deleted {
-                e.expect.set(Flag::Deleted);
-            } else {
-                e.expect.clear(Flag::Deleted);
-            }
-        }
         entries.push(e);
     }
     let translate = |offset: u64, len: u64| -> Option<(u64, ArtifactState)> {
@@ -1505,32 +1179,7 @@ fn adopt_embedded(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn name_choice_follows_namespace_then_parent_then_attribute_id() {
-        let name = |namespace: u8, name: &str, parent: u64, id: u16| (namespace, name.to_string(), FileRef::new(parent, 1), id);
-        let pick = |names: &[NameChoice], alive: &[u64]| {
-            best_name(names, |parent| alive.contains(&parent.number)).map(|(name, _)| name)
-        };
-        // Win32 beats POSIX beats DOS, wherever they stand
-        let mixed = [name(2, "DOS~1", 9, 1), name(0, "posix", 9, 2), name(1, "win32", 9, 3)];
-        assert_eq!(pick(&mixed, &[9]).as_deref(), Some("win32"));
-        assert_eq!(pick(&mixed[..2], &[9]).as_deref(), Some("posix"));
-        assert_eq!(pick(&mixed[..1], &[9]).as_deref(), Some("DOS~1"));
-        // Win32+DOS is as good as Win32: the lower id decides
-        let both = [name(1, "long", 9, 5), name(3, "SHORT", 9, 4)];
-        assert_eq!(pick(&both, &[9]).as_deref(), Some("SHORT"));
-        // a surviving parent beats a lower id; among survivors the lower id wins
-        let links = [name(1, "first stored", 7, 6), name(1, "second stored", 8, 3), name(1, "third stored", 9, 2)];
-        assert_eq!(pick(&links, &[7]).as_deref(), Some("first stored"));
-        assert_eq!(pick(&links, &[7, 8]).as_deref(), Some("second stored"));
-        assert_eq!(pick(&links, &[7, 8, 9]).as_deref(), Some("third stored"));
-        assert_eq!(pick(&links, &[]).as_deref(), Some("third stored"), "no parent survives: the lowest id");
-        // a better namespace is preferred even when only the worse one has a parent
-        let split = [name(0, "posix here", 7, 1), name(1, "win32 there", 8, 2)];
-        assert_eq!(pick(&split, &[7]).as_deref(), Some("win32 there"));
-        assert_eq!(pick(&[], &[7]), None);
-    }
+    use crate::expect::intersects;
 
     #[test]
     fn range_helpers() {

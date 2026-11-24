@@ -34,15 +34,19 @@ final class FakeApp {
   FakeApp({
     int mainNodes = 3000,
     bool elevated = true,
+    String os = 'windows',
     int protocol = 1,
     int pageSize = 200,
     int maxCachedPages = 64,
     Duration? tick,
+    String? sessionDirectory,
     Future<void> Function()? settle,
   }) : transport = FakeEngineTransport(
-         options: FakeEngineOptions(mainNodes: mainNodes, tick: tick, elevated: elevated, protocol: protocol),
+         options: FakeEngineOptions(mainNodes: mainNodes, tick: tick, elevated: elevated, os: os, protocol: protocol),
        ),
-       platform = InertPlatformServices(),
+       platform = sessionDirectory == null
+           ? InertPlatformServices()
+           : InertPlatformServices(defaultSessionDirectory: sessionDirectory),
        _settle = settle ?? pumpEventQueue {
     app = AppController(
       transport: transport,

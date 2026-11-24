@@ -11,8 +11,17 @@
 ///
 /// | location                                   | verdict                               |
 /// |--------------------------------------------|---------------------------------------|
-/// | a drive letter of the open source's disk   | `overlaps_source`                     |
-/// | `/overlap/...`                             | `overlaps_source`                     |
+/// | the image file that is the source          | `overlaps_source`, `source_image`     |
+/// | a volume of the source disk inside a       | `overlaps_source` with the reason of  |
+/// | protected range (see below)                | the first range it meets              |
+/// | another volume of the source disk          | `same_disk` (`ok` for `session` and   |
+/// |                                            | `app_data` on the system volume, S3)  |
+/// | `/overlap/...`                             | `overlaps_source`, `session_range`    |
+/// | `L:\...`, `/lost-volume/...`               | inside the lost volume of the main    |
+/// |                                            | file system: `overlaps_source`,       |
+/// |                                            | `lost_volume`, with lost files; while |
+/// |                                            | no such volume is known (no catalog,  |
+/// |                                            | geometry not validated) `same_disk`   |
 /// | `S:\...`, `/same-disk/...`                 | `same_disk`                           |
 /// | `U:\...`, `/unknown/...`, `\\localhost\..` | `unknown_disk`                        |
 /// | `Q:\...`, `/missing/...`                   | `not_found`                           |
@@ -21,6 +30,16 @@
 /// | `K:\...`, `/fat32/...`                     | `ok`, FAT32 with its 4 GiB file limit |
 /// | anything that is not absolute              | `invalid_path`                        |
 /// | everything else                            | `ok`                                  |
+///
+/// The protected ranges are what the guard protects at that moment
+/// (docs/ARCHITECTURE.md, S2): with a catalog its `protected` list (the
+/// session range and the lost volumes); during a scan the session range; for
+/// `scan_start` and `image_start` the range of the new job as well. Before a
+/// session exists (state O) the fake protects the whole source, because the
+/// next scan or image covers all of it unless told otherwise. That last rule
+/// is the fake's choice: the protocol leaves open what the guard says about
+/// the source disk before a range is known, and the job's own check is the
+/// one that counts.
 ///
 /// Image files (`open_source` with kind `image`), by file name: `missing` ->
 /// `not_found`; `denied` -> `access_denied`; `nopart` -> no partition table;
@@ -154,8 +173,8 @@ final class FakeWorld {
         partitions: [
           _partition(1, _mib, 100 * _mib, 'EFI system', 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B', 'fat'),
           _partition(2, 101 * _mib, 16 * _mib, 'Microsoft reserved', 'E3C9E316-0B5C-4DB8-817D-F92DF00215AE', null),
-          _partition(3, 117 * _mib, 510 * _gib - 117 * _mib, 'Basic data', _basicData, 'ntfs', letters: ['C:'], label: 'Windows'),
-          _partition(4, 510 * _gib, 900 * _mib, 'Windows recovery', 'DE94BBA4-06D1-4D40-A16A-BFD50179D6AC', 'ntfs'),
+          _partition(3, 117 * _mib, 487485 * _mib - 117 * _mib, 'Basic data', _basicData, 'ntfs', letters: ['C:'], label: 'Windows'),
+          _partition(4, 487485 * _mib, 900 * _mib, 'Windows recovery', 'DE94BBA4-06D1-4D40-A16A-BFD50179D6AC', 'ntfs'),
         ],
       ),
       // The disk to rescue: a 4 TB USB hard disk that was just formatted.
@@ -262,6 +281,39 @@ final class FakeWorld {
     return null;
   }
 
+  /// What `list_disks` says about [disk], which is the complete truth (the
+  /// partition table that `open_source` reads): "The disk list is made
+  /// without reading a single sector, so its partitions are the volumes
+  /// Windows exposes on that disk: index is Windows' partition number, fs is
+  /// the mounted file system (null for a raw volume), type and type_id are
+  /// empty, ntfs is null, and partitions without a volume are missing."
+  ///
+  /// Partitions without a volume: the Microsoft reserved partition, foreign
+  /// ones (Linux) and Storage Spaces members. A locked BitLocker volume and
+  /// an empty one are raw volumes (`fs` null).
+  static Map<String, Object?> listDisksEntry(Map<String, Object?> disk) => {
+    ...disk,
+    'partitions': [
+      for (final p in (disk['partitions']! as List<Object?>).cast<Map<String, Object?>>())
+        if (_hasVolume(p))
+          {
+            ...p,
+            'type': '',
+            'type_id': '',
+            'fs': switch (p['fs']) {
+              'ntfs' || 'fat' || 'exfat' || 'refs' => p['fs'],
+              _ => null,
+            },
+            'ntfs': null,
+          },
+    ],
+  };
+
+  static bool _hasVolume(Map<String, Object?> partition) => switch (partition['type']) {
+    'Microsoft reserved' || 'Linux' || 'Storage Spaces' => false,
+    _ => true,
+  };
+
   /// PROTOCOL `SourceInfo` of a disk entry.
   static Map<String, Object?> sourceInfoOf(Map<String, Object?> disk) => {
     for (final key in const [
@@ -353,29 +405,41 @@ final class FakeWorld {
 
   /// PROTOCOL `check_destination` result for [path].
   ///
-  /// [sourceDisk] is the `Disk` entry of the open source, `null` for an image
-  /// file. See the library documentation for the naming rules.
+  /// [sourceDisk] is the `Disk` entry of the open source (`null` for an
+  /// image file), [sourceImage] the path of the image file that is the
+  /// source (`null` for a disk). [protected] are the ranges the guard
+  /// protects right now (see the library documentation). [filesIn] counts
+  /// the catalog files, and their bytes, stored in an absolute byte range of
+  /// the source; `null` when there is no catalog.
   Map<String, Object?> checkDestination(
     String path, {
     required String purpose,
     required int? needBytes,
     required Map<String, Object?>? sourceDisk,
+    String? sourceImage,
+    List<FakeProtectedRange> protected = const [],
+    (int, int) Function(int start, int end)? filesIn,
   }) {
     Map<String, Object?> result(
       String verdict,
       String message, {
+      String? reason,
       int? free = 8000000000000,
       String? fs = 'NTFS',
       int? maxFileBytes,
       List<int> disks = const [0],
+      (int, int) lost = (0, 0),
     }) => {
       'verdict': verdict,
+      'reason': reason,
       'message': message,
       'free_bytes': free,
       'enough_space': needBytes == null || free == null ? null : free >= needBytes,
       'fs': fs,
       'max_file_bytes': maxFileBytes,
       'disk_numbers': disks,
+      'lost_files': lost.$1,
+      'lost_bytes': lost.$2,
     };
 
     final volume = volumeOf(path);
@@ -388,21 +452,81 @@ final class FakeWorld {
         disks: const [],
       );
     }
-
-    final sourceNumber = sourceDisk?['number'] as int?;
-    final sourceLetters = <String>{
-      if (sourceDisk != null)
-        for (final p in (sourceDisk['partitions']! as List<Object?>).cast<Map<String, Object?>>())
-          for (final letter in (p['letters']! as List<Object?>).cast<String>()) letter[0],
-    };
-    if (sourceLetters.contains(volume) || volume == '/overlap') {
+    if (sourceImage != null && _samePath(path, sourceImage)) {
       return result(
         'overlaps_source',
-        'This location is on the disk that is being rescued. Saving there would overwrite the files you want back.',
-        disks: [?sourceNumber],
+        'This is the disk image that is being rescued. HDSavior never writes to it.',
+        reason: 'source_image',
+        disks: const [0],
       );
     }
+
+    final sourceNumber = sourceDisk?['number'] as int?;
+    (int, int) lostIn(int start, int end) => filesIn?.call(start, end) ?? (0, 0);
+    FakeProtectedRange? firstHit(int start, int end) {
+      for (final range in protected) {
+        if (range.start < end && start < range.end) return range;
+      }
+      return null;
+    }
+
+    Map<String, Object?> overlaps(String reason, (int, int) lost) => result(
+      'overlaps_source',
+      switch (reason) {
+        'lost_volume' =>
+          'This location is inside the file system that was lost, which reaches beyond the scanned area. '
+              'Saving there would overwrite files you may want back. Use another disk.',
+        _ => 'This location is on the part of the disk that is being rescued. '
+            'Saving there would overwrite the files you want back.',
+      },
+      reason: reason,
+      disks: [?sourceNumber],
+      lost: lost,
+    );
+
+    // A volume of the source disk: protected, or the same disk.
+    if (sourceDisk != null) {
+      for (final p in (sourceDisk['partitions']! as List<Object?>).cast<Map<String, Object?>>()) {
+        final letters = (p['letters']! as List<Object?>).cast<String>().map((l) => l[0].toUpperCase());
+        if (!letters.contains(volume)) continue;
+        final start = p['offset']! as int;
+        final end = start + (p['size']! as int);
+        final hit = firstHit(start, end);
+        if (hit != null) return overlaps(hit.reason, lostIn(start, end));
+        final systemVolume = sourceDisk['is_system'] == true && volume == 'C';
+        if (systemVolume && (purpose == 'session' || purpose == 'app_data')) {
+          return result('ok', '', disks: [?sourceNumber]);
+        }
+        return result(
+          'same_disk',
+          'This location is on the disk that is being rescued, outside the part that is protected. '
+              'Use another disk if you can.',
+          disks: [?sourceNumber],
+          lost: lostIn(start, end),
+        );
+      }
+    }
+
     switch (volume) {
+      case '/overlap':
+        final range = protected.isEmpty ? null : protected.first;
+        return overlaps('session_range', range == null ? (0, 0) : lostIn(range.start, range.end));
+      case 'L' || '/lost-volume':
+        final lostVolumes = [for (final range in protected) if (range.main) range];
+        if (lostVolumes.isEmpty) {
+          return result(
+            'same_disk',
+            filesIn == null
+                ? 'This location is on the disk that is being rescued. Until a scan has found the lost file '
+                      'system nobody knows how far it reached. Use another disk if you can.'
+                : 'This location is on the disk that is being rescued, outside the part that is protected. '
+                      'Use another disk if you can.',
+            disks: [?sourceNumber],
+          );
+        }
+        // A volume that covers the last tenth of the main lost file system.
+        final reach = lostVolumes.first;
+        return overlaps('lost_volume', lostIn(reach.end - (reach.end - reach.start) ~/ 10, reach.end));
       case 'S' || '/same-disk':
         return result(
           'same_disk',
@@ -427,4 +551,31 @@ final class FakeWorld {
     if (volume.startsWith('unc:')) return result('ok', '', disks: const []);
     return result('ok', '');
   }
+
+  /// Whether two native paths name the same file (case-insensitive, either
+  /// separator).
+  static bool _samePath(String a, String b) =>
+      a.replaceAll('/', r'\').toLowerCase() == b.replaceAll('/', r'\').toLowerCase();
+}
+
+/// One entry of PROTOCOL `CatalogInfo.protected`: an absolute byte range of
+/// the source that no destination may touch, and why.
+final class FakeProtectedRange {
+  const FakeProtectedRange(this.start, this.end, this.reason, {this.main = false});
+
+  final int start;
+
+  /// Exclusive.
+  final int end;
+
+  /// `session_range` or `lost_volume`.
+  final String reason;
+
+  /// The lost volume of the main instance (not sent).
+  final bool main;
+
+  Map<String, Object?> toJson() => {'start': start, 'end': end, 'reason': reason};
+
+  @override
+  String toString() => 'FakeProtectedRange($start, $end, $reason)';
 }

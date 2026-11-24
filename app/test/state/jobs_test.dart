@@ -202,7 +202,10 @@ void main() {
       await fake.openDisk();
       await app().scan.start();
       expect(app().scan.start, throwsStateError);
-      await expectLater(app().image.start(dest: r'D:\x.img'), throwsA(engineError(EngineErrorCode.busy)));
+      final refused = app().image.start(dest: r'D:\x.img');
+      expect(app().image.phase, JobPhase.starting);
+      expect(app().jobs.value, JobKind.scan, reason: 'a start that is not answered yet does not take over the slot');
+      await expectLater(refused, throwsA(engineError(EngineErrorCode.busy)));
       expect(app().image.phase, JobPhase.idle);
       expect(app().image.startError!.kind, EngineErrorCode.busy);
       expect(app().jobs.value, JobKind.scan, reason: 'the refused job does not take over the slot');
@@ -324,6 +327,62 @@ void main() {
       expect(summary.bytes, truth.bytes);
     });
 
+    test('an obsolete summary request still waiting in the queue is never sent', () async {
+      // A long request keeps the engine busy, so the summary waits in the queue.
+      fake.script.taskTicks = 2;
+      final setting = app().catalog.setGeometry(instance: 0, clusterSize: 4096, volumeOffset: 1048576);
+      await pumpEventQueue();
+      app().selection.setChecked(fake.landmarks.documents, [root], true);
+      await pumpEventQueue();
+      app().selection.setChecked(fake.landmarks.manyFolders, [root], true);
+      await pumpEventQueue();
+      await fake.step(2);
+      await setting;
+      await pumpEventQueue();
+      final both = [fake.landmarks.documents, fake.landmarks.manyFolders]..sort();
+      final summaries = fake.engine.requests.where((r) => r.command == 'selection_summary').toList();
+      // Sent: the one for both folders, and again after the new geometry
+      // (ratings may have changed). Never: the one for the first folder alone.
+      expect(summaries, isNotEmpty);
+      for (final request in summaries) {
+        expect(request.args['include'], both, reason: 'the obsolete request was cancelled before it was sent');
+      }
+      expect(app().recover.summary, isNotNull);
+    });
+
+    test('an answer that comes in after the selection changed again is not shown', () async {
+      final examples = ProtocolExamples.load();
+      final transport = ScriptedTransport();
+      final scripted = AppController(transport: transport, platform: InertPlatformServices());
+      addTearDown(scripted.dispose);
+      unawaited(scripted.start());
+      await pumpEventQueue();
+      transport.connection.respond(transport.connection.lastId, examples.object('hello.result'));
+      await pumpEventQueue();
+      transport.connection.respond(transport.connection.lastId, {'disks': <Object?>[]});
+      await pumpEventQueue();
+      scripted.catalog.adopt(CatalogInfo.fromJson(JsonObject.root(examples.object('CatalogInfo'), 'c')));
+      final recover = scripted.recover;
+
+      scripted.selection.setChecked(17, const [0], true);
+      await pumpEventQueue();
+      final first = transport.connection.lastRequest;
+      expect(first['cmd'], 'selection_summary');
+      // The answer is on its way when the selection changes again.
+      transport.connection.respond(first['id']! as int, examples.object('selection_summary.result'));
+      scripted.selection.setChecked(99, const [0], true);
+      await pumpEventQueue();
+      expect(recover.summary, isNull, reason: 'the answer for the previous selection does not count');
+      expect(recover.isSummaryLoading, isTrue);
+      final second = transport.connection.lastRequest;
+      expect(second['cmd'], 'selection_summary');
+      expect((second['args']! as Map)['include'], [17, 99]);
+      transport.connection.respond(second['id']! as int, {...examples.object('selection_summary.result'), 'files': 7});
+      await pumpEventQueue();
+      expect(recover.summary!.files, 7);
+      expect(recover.isSummaryLoading, isFalse);
+    });
+
     test('a summary that fails says why', () async {
       fake.engine.failNext('selection_summary', 'not_found', message: 'node 123 does not exist');
       app().selection.setChecked(root, const [], true);
@@ -385,6 +444,98 @@ void main() {
       expect(recover.checkedDestination, r'D:\typed');
       expect(recover.destinationCheck!.isOk, isTrue);
       expect(recover.isCheckingDestination, isFalse);
+    });
+
+    test('the verdict is asked for again when the catalog changes and when the selection needs other space', () async {
+      final recover = app().recover;
+      int checks() => fake.engine.requests
+          .where((r) => r.command == 'check_destination' && r.args['purpose'] == 'recover')
+          .length;
+      app().selection.setChecked(fake.landmarks.documents, [root], true);
+      await pumpEventQueue();
+      final first = await recover.checkDestination(r'L:\Rescued');
+      expect(first.verdict, DestinationVerdict.overlapsSource);
+      expect(first.reason, ProtectionReason.lostVolume);
+      expect(first.lostFiles, greaterThan(0));
+      final asked = checks();
+
+      // More is selected: the guard is asked with the space needed now.
+      app().selection.setChecked(root, const [], true);
+      await pumpEventQueue();
+      expect(checks(), asked + 1);
+      expect(fake.lastArgs('check_destination')['need_bytes'], recover.summary!.bytes);
+      expect(recover.destination.needBytes, recover.summary!.bytes);
+      expect(recover.destinationCheck!.reason, ProtectionReason.lostVolume);
+
+      // A geometry that is not validated protects no lost volume any more.
+      await app().catalog.setGeometry(instance: 0, clusterSize: 8192, volumeOffset: 1048576);
+      expect(recover.destinationCheck, isNull, reason: 'unknown until the new answer is in');
+      expect(recover.isCheckingDestination, isTrue);
+      await pumpEventQueue();
+      expect(recover.destinationCheck!.verdict, DestinationVerdict.sameDisk);
+      expect(recover.checkedDestination, r'L:\Rescued');
+
+      // Without a catalog there is nothing to ask; with the next one it is asked again.
+      await app().scan.start();
+      await pumpEventQueue();
+      expect(recover.destinationCheck, isNull);
+      expect(recover.isCheckingDestination, isFalse);
+      final duringScan = checks();
+      await fake.finishJob();
+      await pumpEventQueue();
+      expect(checks(), greaterThan(duringScan));
+      expect(recover.destinationCheck!.reason, ProtectionReason.lostVolume);
+    });
+
+    test('a check that a re-check of the same path overtakes answers with the newer verdict', () async {
+      final recover = app().recover;
+      fake.script.taskTicks = 2;
+      final setting = app().catalog.setGeometry(instance: 0, clusterSize: 8192, volumeOffset: 1048576);
+      await pumpEventQueue();
+      final checking = recover.checkDestination(r'L:\Rescued');
+      await fake.step(2);
+      final check = await checking;
+      await setting;
+      await pumpEventQueue();
+      expect(check.verdict, DestinationVerdict.sameDisk);
+      expect(recover.destinationCheck, same(check));
+      final recoverChecks = fake.engine.requests.where(
+        (r) => r.command == 'check_destination' && r.args['purpose'] == 'recover',
+      );
+      expect(recoverChecks, hasLength(2), reason: 'asked, then asked again');
+    });
+
+    test('readyToStart: a selection, a destination the options allow, no job', () async {
+      final recover = app().recover;
+      expect(recover.readyToStart, isFalse);
+      app().selection.setChecked(fake.landmarks.documents, [root], true);
+      await pumpEventQueue();
+      expect(recover.readyToStart, isFalse, reason: 'no destination yet');
+      await recover.checkDestination(r'S:\Rescued');
+      expect(recover.readyToStart, isFalse, reason: 'same disk needs consent');
+      final summaries = fake.commands.where((c) => c == 'selection_summary').length;
+      recover.options = recover.options.copyWith(allowSameDisk: true, onExists: OnExists.skip);
+      await pumpEventQueue();
+      expect(fake.commands.where((c) => c == 'selection_summary'), hasLength(summaries),
+          reason: 'consents and on_exists do not change what the summary counts');
+      expect(recover.summary, isNotNull);
+      expect(recover.readyToStart, isTrue);
+      await recover.checkDestination(r'T:\tiny');
+      await pumpEventQueue();
+      expect(recover.summary, isNotNull);
+      expect(recover.allows(recover.destinationCheck!), isTrue);
+      expect(recover.destinationCheck!.enoughSpace, isFalse);
+      expect(recover.readyToStart, isFalse, reason: 'not enough space');
+      await recover.checkDestination(r'D:\Rescued');
+      expect(recover.readyToStart, isTrue);
+      await recover.start(dest: r'D:\Rescued');
+      expect(recover.readyToStart, isFalse, reason: 'a job runs');
+      await fake.finishJob();
+      await pumpEventQueue();
+      expect(recover.readyToStart, isTrue);
+      app().selection.clear();
+      await pumpEventQueue();
+      expect(recover.readyToStart, isFalse, reason: 'nothing selected');
     });
 
     test('starting, progress, completion', () async {
@@ -634,6 +785,25 @@ void main() {
       expect(image.result!.badMapPath, isNull);
     });
 
+    test('the verdict is asked for again for another source, and unknown without one', () async {
+      final image = app().image;
+      final first = await image.checkDestination(r'E:\disk.img', needBytes: 4096);
+      expect(first.verdict, DestinationVerdict.overlapsSource, reason: 'E: is on disk 1');
+      expect(image.allows(first, allowSameDisk: true, allowUnknownDisk: true), isFalse);
+
+      await app().source.openDisk(app().source.disks![2]);
+      expect(image.destinationCheck, isNull, reason: 'the verdict was about the previous source');
+      await pumpEventQueue();
+      expect(image.destinationCheck!.verdict, DestinationVerdict.ok, reason: 'E: is not on disk 2');
+      expect(image.allows(image.destinationCheck!), isTrue);
+      expect(fake.lastArgs('check_destination'), {'path': r'E:\disk.img', 'purpose': 'image', 'need_bytes': 4096});
+
+      await app().source.close();
+      expect(image.destinationCheck, isNull);
+      expect(image.checkedDestination, r'E:\disk.img');
+      expect(image.destinationError, isNull);
+    });
+
     test('the whole source by default; unreadable sectors are reported', () async {
       fake.script.imageBadBytes = 8192;
       await app().image.start(dest: r'D:\images\whole.img');
@@ -723,6 +893,30 @@ void main() {
       expect(scripted.jobs.value, isNull);
     });
 
+    test('a done event that the controller sees before the answer to its start', () async {
+      // The engine writes the answer first, and this client resumes the code
+      // that awaits it before it delivers the next event. The controller must
+      // not depend on that order: whatever it sees first counts, and the code
+      // that runs later neither revives the job nor accepts it a second time
+      // (which would clear the new catalog).
+      final old = examples.object('CatalogInfo')..['epoch'] = 1;
+      scripted.catalog.adopt(CatalogInfo.fromJson(JsonObject.root(old, 'c')));
+      final starting = scripted.scan.resume();
+      await pumpEventQueue();
+      final id = transport.connection.lastId;
+      transport.connection.emit(
+        '${jsonEncode({'event': 'scan_done', 'data': examples.json('scan_done')})}\n'
+        '${jsonEncode({'id': id, 'ok': true, 'result': examples.json('scan_start.result')})}\n',
+      );
+      await starting;
+      await pumpEventQueue();
+      expect(scripted.scan.phase, JobPhase.done);
+      expect(scripted.scan.status, JobStatus.completed);
+      expect(scripted.scan.started!.bytesTotal, 4000785104896);
+      expect(scripted.catalog.epoch, 3);
+      expect(scripted.jobs.value, isNull);
+    });
+
     test('progress and done in one chunk with the response', () async {
       final starting = scripted.image.start(dest: r'D:\x.img');
       await pumpEventQueue();
@@ -752,6 +946,52 @@ void main() {
       expect(scripted.image.status, JobStatus.failed);
       expect(scripted.image.failure!.kind, EngineErrorCode.protocolError);
       expect(scripted.jobs.value, isNull);
+    });
+
+    test('a cancel before the start is answered waits for it, so that it cannot overtake the start', () async {
+      // A request is at the engine, so scan_start waits in the client's queue.
+      final slow = scripted.api.listDisks().then<Object?>((v) => v, onError: (Object e) => e);
+      await pumpEventQueue();
+      final starting = scripted.scan.resume();
+      await scripted.scan.cancel();
+      await pumpEventQueue();
+      expect(scripted.scan.phase, JobPhase.starting);
+      expect(scripted.scan.cancelPending, isTrue);
+      expect(transport.connection.requests.map((r) => r['cmd']), isNot(contains('job_cancel')),
+          reason: 'sent now, job_cancel would reach the engine before scan_start');
+
+      transport.connection.respond(transport.connection.lastId, {'disks': <Object?>[]});
+      await slow;
+      await pumpEventQueue();
+      expect(transport.connection.requests.last['cmd'], 'scan_start');
+      transport.connection.respond(transport.connection.lastId, examples.object('scan_start.result'));
+      await starting;
+      await pumpEventQueue();
+      expect(transport.connection.requests.last['cmd'], 'job_cancel', reason: 'sent once the job was accepted');
+      expect(scripted.scan.phase, JobPhase.cancelling);
+      expect(scripted.scan.cancelPending, isFalse);
+      transport.connection.respond(transport.connection.lastId);
+      transport.connection.event('scan_done', examples.json('scan_done'));
+      await pumpEventQueue();
+      expect(scripted.scan.phase, JobPhase.done);
+    });
+
+    test('a cancel before a start that is refused is forgotten', () async {
+      final starting = scripted.image.start(dest: r'E:\x.img');
+      await pumpEventQueue();
+      await scripted.image.cancel();
+      expect(scripted.image.cancelPending, isTrue);
+      transport.connection.respondError(transport.connection.lastId, 'busy');
+      await expectLater(starting, throwsA(isA<EngineException>()));
+      expect(scripted.image.cancelPending, isFalse);
+      expect(transport.connection.requests.map((r) => r['cmd']), isNot(contains('job_cancel')));
+    });
+
+    test('a malformed done event of a job that is not running is ignored', () async {
+      transport.connection.event('recover_done', {'status': 'completed'});
+      await pumpEventQueue();
+      expect(scripted.recover.phase, JobPhase.idle);
+      expect(scripted.recover.failure, isNull);
     });
 
     test('events of a job this controller does not follow are ignored', () async {

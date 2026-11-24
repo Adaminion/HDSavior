@@ -19,6 +19,11 @@ class ScanController
   final CatalogController _catalog;
   final SourceController _source;
   String? _sessionPath;
+  final List<Warning> _warnings = [];
+
+  /// The warnings the running (or last) scan has reported in its progress
+  /// events, each once (by code and message), in the order they arrived.
+  List<Warning> get warnings => List.unmodifiable(_warnings);
 
   /// Scans the byte range [range] of the open source (default: all of it).
   ///
@@ -79,8 +84,17 @@ class ScanController
       phase == JobPhase.running && progress?.phase != ScanPhase.analyzing;
 
   @override
+  void onProgress(ScanProgress progress) {
+    for (final warning in progress.warnings) {
+      final known = _warnings.any((w) => w.code == warning.code && w.message == warning.message);
+      if (!known) _warnings.add(warning);
+    }
+  }
+
+  @override
   void onAccepted() {
     // "Any scan_start discards the current catalog at once."
+    _warnings.clear();
     _catalog.clear();
     final path = _sessionPath;
     if (path != null) _source.noteSessionPath(path);

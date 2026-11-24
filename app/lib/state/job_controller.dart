@@ -93,6 +93,9 @@ abstract class JobController<S, P extends JobProgressEvent, D extends JobDoneEve
   JobPhase _phase = JobPhase.idle;
   int _run = 0;
   int _acceptedRun = 0;
+
+  /// [cancel] was called before the engine accepted the job.
+  bool _cancelOnAccept = false;
   S? _started;
   P? _progress;
   D? _result;
@@ -140,6 +143,7 @@ abstract class JobController<S, P extends JobProgressEvent, D extends JobDoneEve
     if (isActive) throw StateError('A ${kind.wire} job is already active.');
     final run = ++_run;
     _phase = JobPhase.starting;
+    _cancelOnAccept = false;
     _started = null;
     _progress = null;
     _result = null;
@@ -159,6 +163,7 @@ abstract class JobController<S, P extends JobProgressEvent, D extends JobDoneEve
     } on EngineException catch (e) {
       if (run == _run && _phase == JobPhase.starting) {
         _phase = JobPhase.idle;
+        _cancelOnAccept = false;
         _startError = e;
         _release();
         notifyListeners();
@@ -170,8 +175,18 @@ abstract class JobController<S, P extends JobProgressEvent, D extends JobDoneEve
   /// Asks the engine to stop the job (`job_cancel`). The job then ends with
   /// its done event: `stopped` for a scan (its results are kept), `cancelled`
   /// for the others. Does nothing if the job is not active.
+  ///
+  /// While the start command is still unanswered ([JobPhase.starting]),
+  /// `job_cancel` is held back until the engine has accepted the job:
+  /// `job_cancel` is written to the engine at once, ahead of requests that
+  /// wait in the client's queue, so sent now it could reach the engine
+  /// before the start command and be answered as "no job".
   Future<void> cancel() async {
     if (!isActive) return;
+    if (_phase == JobPhase.starting) {
+      _cancelOnAccept = true;
+      return;
+    }
     if (_phase == JobPhase.running) {
       _phase = JobPhase.cancelling;
       notifyListeners();
@@ -182,6 +197,10 @@ abstract class JobController<S, P extends JobProgressEvent, D extends JobDoneEve
       // An engine that is gone has no job left; its exit ends this one.
     }
   }
+
+  /// Whether [cancel] was called while the start was still unanswered; the
+  /// job is cancelled as soon as the engine accepts it.
+  bool get cancelPending => _cancelOnAccept;
 
   /// Forgets the last job's outcome ([JobPhase.done] becomes
   /// [JobPhase.idle]). Does nothing while a job is active.
@@ -201,6 +220,11 @@ abstract class JobController<S, P extends JobProgressEvent, D extends JobDoneEve
   @protected
   void onAccepted() {}
 
+  /// Called for every progress event of the job, before listeners are
+  /// notified.
+  @protected
+  void onProgress(P progress) {}
+
   /// Called when the job has ended with [done].
   @protected
   void onDone(D done) {}
@@ -209,6 +233,10 @@ abstract class JobController<S, P extends JobProgressEvent, D extends JobDoneEve
     if (_acceptedRun == _run) return;
     _acceptedRun = _run;
     onAccepted();
+    if (_cancelOnAccept && _phase == JobPhase.running) {
+      _cancelOnAccept = false;
+      unawaited(cancel());
+    }
   }
 
   void _release() => tracker?.leave(kind);
@@ -221,6 +249,7 @@ abstract class JobController<S, P extends JobProgressEvent, D extends JobDoneEve
       if (_phase == JobPhase.starting) _phase = JobPhase.running;
       _progress = event;
       _accepted();
+      onProgress(event);
       notifyListeners();
     } else if (event is D) {
       if (isActive) _accepted();
@@ -230,6 +259,7 @@ abstract class JobController<S, P extends JobProgressEvent, D extends JobDoneEve
       onDone(event);
       notifyListeners();
     } else if (event is MalformedEvent && event.doneOf == kind) {
+      if (!isActive) return; // nothing of ours to end
       _result = null;
       _failure = EngineError(
         code: EngineErrorCode.protocolError.wire,
@@ -259,6 +289,7 @@ abstract class JobController<S, P extends JobProgressEvent, D extends JobDoneEve
     // A continuation of begin() that runs after this only fills in
     // [started]: it changes the phase only while it is still `starting`.
     _phase = JobPhase.done;
+    _cancelOnAccept = false;
     _release();
   }
 

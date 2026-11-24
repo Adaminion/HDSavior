@@ -70,6 +70,16 @@ void main() {
       expect(await IoPlatformServices(isWindows: false, environment: const {}, run: runner(4)).openFolder('/mnt/rescued'), isFalse);
     });
 
+    test('openFile starts the same program with the file as one argument', () async {
+      const report = r'D:\Rescued\HDSavior-report-20261124-031500.csv';
+      expect(await IoPlatformServices(isWindows: true, environment: const {}, run: runner(1)).openFile(report), isTrue);
+      expect(await IoPlatformServices(isWindows: false, environment: const {}, run: runner(0)).openFile('/r/report.csv'), isTrue);
+      expect(started, [
+        ['explorer.exe', report],
+        ['xdg-open', '/r/report.csv'],
+      ]);
+    });
+
     test('a file manager that cannot be started is reported, not thrown', () async {
       final platform = IoPlatformServices(
         isWindows: false,
@@ -77,6 +87,7 @@ void main() {
         run: (executable, arguments) => throw const ProcessException('xdg-open', [], 'No such file or directory', 2),
       );
       expect(await platform.openFolder('/mnt/rescued'), isFalse);
+      expect(await platform.openFile('/mnt/rescued/report.csv'), isFalse);
     });
   });
 
@@ -86,6 +97,8 @@ void main() {
     expect(await platform.openFolder('/rescued'), isTrue);
     expect(platform.createdDirectories, ['/sessions']);
     expect(platform.openedFolders, ['/rescued']);
+    expect(await platform.openFile('/rescued/report.csv'), isTrue);
+    expect(platform.openedFiles, ['/rescued/report.csv']);
     expect(Directory('/sessions').existsSync(), isFalse);
   });
 }

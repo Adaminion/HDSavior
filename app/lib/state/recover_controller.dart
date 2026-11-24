@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 
 import '../engine/engine.dart';
 import 'catalog_controller.dart';
+import 'destination_checker.dart';
 import 'job_controller.dart';
 import 'source_controller.dart';
 
@@ -85,15 +86,22 @@ final class RecoverOptions {
 /// * [summary] follows the selection and the [options] automatically
 ///   (`selection_summary`; requests that a newer change has made obsolete are
 ///   cancelled).
-/// * [checkDestination] asks the destination guard and keeps its verdict.
+/// * [checkDestination] asks the destination guard and keeps its verdict
+///   current: it is asked for again when the catalog changes (new epoch,
+///   other protected ranges, a geometry) and when the space the selection
+///   needs changes ([destination]).
 /// * [start] starts the job; progress and outcome are in the inherited
 ///   members of [JobController].
 class RecoverController
     extends JobController<RecoverStartResult, RecoverProgress, RecoverDone> {
   RecoverController(super.api, this._catalog, this._source, {super.tracker})
     : super(kind: JobKind.recover) {
+    destination = DestinationChecker(api, purpose: DestinationPurpose.recover)
+      ..addListener(notifyListeners);
+    _seenInfo = _catalog.info;
+    _seenGuard = _catalog.guardRevision;
     _catalog.selection.addListener(_scheduleSummary);
-    _catalog.addListener(_scheduleSummary);
+    _catalog.addListener(_onCatalogChanged);
   }
 
   final CatalogController _catalog;
@@ -109,16 +117,19 @@ class RecoverController
     unsupported: 0,
   );
 
+  /// The verdict on the destination folder, kept current. Its members are
+  /// also offered here: [checkedDestination], [destinationCheck],
+  /// [destinationError], [isCheckingDestination].
+  late final DestinationChecker destination;
+
   RecoverOptions _options = const RecoverOptions();
   SelectionSummary? _summary = _nothing;
   EngineException? _summaryError;
   CancelToken? _summaryRequest;
   bool _summaryScheduled = false;
   bool _disposed = false;
-
-  String? _checkedDestination;
-  DestinationCheck? _destinationCheck;
-  CancelToken? _destinationRequest;
+  CatalogInfo? _seenInfo;
+  int _seenGuard = 0;
 
   // --- options and summary -------------------------------------------------
 
@@ -126,8 +137,15 @@ class RecoverController
 
   set options(RecoverOptions value) {
     if (value == _options) return;
+    final previous = _options;
     _options = value;
-    _scheduleSummary();
+    // Only these change what `selection_summary` counts; the consents and
+    // `onExists` do not.
+    if (value.includeDeleted != previous.includeDeleted ||
+        value.skipDamaged != previous.skipDamaged ||
+        value.filter != previous.filter) {
+      _scheduleSummary();
+    }
     notifyListeners();
   }
 
@@ -145,6 +163,27 @@ class RecoverController
   /// Computes [summary] again (it is refreshed automatically when the
   /// selection, the options or the catalog change).
   void refreshSummary() => _scheduleSummary();
+
+  void _onCatalogChanged() {
+    final info = _catalog.info;
+    if (!identical(info, _seenInfo)) {
+      _seenInfo = info;
+      _scheduleSummary();
+    }
+    if (_catalog.guardRevision != _seenGuard) {
+      _seenGuard = _catalog.guardRevision;
+      _guardChanged();
+    }
+  }
+
+  /// The destination guard may answer differently now.
+  void _guardChanged() {
+    if (_catalog.hasCatalog && _catalog.sourceAttached) {
+      destination.recheck(needBytes: _summary?.bytes);
+    } else {
+      destination.invalidate();
+    }
+  }
 
   void _scheduleSummary() {
     // Several changes in a row (a click that updates selection and options)
@@ -189,26 +228,38 @@ class RecoverController
       );
       if (!identical(_summaryRequest, token)) return;
       _summary = summary;
+      _summaryRequest = null;
+      // The space the recovery needs has changed: ask about the destination
+      // with the new number, so that `enough_space` stays true to it.
+      if (destination.path != null &&
+          summary.bytes != destination.needBytes &&
+          _catalog.sourceAttached) {
+        destination.recheck(needBytes: summary.bytes);
+      }
     } on RequestCancelledException {
       return;
     } on EngineException catch (e) {
       if (!identical(_summaryRequest, token)) return;
       _summaryError = e;
+      _summaryRequest = null;
     }
-    _summaryRequest = null;
     if (!_disposed) notifyListeners();
   }
 
   // --- destination ---------------------------------------------------------
 
   /// The path of the last [checkDestination] (or refused [start]).
-  String? get checkedDestination => _checkedDestination;
+  String? get checkedDestination => destination.path;
 
   /// The destination guard's verdict on [checkedDestination]; `null` while
-  /// unknown.
-  DestinationCheck? get destinationCheck => _destinationCheck;
+  /// it is unknown (being asked for, no catalog or no source attached, or
+  /// the check failed: [destinationError]).
+  DestinationCheck? get destinationCheck => destination.check;
 
-  bool get isCheckingDestination => _destinationRequest != null;
+  /// Why the last check of the destination failed.
+  EngineException? get destinationError => destination.error;
+
+  bool get isCheckingDestination => destination.isChecking;
 
   /// Whether a recovery to a destination with verdict [check] can be started
   /// with the current [options]: `ok`, or a verdict the user has consented
@@ -222,29 +273,29 @@ class RecoverController
 
   /// Asks the destination guard about [path] (`check_destination` with
   /// purpose `recover` and the size of the current [summary]). Nothing is
-  /// created. A check that a newer one has overtaken fails with
-  /// [RequestCancelledException].
-  Future<DestinationCheck> checkDestination(String path) async {
-    _destinationRequest?.cancel();
-    final token = _destinationRequest = CancelToken();
-    _checkedDestination = path;
-    _destinationCheck = null;
-    notifyListeners();
-    try {
-      final check = await api.checkDestination(
-        path: path,
-        purpose: DestinationPurpose.recover,
-        needBytes: _summary?.bytes,
-        cancel: token,
-      );
-      if (identical(_destinationRequest, token)) _destinationCheck = check;
-      return check;
-    } finally {
-      if (identical(_destinationRequest, token)) {
-        _destinationRequest = null;
-        notifyListeners();
-      }
-    }
+  /// created. A check of another path that overtakes this one fails it with
+  /// [RequestCancelledException]; a re-check of the same path (the catalog
+  /// changed meanwhile) answers for it.
+  Future<DestinationCheck> checkDestination(String path) =>
+      destination.checkPath(path, needBytes: _summary?.bytes);
+
+  /// Whether everything the UI can know of is in place for [start]: no job
+  /// runs, a catalog with its source attached, a selection with something
+  /// in it, and a destination whose current verdict [allows] the start
+  /// (with enough space if the engine said so). The engine checks all of it
+  /// again; its refusal is what counts.
+  bool get readyToStart {
+    final summary = _summary;
+    final check = destination.check;
+    return !isActive &&
+        !(tracker?.isBusy ?? false) &&
+        _catalog.hasCatalog &&
+        _catalog.sourceAttached &&
+        summary != null &&
+        (summary.files > 0 || summary.dirs > 0) &&
+        check != null &&
+        allows(check) &&
+        check.enoughSpace != false;
   }
 
   // --- the job -------------------------------------------------------------
@@ -253,7 +304,7 @@ class RecoverController
   /// (`recover_start`).
   ///
   /// The engine's own destination check is authoritative. When it refuses
-  /// (`destination_refused`), the verdict becomes [destinationCheck] and the
+  /// (`destination_refused`), its verdict becomes [destinationCheck] and the
   /// exception is rethrown.
   Future<RecoverStartResult> start({required String dest}) async {
     final selection = _catalog.selection.spec;
@@ -277,13 +328,7 @@ class RecoverController
       );
     } on EngineException catch (e) {
       final check = e.destinationCheck;
-      if (check != null) {
-        _destinationRequest?.cancel();
-        _destinationRequest = null;
-        _checkedDestination = dest;
-        _destinationCheck = check;
-        notifyListeners();
-      }
+      if (check != null) destination.adoptRefusal(dest, check);
       rethrow;
     }
   }
@@ -308,9 +353,9 @@ class RecoverController
   void dispose() {
     _disposed = true;
     _catalog.selection.removeListener(_scheduleSummary);
-    _catalog.removeListener(_scheduleSummary);
+    _catalog.removeListener(_onCatalogChanged);
     _summaryRequest?.cancel();
-    _destinationRequest?.cancel();
+    destination.dispose();
     super.dispose();
   }
 }

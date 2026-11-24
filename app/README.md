@@ -85,17 +85,26 @@ Only the `windows/` platform folder is committed. `linux/` is git-ignored.
 
 `test/fake_engine/` holds a fake engine written in Dart: the whole protocol
 over a generated world (seven disks, a tree of up to several hundred thousand
-nodes with every rating and flag, five file systems, jobs with progress,
-refusals and failures). It is what the tests run against, and it can drive
-the app:
+nodes with every rating and flag, five file systems of every kind, protected
+lost volumes, jobs with progress, refusals and failures). It is what the
+tests run against, and it can drive the app:
 
 ```powershell
 flutter run -d windows -t test/fake_engine/run_app.dart
 ```
 
-It can also stand in for the engine executable (it speaks the protocol on its
-standard streams): `dart test/fake_engine/serve.dart serve`, wrapped in a
-script that `HDSAVIOR_ENGINE` points to.
+It can also stand in for the engine executable, since it speaks the protocol
+on its standard streams (`test/fake_engine/serve.dart`; environment
+`FAKE_ENGINE_NODES`, `FAKE_ENGINE_TICK_MS`). It is pure Dart, so it compiles
+to a native executable that `HDSAVIOR_ENGINE` can point to directly (a `.bat`
+wrapper would not do on Windows: the app starts the engine without a shell):
+
+```powershell
+dart compile exe test\fake_engine\serve.dart -o $env:TEMP\fake-engine.exe
+$env:HDSAVIOR_ENGINE = "$env:TEMP\fake-engine.exe"
+$env:FAKE_ENGINE_TICK_MS = "250"             # jobs advance four steps a second
+flutter run -d windows                       # the real main.dart, fake engine as a child process
+```
 
 Behaviour is selected by names, so it can be triggered from the running app.
 The full table is at the top of `test/fake_engine/fake_world.dart`; the most
@@ -103,14 +112,33 @@ useful entries:
 
 | type this                                  | to get                                   |
 |--------------------------------------------|------------------------------------------|
-| destination on `E:\` (the rescued disk)    | `overlaps_source` (always refused)       |
+| destination on `E:\` (the rescued disk)    | `overlaps_source`, reason `session_range` (always refused) |
+| destination on `L:\`                       | inside the lost volume of the main file system: `overlaps_source`, reason `lost_volume`, with `lost_files`; `same_disk` while no catalog knows that volume |
 | destination on `S:\` / `U:\`               | `same_disk` / `unknown_disk` (consent)   |
 | destination on `Q:\`, `R:\`, `relative`    | `not_found`, `not_writable`, `invalid_path` |
 | destination on `T:\` / `K:\`               | only 1 MiB free / FAT32 (4 GiB limit)    |
+| the image file that is the source          | `overlaps_source`, reason `source_image` |
+| scan disk 2's `D:`, then a destination on `F:` | the old volume reached into `F:`: `lost_volume` |
 | image file `...\missing.img`, `denied.img` | `not_found`, `access_denied`             |
+| an image or session file named `*mixed*`   | the catalog warning `mixed_generations`  |
 | session file `...\detached.hdsc`           | loads without its disk (browse only)     |
 | session file `...\partial.hdsc`            | a stopped scan that can be resumed       |
+| a session path on `F:` for a scan of disk 2's `D:` | `same_disk` at the start; once the catalog shows the lost volume there, the warning `session_file_at_risk` |
 | image destination `...\exists.img`         | `exists`                                 |
+
+As the real engine does, `list_disks` describes the volumes Windows exposes
+(Windows' partition numbers, the mounted file system or `null`, no type, no
+NTFS details, nothing for partitions without a volume), and `open_source`
+the partition table read from the disk. A disk card can only show the
+former.
+
+Two choices of the fake that the protocol leaves open, so that a screen
+must not depend on them: before any session exists (state O) the guard
+treats the whole source as protected, because the next scan or image covers
+all of it unless told otherwise; and `Instance.id` is the instance's position
+in `CatalogInfo.instances` (main = 0), so the ids change when `instance_set`
+chooses another main file system. Take instance ids from the current catalog
+only.
 
 On Linux (the app itself is Windows-only, but everything except the runner
 runs anywhere): make a scratch copy, add the platform folder there, and run
@@ -136,6 +164,7 @@ lib/
 test/
   fake_engine/         the fake engine (pure Dart) and its transport
   support/             FakeApp (state layer on the fake), ScriptedTransport (byte-level),
+                       RecordingTransport / ReplayTransport (transcripts),
                        stand-ins for the OS services and the dialogs
   data/                the JSON examples of PROTOCOL.md, verbatim
   engine/ state/ ui/ platform/   the tests
@@ -157,8 +186,10 @@ Rules the code follows:
   `file_selector` plugin. Tests use the stand-ins of
   `test/support/fake_platform.dart` (`ScriptedFilePickers`,
   `InertPlatformServices`).
-- **The app writes nothing of its own into the session range** (ARCHITECTURE
-  S2): whenever a source is opened it asks `check_destination` with purpose
+- **The app writes nothing of its own into the protected ranges**
+  (ARCHITECTURE S2): whenever a source is opened, and again whenever a
+  catalog arrives or goes away, a geometry is set or the file systems change
+  (`catalog.guardRevision`), it asks `check_destination` with purpose
   `app_data` for its session directory and creates it only on verdict `ok`
   (`SourceController.canWriteAppData`, `ensureSessionDirectory`).
 - **State management is the SDK's `ChangeNotifier` / `ValueNotifier`**, no
@@ -209,13 +240,13 @@ Import `package:hdsavior/engine/engine.dart`.
 |---|---|
 | `EngineTransport`, `EngineConnection` | Interface to "something that starts an engine and gives its standard streams". `ProcessEngineTransport` is the real one (`hdsavior-engine serve`); tests use `FakeEngineTransport` and `ScriptedTransport`. |
 | `EngineClient` | Owns the process. Frames JSON lines (UTF-8, `LineSplitter`; lines of many megabytes are fine), matches responses to requests by id, publishes events (`events`, `on<T>()`), reports the end of the process (`exits`) and fails pending requests with `engine_exited`. `start`, `restart`, `shutdown` (shutdown command, end of input, kill as last resort), `kill`. |
-| `EngineApi` | One typed method per protocol command: `hello`, `listDisks`, `openSource`, `closeSource`, `scanStart`, `jobCancel`, `sessionSave`, `sessionLoad`, `sessionAttachSource`, `catalogInfo`, `geometrySet`, `listChildren`, `nodeInfo`, `search`, `selectionSummary`, `checkDestination`, `recoverStart`, `carveStart`, `imageStart`, `readFile`, `shutdown`; plus `readFileContent` (a file's first N bytes in small chunks, cancellable: for previews). |
+| `EngineApi` | One typed method per protocol command: `hello`, `listDisks`, `openSource`, `closeSource`, `scanStart`, `jobCancel`, `sessionSave`, `sessionLoad`, `sessionAttachSource`, `catalogInfo`, `geometrySet`, `instanceSet`, `listChildren`, `nodeInfo`, `search`, `selectionSummary`, `checkDestination`, `recoverStart`, `carveStart`, `imageStart`, `readFile`, `shutdown`; plus `readFileContent` (a file's first N bytes in small chunks, cancellable: for previews). |
 | `EngineException` | The one exception type of failed requests: `code`/`kind`, `message`, `data`, `command`; `destinationCheck` for `destination_refused`; `isEngineGone`. Client-side kinds: `engineExited`, `engineNotRunning`, `engineStartFailed`, `protocolError`. |
 | `CancelToken`, `RequestCancelledException` | Client-side cancellation of requests (see below). |
-| objects.dart | `SourceInfo`, `Partition`, `NtfsBootInfo`, `Disk`, `Warning`, `Geometry`, `Instance`, `InstanceVirtual`, `LiveVolume`, `ByteRange`, `CatalogInfo`, `NodeRow` (PROTOCOL `Row`), `FileFilter` (PROTOCOL `Filter`), `EngineError`. |
-| results.dart | `HelloResult`, `OpenSourceResult`, `ScanStartResult`, `SessionSaveResult`, `SessionLoadResult`, `SessionAttachResult`, `RowsPage`, `NodeInfo` (`NodeRef`, `RecordInfo`, `DataInfo`, `FlagDetail`), `SelectionSummary`, `DestinationCheck`, `RecoverStartResult`, `CarveStartResult`, `ImageStartResult`, `ReadFileResult`, `SourceRef`. |
+| objects.dart | `SourceInfo`, `Partition`, `NtfsBootInfo`, `Disk`, `Warning`, `Geometry`, `Instance` (with `manual`), `InstanceVirtual`, `LiveVolume`, `ByteRange`, `ProtectedRange` (`CatalogInfo.protected`), `CatalogInfo`, `NodeRow` (PROTOCOL `Row`), `FileFilter` (PROTOCOL `Filter`), `EngineError`. |
+| results.dart | `HelloResult`, `OpenSourceResult`, `ScanStartResult`, `SessionSaveResult`, `SessionLoadResult`, `SessionAttachResult`, `RowsPage`, `NodeInfo` (`NodeRef`, `RecordInfo`, `DataInfo`, `FlagDetail`), `SelectionSummary`, `DestinationCheck` (with `reason`, `lostFiles`, `lostBytes`), `RecoverStartResult`, `CarveStartResult`, `ImageStartResult`, `ReadFileResult`, `SourceRef`. |
 | events.dart | `EngineEvent` (sealed): `ScanProgress`, `ScanDone`, `RecoverProgress`, `RecoverDone`, `CarveProgress`, `CarveDone`, `ImageProgress`, `ImageDone` (grouped as `JobProgressEvent` / `JobDoneEvent`), `TaskProgress`, `LogEvent`, `UnknownEvent`, `MalformedEvent`. |
-| enums.dart | Every closed set of strings, each value with its wire name (`.wire`). |
+| enums.dart | Every closed set of strings, each value with its wire name (`.wire`), among them `InstanceOverride` (`instance_set`: `main`, `other`, `auto`) and `ProtectionReason` (`session_range`, `lost_volume`, `source_image`). |
 
 Conventions of the models:
 
@@ -233,6 +264,10 @@ Conventions of the models:
 - Names that differ from the document: `Row` is `NodeRow` (Flutter has a
   `Row`), `Filter` is `FileFilter`, `offset_source: "index"` is
   `OffsetSource.indexVotes` and `"default"` is `byDefault` (reserved words).
+- `DestinationCheck` is read leniently: only `verdict` is required, because
+  what the engine knows about a location depends on the verdict (nothing at
+  all for `invalid_path`), and an unreadable refusal would hide the engine's
+  explanation. Missing counts read as 0, missing texts as empty.
 
 Requests and cancellation: the engine handles requests strictly one after the
 other, so the client keeps one request at the engine and queues the rest
@@ -249,15 +284,15 @@ everything; its fields are the public surface for the screens.
 | field | class | what it holds |
 |---|---|---|
 | `engine` | `EngineController` | `status` (`stopped`, `starting`, `ready`, `incompatible`, `failed`), `hello`, `error`, `lastExit` (with the tail of the engine's log); `start`, `restart`, `shutdown`. |
-| `source` | `SourceController` | `disks` / `refreshDisks`; `current` (`OpenedSource`: info, table, partitions, warnings, `attached`, `attachError`); `openDisk`, `openImage`, `close`, `loadSession`, `attachSource`, `saveSession`; `sessionPath`; `appDataCheck`, `canWriteAppData`, `ensureSessionDirectory`, `suggestSessionPath`. |
-| `catalog` | `CatalogController` | `info` (`CatalogInfo`), `epoch`, `sourceAttached`; `refresh`, `guarded`, `nodeInfo`, `readContent`, `setGeometry`; owns `selection` and `rows`. |
+| `source` | `SourceController` | `disks` / `refreshDisks`; `current` (`OpenedSource`: info, table, partitions, warnings, `attached`, `attachError`), `revision`; `openDisk`, `openImage`, `close`, `loadSession`, `attachSource`, `saveSession`; `sessionPath`; `appDataCheck`, `canWriteAppData`, `ensureSessionDirectory`, `suggestSessionPath`. |
+| `catalog` | `CatalogController` | `info` (`CatalogInfo`), `epoch`, `sourceAttached`, `protectedRanges`, `guardRevision`, `epochChanges`; `refresh`, `guarded`, `nodeInfo`, `readContent`, `setGeometry`, `setInstanceKind`; owns `selection` and `rows`. |
 | `selection` | `SelectionModel` | The include/exclude sets: `setChecked`, `toggle`, `stateOf`, `isSelected`, `clear`, `include`, `exclude`, `spec`. |
 | `catalog.rows` | `RowCache` | `open(RowQuery)` -> `PagedRows`. |
 | `browse` | `BrowseController` | `folder` (`FolderLocation`), `filters` (`ViewFilters`), `sort`, `descending`, `sortBy`, `open`, `openRoot`; `rows` (the table), `folders(node)` (the tree), `ancestorsOf(row)`. |
 | `scan` | `ScanController` | `start`, `resume`, `stop`; `scanPhase`, `canStop`; plus the job members below. |
-| `recover` | `RecoverController` | `options` (`RecoverOptions`), `summary` (follows the selection), `checkDestination`, `destinationCheck`, `allows`, `start`; plus the job members. |
+| `recover` | `RecoverController` | `options` (`RecoverOptions`), `summary` (follows the selection), `destination` (a `DestinationChecker`; also as `checkDestination`, `checkedDestination`, `destinationCheck`, `destinationError`, `isCheckingDestination`), `allows`, `readyToStart`, `start`; plus the job members. |
 | `carve` | `CarveController` | `hasCarveHits`, `start(kinds)`; plus the job members. |
-| `image` | `ImageController` | `checkDestination`, `destinationCheck`, `start`; plus the job members. |
+| `image` | `ImageController` | `destination` (a `DestinationChecker`, with the same shortcuts), `allows`, `start`; plus the job members. |
 | `jobs` | `JobTracker` | `value`: which job is active (`JobKind?`); the engine runs one at a time. |
 | `task` | `ValueNotifier<TaskProgress?>` | Progress of a long plain request (`session_load`, `geometry_set`). |
 | `screen` | `ValueNotifier<AppScreen>` | The screen the shell shows. |
@@ -277,6 +312,10 @@ extend `JobController<Start, Progress, Done>`:
   `engine_exited` / `protocol_error`), `startError` (why a start was refused;
   for `destination_refused` its `destinationCheck` says why).
 - `cancel()` sends `job_cancel`; the job then ends with its done event.
+  A cancel while the start is still unanswered is held back
+  (`cancelPending`) and sent as soon as the engine has accepted the job:
+  `job_cancel` jumps the client's queue, so sent at once it could reach the
+  engine before the start command and be answered as "no job".
   `reset()` dismisses a finished job.
 
 What happens around a job is wired already: a scan clears the catalog when it
@@ -293,6 +332,22 @@ away) the selection is cleared and every `PagedRows` is closed; when the epoch
 stays but rows may have changed (carving, a new geometry, a recovery) the rows
 are fetched again and the selection is kept. A `stale_catalog` answer to any
 request made through `catalog.guarded` triggers `catalog.refresh()`.
+
+`catalog.setInstanceKind(instance: id, kind: InstanceOverride.main)` is the
+user's "this is the one I want" (the previous main file system becomes
+`other`), `InstanceOverride.other` is "treat as a separate volume" (an
+`embedded` or `older` file system whose files are then read with its own
+geometry and can be recovered), `InstanceOverride.auto` withdraws the choice
+(`Instance.manual` says whether there is one). It starts a new epoch: the
+selection is cleared and the browser returns to the root of the main file
+system, which may now be another one. `strays` cannot be changed.
+
+`catalog.guardRevision` changes whenever the destination guard may answer
+differently: a catalog arrived or went away, a new epoch, other protected
+ranges (`catalog.protectedRanges`, PROTOCOL `CatalogInfo.protected`), or a
+geometry was set. The source controller asks again about its session
+directory then, and the recover and image controllers about their
+destinations.
 
 A list widget uses a `PagedRows` like this:
 
@@ -358,13 +413,36 @@ selection and the options automatically.
 
 ### Destinations
 
-`recover.checkDestination(path)` / `image.checkDestination(path)` ask the
-engine's destination guard and keep the verdict; `recover.allows(check)` says
-whether a start can succeed with the consents in `recover.options`
-(`allowSameDisk`, `allowUnknownDisk`; `overlaps_source` can never be allowed).
-The engine checks again at start and its refusal lands in `destinationCheck`
-as well. Paths are typed or come from `app.pickers`; UNC paths are allowed
-(mapped drive letters are invisible to an elevated program).
+`recover.checkDestination(path)` / `image.checkDestination(path,
+needBytes:)` ask the engine's destination guard. The verdict is kept current
+by a `DestinationChecker` (`recover.destination`, `image.destination`):
+
+- `check` is the verdict, `null` while it is not known (being asked, no
+  catalog or no source attached, or the check failed: `error`). Never show an
+  older "ok" as if it were current.
+- It is asked for again by itself when the guard may answer differently
+  (`catalog.guardRevision`, another source for the image) and, for a
+  recovery, when the space the selection needs changes (so that
+  `enoughSpace` stays true to it).
+- A newer check overtakes an older one. A re-check of the same path answers
+  for the check it overtook; a check of another path makes the older one
+  fail with `RequestCancelledException` (nothing to show).
+- `reason` says why a location is refused for good: `sessionRange` (inside
+  the scanned or imaged range), `lostVolume` (inside a lost file system that
+  reaches beyond the scanned range: scanning the whole disk reaches those
+  files, and the destination has to be on another disk), `sourceImage` (the
+  image file that is the source). `lostFiles` / `lostBytes`: catalog files
+  stored where the location's volume is.
+
+`recover.allows(check)` says whether a start can succeed with the consents in
+`recover.options` (`allowSameDisk`, `allowUnknownDisk`; `overlaps_source` can
+never be allowed); `image.allows(check, allowSameDisk:, allowUnknownDisk:)`
+the same for an image. `recover.readyToStart` combines what the UI can know
+(no job, a catalog with its source, something selected, an allowed
+destination with enough space). The engine checks again at start and its
+refusal becomes the verdict (`destination.adoptRefusal`). Paths are typed or
+come from `app.pickers`; UNC paths are allowed (mapped drive letters are
+invisible to an elevated program).
 
 ### When the engine dies
 
@@ -378,7 +456,8 @@ names the last session file, which can be loaded again.
 
 ```sh
 flutter analyze        # must report no issues
-flutter test           # must pass; two tests report "skipped" until the real engine is there
+flutter test           # must pass; three tests report "skipped" until the real engine is there
+                       # (the conversation with the real engine, and its transcript read and replayed)
 ```
 
 | where | what it proves |
@@ -388,9 +467,10 @@ flutter test           # must pass; two tests report "skipped" until the real en
 | `test/engine/engine_client_test.dart` | Framing (split at every byte, merged chunks, an 11 MB line), id matching, event order, error mapping, cancellation, engine exit, restart, shutdown and kill. |
 | `test/engine/process_transport_test.dart` | The real process transport against the fake engine running as a child process. |
 | `test/engine/protocol_transcript_test.dart` | Reads `docs/protocol-examples.jsonl` (the transcript the real engine records) as soon as it exists. |
-| `test/engine/engine_conformance_test.dart` | One whole conversation (open an image, scan, browse, summarise, read, recover, shut down) asserting only what PROTOCOL.md guarantees. Always against the fake engine as a process; against the real engine when `HDSAVIOR_ENGINE` and `HDSAVIOR_TEST_IMAGE` are set. |
-| `test/fake_engine/fake_engine_test.dart` | The fake itself: the errors-by-state table, epochs, sort order, filters, aggregates, selection semantics against brute force, jobs. |
-| `test/state/*` | The selection model against a naive model on random trees; the row cache; every controller and job against the fake engine, step by step. |
+| `test/engine/replay_test.dart` | Records a conversation with the fake engine (`RecordingTransport`) and plays it back through a fresh `EngineClient` (`ReplayTransport`, test/support/replay_transport.dart): every answer reaches its caller with the caller's id, readable by the typed models, events in order. Plays back `docs/protocol-examples.jsonl` the same way as soon as it exists. |
+| `test/engine/engine_conformance_test.dart` | One whole conversation (open an image, scan, browse, summarise, read, recover, overrule a file system, shut down) asserting only what PROTOCOL.md guarantees. Always against the fake engine as a process; against the real engine when `HDSAVIOR_ENGINE` and `HDSAVIOR_TEST_IMAGE` are set. |
+| `test/fake_engine/fake_engine_test.dart` | The fake itself: the errors-by-state table, epochs, sort order, filters, aggregates, selection semantics against brute force, jobs, `instance_set`, protected ranges and the guard's reasons. |
+| `test/state/*` | The selection model against a naive model on random trees; the row cache; the destination checker; every controller and job against the fake engine, step by step (including `instance_set`, re-checks when the catalog changes, and a cancel that must not overtake its start). |
 | `test/platform/*` | Session directory, opening a folder, the dialogs. |
 | `test/ui/app_shell_test.dart` | The shell: notice, navigation, engine failure, clean shutdown on exit. |
 
@@ -406,7 +486,10 @@ flutter test test/engine/engine_conformance_test.dart
 Writing tests for screens: use `FakeApp` (`test/support/fake_app.dart`). The
 fake engine's jobs advance only when the test calls `fake.step()` /
 `fake.finishJob()`, so every intermediate state can be asserted. The dialogs
-answer from `fake.pickers.answers`.
+answer from `fake.pickers.answers`. To drive the app with what the real
+engine said, give `AppController` a `ReplayTransport` of a recorded
+transcript (requests are matched by command, in order); a
+`RecordingTransport` around any transport writes such a transcript.
 
 In a widget test (`testWidgets`) time is faked, and a future from the engine
 only completes while the test pumps. **Never `await` an engine call directly

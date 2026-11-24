@@ -10,8 +10,9 @@
 /// What it implements: every command and event; the states N, O, S, C, B, J
 /// with the documented error per state; catalog epochs; one job at a time;
 /// jobs that advance step by step with progress events and can be cancelled;
-/// the destination guard's verdicts; long requests with `task_progress`
-/// during which later requests wait. What the catalog holds is described in
+/// the destination guard's verdicts with the protected ranges of the moment;
+/// the user's verdicts about file systems (`instance_set`); long requests with
+/// `task_progress` during which later requests wait. What the catalog holds is described in
 /// fake_tree.dart, the naming rules that select behaviour in fake_world.dart.
 ///
 /// Failures are injected with [FakeEngine.failNext], [FakeEngine.exitOn],
@@ -71,6 +72,14 @@ final class FakeScript {
   /// The scan fails with [scanFailCode] when it reaches this step.
   int? scanFailAtStep;
   String scanFailCode = 'source_lost';
+
+  /// Bytes of unreadable sectors the scan meets per step (0: none).
+  int scanBadBytesPerStep = 0;
+
+  /// Warnings (PROTOCOL `Warning`) that the scan's progress events carry
+  /// from step [scanWarningsFromStep] on.
+  List<Map<String, Object?>> scanWarnings = [];
+  int scanWarningsFromStep = 3;
 
   int recoverSteps = 6;
   int? recoverFailAtStep;
@@ -483,6 +492,42 @@ final class FakeEngine {
     return source;
   }
 
+  /// The ranges the destination guard protects now (docs/ARCHITECTURE.md,
+  /// S2): with a catalog its `protected` list; during a scan (or after one
+  /// that failed) the session range; before any session the whole source,
+  /// which the next scan or image covers unless told otherwise (the fake's
+  /// choice, see fake_world.dart). [job] is the range of a job that is about
+  /// to start (`scan_start`, `image_start`), protected in addition.
+  List<FakeProtectedRange> _protectedNow({(int, int)? job}) {
+    final catalog = _job is _ScanJob ? null : _catalog;
+    final session = _session;
+    final size = (_source?['size'] as int?) ?? 0;
+    return [
+      if (job != null) FakeProtectedRange(job.$1, job.$2, 'session_range'),
+      if (catalog != null)
+        ...catalog.protectedRanges()
+      else if (session != null)
+        FakeProtectedRange(session.rangeStart, session.rangeEnd, 'session_range')
+      else if (job == null && size > 0)
+        FakeProtectedRange(0, size, 'session_range'),
+    ];
+  }
+
+  /// PROTOCOL `check_destination` result for [path] with the protected
+  /// ranges of the moment ([job]: see [_protectedNow]).
+  Map<String, Object?> _check(String path, {required String purpose, required int? needBytes, (int, int)? job}) {
+    final catalog = _job is _ScanJob ? null : _catalog;
+    return world.checkDestination(
+      path,
+      purpose: purpose,
+      needBytes: needBytes,
+      sourceDisk: _sourceDisk,
+      sourceImage: _source?['kind'] == 'image' ? _source!['path'] as String? : null,
+      protected: _protectedNow(job: job),
+      filesIn: catalog?.filesIn,
+    );
+  }
+
   /// Runs the destination guard; throws `destination_refused` with the
   /// check result as data unless the verdict is acceptable.
   Map<String, Object?> _guard(
@@ -490,13 +535,9 @@ final class FakeEngine {
     required String purpose,
     required int? needBytes,
     required Map<String, Object?> args,
+    (int, int)? job,
   }) {
-    final check = world.checkDestination(
-      path,
-      purpose: purpose,
-      needBytes: needBytes,
-      sourceDisk: _sourceDisk,
-    );
+    final check = _check(path, purpose: purpose, needBytes: needBytes, job: job);
     final verdict = check['verdict'];
     final allowed =
         verdict == 'ok' ||
@@ -506,6 +547,27 @@ final class FakeEngine {
       throw FakeError('destination_refused', check['message']! as String, check);
     }
     return check;
+  }
+
+  /// PROTOCOL `CatalogInfo` of the current catalog, with the warning
+  /// `session_file_at_risk` when the session file lies inside a protected
+  /// range (docs/ALGORITHMS.md, B3).
+  Map<String, Object?> _info() {
+    final catalog = _catalog!;
+    final path = _session?.path;
+    var atRisk = false;
+    if (path != null) {
+      final check = world.checkDestination(
+        path,
+        purpose: 'session',
+        needBytes: null,
+        sourceDisk: _sourceDisk,
+        protected: catalog.protectedRanges(),
+        filesIn: catalog.filesIn,
+      );
+      atRisk = check['verdict'] == 'overlaps_source';
+    }
+    return catalog.info(sessionFileAtRisk: atRisk);
   }
 
   // --- commands ------------------------------------------------------------
@@ -522,7 +584,9 @@ final class FakeEngine {
           'carve_kinds': fakeCarveKinds.keys.toList(),
         };
       case 'list_disks':
-        return {'disks': options.os == 'windows' ? world.disks : const <Object?>[]};
+        return {
+          'disks': options.os == 'windows' ? [for (final disk in world.disks) FakeWorld.listDisksEntry(disk)] : const <Object?>[],
+        };
       case 'job_cancel':
         _job?.cancelRequested = true;
         return {};
@@ -549,9 +613,12 @@ final class FakeEngine {
       case 'session_attach_source':
         return _sessionAttach(args);
       case 'catalog_info':
-        return _needCatalog().info();
+        _needCatalog();
+        return _info();
       case 'geometry_set':
         return _geometrySet(id, args);
+      case 'instance_set':
+        return _instanceSet(args);
       case 'list_children':
         final catalog = _needCatalogAt(args);
         final (offset, limit) = _page(args);
@@ -588,12 +655,7 @@ final class FakeEngine {
         if (!const ['recover', 'image', 'session', 'app_data'].contains(purpose)) {
           throw FakeError('bad_request', 'unknown purpose "$purpose"');
         }
-        return world.checkDestination(
-          _arg<String>(args, 'path'),
-          purpose: purpose,
-          needBytes: _opt<int?>(args, 'need_bytes', null),
-          sourceDisk: _sourceDisk,
-        );
+        return _check(_arg<String>(args, 'path'), purpose: purpose, needBytes: _opt<int?>(args, 'need_bytes', null));
       case 'recover_start':
         return _recoverStart(args);
       case 'carve_start':
@@ -699,22 +761,36 @@ final class FakeEngine {
     return {'path': path, 'bytes': 4096 + session.bytesDone ~/ 1048576 * 180};
   }
 
-  /// Builds the catalog for the current session (new epoch).
+  /// The warning `mixed_generations` (docs/ALGORITHMS.md, D2).
+  static const Map<String, Object?> _mixedGenerations = {
+    'code': 'mixed_generations',
+    'message':
+        'Some records of an older file system could not be separated cleanly from the lost one. '
+        'Files marked as older generation may belong to it.',
+  };
+
+  /// Builds the catalog for the current session (new epoch). A source whose
+  /// path contains `mixed` gives the warning `mixed_generations`.
   FakeCatalog _buildCatalog({List<Map<String, Object?>> warnings = const []}) {
     final session = _session!;
     final fraction = session.bytesDone / session.bytesTotal;
     var nodes = (options.mainNodes * fraction).floor();
     if (session.complete) nodes = options.mainNodes;
     if (nodes < FakeTree.minMainNodes) nodes = FakeTree.minMainNodes;
+    final sourcePath = (session.recordedSource['path'] as String?) ?? '';
     return FakeCatalog(
       tree: FakeTree.generate(seed: options.seed, mainNodes: nodes),
       epoch: ++_epochCounter,
       rangeStart: session.rangeStart,
       rangeEnd: session.rangeEnd,
+      sourceSize: (session.recordedSource['size'] as int?) ?? session.rangeEnd,
       scannedBytes: session.bytesDone,
       collectCarveHits: session.collectCarveHits,
       sourceAttached: _sourceAttached,
-      warnings: warnings,
+      warnings: [
+        ...warnings,
+        if (sourcePath.toLowerCase().contains('mixed') && !warnings.contains(_mixedGenerations)) _mixedGenerations,
+      ],
     );
   }
 
@@ -770,6 +846,7 @@ final class FakeEngine {
           'message': 'The disk reports a different model or serial number than when it was scanned.',
         });
       }
+      if (name.contains('mixed')) warnings.add(_mixedGenerations);
     }
 
     var source = session.recordedSource;
@@ -798,7 +875,7 @@ final class FakeEngine {
         'source': source,
         'source_attached': attached,
         'source_error': sourceError,
-        'catalog': _catalog!.info(),
+        'catalog': _info(),
       });
     }
 
@@ -832,8 +909,11 @@ final class FakeEngine {
     _source = source;
     _sourceDisk = number is int ? world.diskByNumber(number) : null;
     _sourceAttached = true;
-    _catalog = _buildCatalog();
-    return {'source': source, 'catalog': _catalog!.info()};
+    // What the records say stays true; what was said about the old source
+    // (identity_differs) does not.
+    final mixed = _catalog?.warnings.contains(_mixedGenerations) ?? false;
+    _catalog = _buildCatalog(warnings: [if (mixed) _mixedGenerations]);
+    return {'source': source, 'catalog': _info()};
   }
 
   /// Runs a long request: `task_progress` events, then [finish] (which
@@ -857,17 +937,22 @@ final class FakeEngine {
     final clusterSize = _arg<int>(args, 'cluster_size');
     final volumeOffset = _arg<int>(args, 'volume_offset');
     // Arguments are checked before the long part starts.
-    catalog.checkGeometry(
-      instance: instance,
-      clusterSize: clusterSize,
-      volumeOffset: volumeOffset,
-      sourceSize: (_source?['size'] as int?) ?? catalog.rangeEnd,
-    );
+    catalog.checkGeometry(instance: instance, clusterSize: clusterSize, volumeOffset: volumeOffset);
     _runTask('geometry_set', () {
       catalog.setGeometry(instance: instance, clusterSize: clusterSize, volumeOffset: volumeOffset);
-      _ok(id, catalog.info());
+      _ok(id, _info());
     });
     return null;
+  }
+
+  /// `instance_set`: the user overrules the verdict about one file system.
+  /// The catalog is rebuilt (new epoch); carved nodes are discarded.
+  Map<String, Object?> _instanceSet(Map<String, Object?> args) {
+    _notBusy();
+    final catalog = _needCatalog();
+    catalog.setInstanceKind(_arg<int>(args, 'instance'), _arg<String>(args, 'kind'));
+    catalog.epoch = ++_epochCounter;
+    return _info();
   }
 
   // --- scan ----------------------------------------------------------------
@@ -907,7 +992,14 @@ final class FakeEngine {
     }
     final sessionPath = _opt<String?>(args, 'session_path', null) ?? (resume ? session.path : null);
     if (sessionPath != null) {
-      _guard(sessionPath, purpose: 'session', needBytes: null, args: args);
+      // Checked with the range of the new session, before anything is read.
+      _guard(
+        sessionPath,
+        purpose: 'session',
+        needBytes: null,
+        args: args,
+        job: (session.rangeStart, session.rangeEnd),
+      );
     }
 
     // "Any scan_start discards the current catalog and carved nodes at once."
@@ -987,7 +1079,9 @@ final class FakeEngine {
       throw FakeError('bad_request', 'The range must be sector-aligned and inside the source.');
     }
     final bytes = end - start;
-    final check = _guard(dest, purpose: 'image', needBytes: bytes, args: args);
+    // "The guard protects the imaged range in addition to the session's
+    // protected ranges."
+    final check = _guard(dest, purpose: 'image', needBytes: bytes, args: args, job: (start, end));
     final exists = world.imageFiles.contains(dest) || FakeWorld.fileName(dest).toLowerCase().contains('exists');
     if (exists && !resume) {
       throw FakeError('exists', 'The file $dest already exists.');
@@ -1054,7 +1148,10 @@ final class _ScanJob extends _Job {
   _ScanJob(this.engine, this.session)
     : steps = engine.script.scanSteps,
       failAt = engine.script.scanFailAtStep,
-      failCode = engine.script.scanFailCode {
+      failCode = engine.script.scanFailCode,
+      badBytesPerStep = engine.script.scanBadBytesPerStep,
+      warnings = List.of(engine.script.scanWarnings),
+      warningsFrom = engine.script.scanWarningsFromStep {
     // A resumed scan continues where the session stopped.
     stepIndex = (steps * session.bytesDone / session.bytesTotal).round();
     resumedComplete = session.complete;
@@ -1066,6 +1163,9 @@ final class _ScanJob extends _Job {
   final int steps;
   final int? failAt;
   final String failCode;
+  final int badBytesPerStep;
+  final List<Map<String, Object?>> warnings;
+  final int warningsFrom;
   int stepIndex = 0;
   int analysisStep = 0;
   bool stopped = false;
@@ -1093,8 +1193,8 @@ final class _ScanJob extends _Job {
       'dirs': (22300 * done / total).floor(),
       'index_blocks': (904 * done / total).floor(),
       'carve_hits': session.collectCarveHits ? (48213 * done / total).floor() : 0,
-      'bad_bytes': 0,
-      'warnings': <Object?>[],
+      'bad_bytes': badBytesPerStep * stepIndex,
+      'warnings': stepIndex >= warningsFrom ? warnings : <Object?>[],
     };
   }
 
@@ -1147,7 +1247,7 @@ final class _ScanJob extends _Job {
     Map<String, Object?>? catalog;
     if (error == null) {
       engine._catalog = engine._buildCatalog();
-      catalog = engine._catalog!.info();
+      catalog = engine._info();
     }
     engine._event('scan_done', {
       'status': status,
@@ -1294,7 +1394,7 @@ final class _CarveJob extends _Job {
       'error': error,
       'found': found,
       'bytes_found': bytesFound,
-      'catalog': catalog.info(),
+      'catalog': engine._info(),
     });
   }
 }

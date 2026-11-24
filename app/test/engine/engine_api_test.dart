@@ -139,6 +139,16 @@ void main() {
       expect(argsOf(request).keys.toSet(), examples.object('geometry_set.args').keys.toSet());
     });
 
+    test('instance_set', () async {
+      final request = await requestOf(() => api.instanceSet(instance: 2, kind: InstanceOverride.main));
+      expect(request['cmd'], 'instance_set');
+      expect(argsOf(request), examples.object('instance_set.args'));
+      for (final kind in InstanceOverride.values) {
+        expect(argsOf(await requestOf(() => api.instanceSet(instance: 3, kind: kind))), {'instance': 3, 'kind': kind.wire});
+      }
+      expect(InstanceOverride.values.map((k) => k.wire), ['main', 'other', 'auto']);
+    });
+
     test('list_children', () async {
       final request = await requestOf(
         () => api.listChildren(
@@ -429,6 +439,13 @@ void main() {
           examples.json('CatalogInfo'),
         )).epoch,
         3,
+      );
+      expect(
+        (await answered(
+          () => api.instanceSet(instance: 0, kind: InstanceOverride.auto),
+          examples.json('CatalogInfo'),
+        )).protected.single.reason,
+        ProtectionReason.sessionRange,
       );
       expect(
         (await answered(() => api.listChildren(epoch: 3, node: 0), examples.json('list_children.result'))).total,

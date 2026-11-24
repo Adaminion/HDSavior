@@ -62,7 +62,10 @@ class SourceController extends ChangeNotifier {
     this._catalog,
     this._platform, {
     this._task,
-  });
+  }) {
+    _seenGuard = _catalog.guardRevision;
+    _catalog.addListener(_onCatalogChanged);
+  }
 
   final EngineApi _api;
   final CatalogController _catalog;
@@ -80,6 +83,11 @@ class SourceController extends ChangeNotifier {
   /// Bumped whenever the source changes, so that answers to checks made for
   /// an earlier source are ignored.
   int _sourceGeneration = 0;
+
+  /// The catalog's [CatalogController.guardRevision] the app-data verdict
+  /// was asked for, and a counter that voids the answers to earlier checks.
+  int _seenGuard = 0;
+  int _appDataGeneration = 0;
 
   // --- disks ---------------------------------------------------------------
 
@@ -112,6 +120,10 @@ class SourceController extends ChangeNotifier {
   /// The open source, `null` if none.
   OpenedSource? get current => _current;
 
+  /// Changes whenever another source is open (or none any more): what was
+  /// asked about the previous one does not apply to it.
+  int get revision => _sourceGeneration;
+
   /// An open, close, load or attach request is under way.
   bool get isBusy => _busy > 0;
 
@@ -136,8 +148,14 @@ class SourceController extends ChangeNotifier {
     _sourceGeneration++;
     _current = source;
     _sessionPath = sessionPath;
-    _appDataCheck = null;
+    _voidAppData();
     if (source.attached) _checkAppData();
+  }
+
+  /// Forgets the app-data verdict; an answer still on its way is ignored.
+  void _voidAppData() {
+    _appDataGeneration++;
+    _appDataCheck = null;
   }
 
   /// Opens the physical disk [disk] for reading (`open_source`).
@@ -178,7 +196,7 @@ class SourceController extends ChangeNotifier {
     _sourceGeneration++;
     _current = null;
     _sessionPath = null;
-    _appDataCheck = null;
+    _voidAppData();
   });
 
   /// Opens the saved session at [path] (`session_load`) and adopts its
@@ -274,7 +292,7 @@ class SourceController extends ChangeNotifier {
     // (Requests that were under way fail by themselves and end their own
     // busy state.)
     _current = null;
-    _appDataCheck = null;
+    _voidAppData();
     _disks = null;
     _disksError = null;
     _task?.value = null;
@@ -290,16 +308,31 @@ class SourceController extends ChangeNotifier {
   /// open source (purpose `app_data`); `null` while unknown or without an
   /// attached source.
   ///
-  /// The UI must not create anything of its own inside the session range
-  /// (docs/ARCHITECTURE.md, S2), so it asks whenever a source is opened.
+  /// The UI must not create anything of its own inside the protected ranges
+  /// (docs/ARCHITECTURE.md, S2), so it asks whenever a source is opened and
+  /// again whenever the guard may answer differently: a catalog arrived or
+  /// went away, a new epoch, a geometry (the protected ranges grow when a
+  /// lost file system is found). While it asks, the verdict is `null`.
   DestinationCheck? get appDataCheck => _appDataCheck;
 
   /// Whether the app may create [defaultSessionDirectory] and write there
   /// without asking the user: only with the verdict `ok`.
   bool get canWriteAppData => _appDataCheck?.isOk ?? false;
 
+  void _onCatalogChanged() {
+    if (_catalog.guardRevision == _seenGuard) return;
+    _seenGuard = _catalog.guardRevision;
+    // An open, load or attach under way asks by itself when it is done.
+    final current = _current;
+    if (isBusy || current == null || !current.attached) return;
+    _voidAppData();
+    notifyListeners();
+    _checkAppData();
+  }
+
   void _checkAppData() {
-    final generation = _sourceGeneration;
+    // A newer check (or another source) makes the answer to this one void.
+    final generation = ++_appDataGeneration;
     _api
         .checkDestination(
           path: _platform.defaultSessionDirectory,
@@ -307,7 +340,7 @@ class SourceController extends ChangeNotifier {
         )
         .then<void>(
           (check) {
-            if (generation != _sourceGeneration) return;
+            if (generation != _appDataGeneration) return;
             _appDataCheck = check;
             notifyListeners();
           },
@@ -325,30 +358,78 @@ class SourceController extends ChangeNotifier {
     return true;
   }
 
-  /// A session file path in [defaultSessionDirectory] for the open source,
-  /// for example `...\Sessions\Disk 1 WDC WD40EZRZ 20261124-031500.hdsc`.
-  /// `null` without a source.
-  String? suggestSessionPath({DateTime? now}) {
+  @override
+  void dispose() {
+    _catalog.removeListener(_onCatalogChanged);
+    super.dispose();
+  }
+
+  /// A session file path in [defaultSessionDirectory] for scanning [range]
+  /// of the open source (default: all of it), named after the model, the
+  /// serial number, the start of the range and the local time, for example
+  /// `...\Sessions\WDC WD40EZRZ-00GXCB0 WD-WCC7K0000000 at 1048576 2026-11-24 031500.hdsc`.
+  /// An image file is named by its file name. `null` without a source.
+  String? suggestSessionPath({ByteRange? range, DateTime? now}) {
     final source = _current?.info;
     if (source == null) return null;
-    final time = (now ?? DateTime.now()).toUtc();
+    final time = (now ?? DateTime.now()).toLocal();
     String two(int value) => value.toString().padLeft(2, '0');
     final stamp =
-        '${time.year}${two(time.month)}${two(time.day)}-'
+        '${time.year}-${two(time.month)}-${two(time.day)} '
         '${two(time.hour)}${two(time.minute)}${two(time.second)}';
     final String what;
     if (source.kind == SourceKind.disk) {
-      what = 'Disk ${source.diskNumber ?? ''} ${source.model ?? ''}';
+      final identity = [?source.model, ?source.serial].where((part) => part.trim().isNotEmpty).join(' ');
+      what = identity.isEmpty ? 'Disk ${source.diskNumber ?? ''}' : identity;
     } else {
       final cut = source.path.lastIndexOf(RegExp(r'[\\/]'));
       what = 'Image ${source.path.substring(cut + 1)}';
     }
     // Only characters that are safe in a Windows file name.
-    final safe = what
+    final safe = '$what at ${range?.start ?? 0}'
         .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1f]'), ' ')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
     final separator = _platform.pathSeparator;
     return '${_platform.defaultSessionDirectory}$separator$safe $stamp.hdsc';
+  }
+
+  /// Proposes the session file for scanning [range] (see
+  /// [suggestSessionPath]) and asks the destination guard about it
+  /// (`check_destination`, purpose `session`).
+  ///
+  /// On verdict `ok` the session directory is created, so that the engine
+  /// can write the file: the verdict is about a file inside that directory,
+  /// so creating the directory is covered by it (docs/ARCHITECTURE.md, S2).
+  /// On any other verdict nothing is created and the caller must ask the
+  /// user for another place. Engine errors are rethrown.
+  Future<SessionFilePlan> prepareSessionFile({ByteRange? range, DateTime? now}) async {
+    final path = suggestSessionPath(range: range, now: now);
+    if (path == null) {
+      throw EngineException.client(EngineErrorCode.noSource, 'No source is open.');
+    }
+    final check = await _api.checkDestination(path: path, purpose: DestinationPurpose.session);
+    if (check.isOk) await _platform.createDirectory(_platform.defaultSessionDirectory);
+    return SessionFilePlan(path: path, check: check);
+  }
+
+  /// Asks the destination guard about a session file at [path] that the
+  /// user chose (purpose `session`). Creates nothing.
+  Future<DestinationCheck> checkSessionFile(String path) =>
+      _api.checkDestination(path: path, purpose: DestinationPurpose.session);
+}
+
+/// A proposed session file and the destination guard's verdict on it.
+@immutable
+final class SessionFilePlan {
+  const SessionFilePlan({required this.path, required this.check});
+
+  final String path;
+  final DestinationCheck check;
+
+  /// The file name without the directory.
+  String get fileName {
+    final cut = path.lastIndexOf(RegExp(r'[\\/]'));
+    return path.substring(cut + 1);
   }
 }

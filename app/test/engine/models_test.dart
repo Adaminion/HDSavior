@@ -168,8 +168,53 @@ void main() {
       expect(check.fs, isNull);
       expect(check.diskNumbers, isEmpty);
 
+      expect(check.reason, isNull);
+      expect(check.lostFiles, 0, reason: 'missing counts mean none');
+      expect(check.lostBytes, 0);
+
       final fat = examples.object('check_destination.result')..['max_file_bytes'] = 4294967295;
       expect(DestinationCheck.fromJson(JsonObject.root(fat, 'c')).maxFileBytes, 4294967295);
+    });
+
+    test('check_destination inside a lost volume: the reason and the files at risk', () {
+      final refused = examples.object('check_destination.result')
+        ..['verdict'] = 'overlaps_source'
+        ..['reason'] = 'lost_volume'
+        ..['lost_files'] = 1234
+        ..['lost_bytes'] = 5678901234567;
+      final check = DestinationCheck.fromJson(JsonObject.root(refused, 'c'));
+      expect(check.verdict, DestinationVerdict.overlapsSource);
+      expect(check.isOk, isFalse);
+      expect(check.reasonName, 'lost_volume');
+      expect(check.reason, ProtectionReason.lostVolume);
+      expect(check.lostFiles, 1234);
+      expect(check.lostBytes, 5678901234567);
+
+      final newer = refused..['reason'] = 'cosmic_ray';
+      final unknown = DestinationCheck.fromJson(JsonObject.root(newer, 'c'));
+      expect(unknown.reason, ProtectionReason.unknown);
+      expect(unknown.reasonName, 'cosmic_ray');
+    });
+
+    test('an instance the user chose, and protected lost volumes', () {
+      final instance = examples.object('Instance')
+        ..['kind'] = 'other'
+        ..['manual'] = true
+        ..['label'] = '[File system 3]';
+      final parsed = Instance.fromJson(JsonObject.root(instance, 'Instance'));
+      expect(parsed.kind, InstanceKind.other);
+      expect(parsed.manual, isTrue);
+      expect(parsed.label, '[File system 3]');
+
+      final catalog = examples.object('CatalogInfo')
+        ..['protected'] = [
+          {'start': 1048576, 'end': 4000786153472, 'reason': 'session_range'},
+          {'start': 1048576, 'end': 4100000000000, 'reason': 'lost_volume'},
+        ];
+      final info = CatalogInfo.fromJson(JsonObject.root(catalog, 'CatalogInfo'));
+      expect(info.protected.map((r) => r.reason), [ProtectionReason.sessionRange, ProtectionReason.lostVolume]);
+      expect(info.protected.last.range, const ByteRange(1048576, 4100000000000));
+      expect(info.protected.last.range.length, 4100000000000 - 1048576);
     });
 
     test('progress without eta; recovery between files; image without bad sectors', () {
@@ -248,7 +293,8 @@ void main() {
         [
           'trim_supported', 'mounted_volume', 'page_file_on_source', 'system_disk', 'app_on_source', //
           'source_reads_zero', 'carve_hits_capped', 'live_volume_incomplete', 'writes_not_detectable',
-          'scan_incomplete', 'out_of_range_files', 'identity_differs',
+          'scan_incomplete', 'out_of_range_files', 'identity_differs', 'mixed_generations',
+          'session_file_at_risk',
         ],
         WarningCode.parse,
         WarningCode.unknown,
@@ -260,6 +306,8 @@ void main() {
         OffsetSource.unknown,
       );
       check(['main', 'older', 'other', 'embedded', 'strays'], InstanceKind.parse, InstanceKind.unknown);
+      expect(InstanceOverride.values.map((k) => k.wire), ['main', 'other', 'auto']);
+      check(['session_range', 'lost_volume', 'source_image'], ProtectionReason.parse, ProtectionReason.unknown);
       check(['dir', 'file', 'lost_dir', 'virtual', 'carved'], NodeKind.parse, NodeKind.unknown);
       check(['good', 'uncertain', 'damaged', 'unsupported'], Rating.parse, Rating.unknown);
       check(

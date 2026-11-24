@@ -356,3 +356,70 @@ fn system_files_equal_those_of_mkntfs_where_they_must() {
     let entry = built.manifest.entry("volume", "special/fragmented.bin");
     assert_eq!(&sha256_hex(&cat(&ours, "special/fragmented.bin")), entry.sha256.as_ref().unwrap());
 }
+
+/// Mounts the current volume of a scenario read-only and compares what the
+/// driver lists and returns with the manifest's entries of that volume.
+fn current_volume_mounts(dir: &TempDir, scenario: &str) -> Option<usize> {
+    let built = hds_testkit::scenarios::build(scenario, 3).expect("a catalog scenario");
+    let m = &built.manifest;
+    let current = m
+        .instances
+        .iter()
+        .find(|i| i.role == hds_testkit::manifest::InstanceRole::Current)
+        .expect("a current volume");
+    let offset = current.geometry.volume_offset;
+    let size = (current.geometry.total_sectors + 1) * current.geometry.bytes_per_sector as u64;
+    let image = hds_testkit::image::Image::from_bytes(&built.image.read_vec(offset, size as usize));
+    let path = dir.path(&format!("{scenario}.img"));
+    image.write_to_file(&path).unwrap();
+    // ntfsprogs refuse an image that is mounted: ask ntfsinfo first
+    let info = run("ntfsinfo", &["-m", path.to_str().unwrap()]).unwrap_or_else(|| panic!("ntfsinfo -m rejects {scenario}"));
+    assert!(info.contains(&format!("Cluster Size: {}", current.geometry.cluster_size)), "{scenario}: {info}");
+    let mount_point = dir.path(&format!("{scenario}.mnt"));
+    std::fs::create_dir_all(&mount_point).unwrap();
+    let mounted = Command::new("ntfs-3g").args(["-o", "ro"]).arg(&path).arg(&mount_point).output().ok()?;
+    if !mounted.status.success() {
+        eprintln!("ntfs-3g refused {scenario}: {}", String::from_utf8_lossy(&mounted.stderr).trim());
+        return None;
+    }
+    let _mount = Mount(&mount_point);
+    let entries: Vec<&Entry> = m
+        .entries
+        .iter()
+        .filter(|e| e.instance == current.id && !e.deleted && e.record >= 16 && !e.path.is_empty() && e.components[0] != "$Extend")
+        .collect();
+    let expected: BTreeSet<String> = entries.iter().map(|e| e.path.clone()).collect();
+    let mut found = BTreeSet::new();
+    walk(&mount_point, "", &mut found);
+    assert_eq!(found, expected, "{scenario}: the driver lists other paths than the manifest");
+    let mut files = 0;
+    for e in entries.iter().filter(|e| e.kind == EntryKind::File && e.sha256.is_some()) {
+        let data = std::fs::read(mount_point.join(&e.path)).unwrap();
+        assert_eq!(&sha256_hex(&data), e.sha256.as_ref().unwrap(), "{scenario}: content of {}", e.path);
+        files += 1;
+    }
+    println!("{scenario}: ntfs-3g lists the {} paths of the current volume and returns its {files} files", found.len());
+    Some(found.len())
+}
+
+#[test]
+fn the_volume_left_by_an_accident_is_a_valid_ntfs_volume() {
+    if !tools() {
+        return;
+    }
+    let dir = TempDir::new("real-tools-scenarios");
+    let scenarios = [
+        "current_volume",
+        "quick_format_same_geometry",
+        "post_format_activity",
+        "new_mft_grew",
+        "live_mft_with_attribute_list",
+        "quick_format_cluster_change",
+        "sector_4k",
+    ];
+    let mounted: Vec<usize> = scenarios.iter().filter_map(|s| current_volume_mounts(&dir, s)).collect();
+    if mounted.is_empty() {
+        return skip("mounting scenario volumes", "mounting is not possible here (not root, or no FUSE)");
+    }
+    assert_eq!(mounted.len(), scenarios.len(), "some scenario volumes could not be mounted although others could");
+}

@@ -284,7 +284,7 @@ void main() {
       }
     });
 
-    test('open_source, close_source, session_load, session_attach_source, geometry_set, session_save: busy in S and J', () {
+    test('open_source, close_source, session_load, session_attach_source, geometry_set, instance_set, session_save: busy in S and J', () {
       expectByState('open_source', (_) => {'kind': 'disk', 'path': disk1},
           {'N': 'ok', 'O': 'ok', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
       expectByState('close_source', (_) => {}, {'N': 'ok', 'O': 'ok', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
@@ -293,6 +293,8 @@ void main() {
       expectByState('session_attach_source', (_) => {'kind': 'disk', 'path': disk1},
           {'N': 'no_session', 'O': 'no_session', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
       expectByState('geometry_set', (_) => {'instance': 0, 'cluster_size': 4096, 'volume_offset': 1048576},
+          {'N': 'no_catalog', 'O': 'no_catalog', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
+      expectByState('instance_set', (_) => {'instance': 1, 'kind': 'other'},
           {'N': 'no_catalog', 'O': 'no_catalog', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
       expectByState('session_save', (_) => {'path': r'C:\s\copy.hdsc'},
           {'N': 'no_session', 'O': 'no_session', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
@@ -432,10 +434,41 @@ void main() {
       expect(disks.map((d) => d['trim']).toSet(), {true, false, null});
       expect(disks.map((d) => d['table']).toSet(), {'mbr', 'gpt', 'none'});
       expect(disks.expand((d) => d['flags']! as List<Object?>).toSet(), {'virtual', 'spaces', 'dynamic', 'no_media'});
-      final fs = disks.expand((d) => (d['partitions']! as List<Object?>).cast<Map<String, Object?>>()).map((p) => p['fs']).toSet();
-      expect(fs, {'ntfs', 'fat', 'exfat', 'bitlocker', 'other', null});
+      final partitions = disks.expand((d) => (d['partitions']! as List<Object?>).cast<Map<String, Object?>>());
+      // The volumes Windows exposes, read without a single sector: the
+      // mounted file system (null for a raw volume), no type, no NTFS
+      // details; partitions without a volume are missing.
+      expect(partitions.map((p) => p['fs']).toSet(), {'ntfs', 'fat', 'exfat', null});
+      expect(partitions.map((p) => (p['type'], p['type_id'], p['ntfs'])).toSet(), {('', '', null)});
       expect(disks.where((d) => d['is_system'] == true), hasLength(1));
+      final disk2 = disks.firstWhere((d) => d['number'] == 2);
+      expect((disk2['partitions']! as List<Object?>).map((p) => (p! as Map)['index']), [1, 2, 3, 4, 6],
+          reason: 'the Linux partition has no volume; Windows numbers have gaps');
+      expect(((disks.firstWhere((d) => d['number'] == 6))['partitions']! as List), isEmpty,
+          reason: 'a Storage Spaces member exposes no volume');
+
+      // open_source reads the table itself: types, NTFS details, every partition.
+      final opened = h.ok('open_source', {'kind': 'disk', 'path': disk2['path']});
+      final table = (opened['partitions']! as List<Object?>).cast<Map<String, Object?>>();
+      expect(table.map((p) => p['index']), [1, 2, 3, 4, 5, 6]);
+      expect(table.map((p) => p['fs']).toSet(), {'ntfs', 'exfat', 'fat', 'bitlocker', 'other', null});
+      expect(table.first['type'], isNotEmpty);
+      expect(table.first['ntfs'], isNotNull);
       expect((Harness(os: 'linux').ok('list_disks')['disks']! as List), isEmpty, reason: 'empty on non-Windows hosts');
+    });
+
+    test('every partition lies inside its disk, in offset order, without overlaps', () {
+      for (final disk in FakeWorld().disks) {
+        final size = disk['size']! as int;
+        var end = 0;
+        for (final p in (disk['partitions']! as List<Object?>).cast<Map<String, Object?>>()) {
+          final offset = p['offset']! as int;
+          expect(offset, greaterThanOrEqualTo(end), reason: '${disk['path']} partition ${p['index']}');
+          end = offset + (p['size']! as int);
+          expect(end, lessThanOrEqualTo(size), reason: '${disk['path']} partition ${p['index']}');
+          expect(offset % 512 + (p['size']! as int) % 512, 0, reason: 'sector-aligned');
+        }
+      }
     });
 
     test('open_source: disks, warnings, images, errors', () {
@@ -1340,6 +1373,260 @@ void main() {
       final loaded = second.ok('session_load', {'path': r'C:\s\copy.hdsc'});
       expect(((loaded['catalog']! as Map)['range']! as Map), {'start': 1048576, 'end': 4000786153472});
       expect((loaded['catalog']! as Map)['scan_complete'], isTrue);
+    });
+  });
+
+  group('file systems: instance_set', () {
+    List<Map<String, Object?>> instancesOf(Map<String, Object?> catalog) =>
+        (catalog['instances']! as List<Object?>).cast<Map<String, Object?>>();
+
+    /// A file of instance [root]'s tree that has only the flags of its
+    /// instance (so that its rating follows from them alone).
+    Map<String, Object?> plainFile(Harness h, int root, String instanceFlag) => h
+        .search({'under': root})
+        .firstWhere((r) => (r['flags']! as List<Object?>).every((f) => f == instanceFlag));
+
+    test('"main": the chosen file system comes first, the previous main one becomes "other"', () {
+      final h = Harness();
+      final before = h.scan();
+      final older = instancesOf(before)[1];
+      expect(older['kind'], 'older');
+      expect(older['manual'], isFalse);
+      final olderRoot = older['root']! as int;
+      final oldFile = plainFile(h, olderRoot, 'older_generation');
+      expect(oldFile['rating'], 'uncertain');
+      h.ok('carve_start', {'kinds': ['jpeg']});
+      h.finishJob();
+      final carvedRoot = h.engine.catalog!.carvedRoot!;
+      final epoch = h.epoch;
+
+      final after = h.ok('instance_set', {'instance': older['id'], 'kind': 'main'});
+      expect(after['epoch'], isNot(epoch), reason: 'instance_set starts a new epoch');
+      expect(h.outcome('node_info', {'epoch': epoch, 'node': olderRoot}), 'stale_catalog');
+      final instances = instancesOf(after);
+      expect(instances.first['root'], olderRoot, reason: 'instances[0] is the main instance');
+      expect(instances.first['kind'], 'main');
+      expect(instances.first['manual'], isTrue);
+      expect(instances.first['label'], '');
+      // Ids are positions in this list: they changed with the new epoch.
+      expect(instances.map((i) => i['id']), [0, 1, 2, 3, 4]);
+      final demoted = instances.firstWhere((i) => i['root'] == 0);
+      expect(demoted['kind'], 'other');
+      expect(demoted['manual'], isFalse, reason: 'the user chose the other one');
+      expect(demoted['label'], isNotEmpty);
+      expect(instances.where((i) => i['kind'] == 'main'), hasLength(1));
+
+      // Roots carry their new names; the default subtree of search is the new main root.
+      final roots = {for (final i in instances) i['root']! as int: i['label']};
+      for (final MapEntry(key: root, value: label) in roots.entries) {
+        expect((h.ok('node_info', {'epoch': h.epoch, 'node': root})['row']! as Map)['name'], label);
+      }
+      expect(h.root, olderRoot);
+      final found = h.search({'filter': {'query': ''}});
+      final first = h.ok('node_info', {'epoch': h.epoch, 'node': found.first['id']});
+      expect((first['ancestors']! as List<Object?>).cast<Map<String, Object?>>().first['id'], olderRoot);
+
+      // Its files are no longer of an older generation, and carved files are gone.
+      final now = h.ok('node_info', {'epoch': h.epoch, 'node': oldFile['id']})['row']! as Map<String, Object?>;
+      expect(now['flags'], isEmpty);
+      expect(now['rating'], 'good');
+      expect(after['carved'], 0);
+      expect(h.outcome('list_children', {'epoch': h.epoch, 'node': carvedRoot}), 'not_found');
+
+      // The id of a node's instance is the one of this catalog.
+      expect(h.ok('node_info', {'epoch': h.epoch, 'node': oldFile['id']})['instance'], 0);
+      expect(h.ok('node_info', {'epoch': h.epoch, 'node': demoted['root']})['instance'], demoted['id']);
+
+      // "auto" withdraws the override: the engine's verdict again.
+      final auto = h.ok('instance_set', {'instance': 0, 'kind': 'auto'});
+      expect(instancesOf(auto).map((i) => (i['id'], i['kind'], i['manual'])), [
+        for (final i in instancesOf(before)) (i['id'], i['kind'], false),
+      ]);
+      expect(instancesOf(auto).map((i) => i['label']), instancesOf(before).map((i) => i['label']));
+      expect(h.root, 0);
+    });
+
+    test('"other" makes an embedded file system a volume of its own whose files can be read', () {
+      final h = Harness();
+      final before = h.scan();
+      final embedded = instancesOf(before).firstWhere((i) => i['kind'] == 'embedded');
+      expect(embedded['embedded_in'], isNotNull);
+      final file = plainFile(h, embedded['root']! as int, 'embedded');
+      expect(file['rating'], 'unsupported');
+      expect(h.outcome('read_file', {'epoch': h.epoch, 'node': file['id']}), 'unsupported');
+
+      final after = h.ok('instance_set', {'instance': embedded['id'], 'kind': 'other'});
+      final changed = instancesOf(after).firstWhere((i) => i['root'] == embedded['root']);
+      expect(changed['kind'], 'other');
+      expect(changed['manual'], isTrue);
+      expect(changed['embedded_in'], isNull);
+      expect(instancesOf(after).first['root'], 0, reason: 'the main instance stays');
+      final row = h.ok('node_info', {'epoch': h.epoch, 'node': file['id']})['row']! as Map<String, Object?>;
+      expect(row['flags'], isEmpty);
+      expect(row['rating'], isNot('unsupported'));
+      expect(h.outcome('read_file', {'epoch': h.epoch, 'node': file['id']}), 'ok');
+      // It is read with its own geometry now, not with the main one's.
+      expect((changed['geometry']! as Map)['offset_source'], isNot('inherited'));
+    });
+
+    test('what cannot be changed', () {
+      final h = Harness();
+      final instances = instancesOf(h.scan());
+      final strays = instances.firstWhere((i) => i['kind'] == 'strays')['id'];
+      final epoch = h.epoch;
+      expect(h.outcome('instance_set', {'instance': strays, 'kind': 'main'}), 'bad_request');
+      expect(h.epoch, epoch, reason: 'a refused change changes nothing');
+      expect(h.outcome('instance_set', {'instance': strays, 'kind': 'other'}), 'bad_request');
+      expect(h.outcome('instance_set', {'instance': 0, 'kind': 'other'}), 'bad_request',
+          reason: 'choose another main file system instead');
+      final other = instances.firstWhere((i) => i['kind'] == 'other')['id'];
+      expect(h.outcome('instance_set', {'instance': other, 'kind': 'other'}), 'bad_request',
+          reason: '"other" is for embedded and older file systems');
+      // The previous main one cannot be pushed aside for good either: there
+      // is always a main file system.
+      h.ok('instance_set', {'instance': 1, 'kind': 'main'});
+      final demoted = instancesOf(h.ok('catalog_info')).firstWhere((i) => i['root'] == 0)['id'];
+      expect(h.outcome('instance_set', {'instance': demoted, 'kind': 'other'}), 'bad_request');
+      h.ok('instance_set', {'instance': 0, 'kind': 'auto'});
+      expect(instancesOf(h.ok('catalog_info')).first['root'], 0);
+      expect(h.outcome('instance_set', {'instance': 1, 'kind': 'embedded'}), 'bad_request');
+      expect(h.outcome('instance_set', {'instance': 99, 'kind': 'main'}), 'not_found');
+      expect(h.outcome('instance_set', {'kind': 'main'}), 'bad_request');
+    });
+  });
+
+  group('protected ranges and the destination guard', () {
+    List<Map<String, Object?>> protectedOf(Map<String, Object?> catalog) =>
+        (catalog['protected']! as List<Object?>).cast<Map<String, Object?>>();
+    Map<String, Object?> check(Harness h, String path, [String purpose = 'recover']) =>
+        h.ok('check_destination', {'path': path, 'purpose': purpose});
+    List<String> warnings(Map<String, Object?> catalog) => [
+      for (final w in (catalog['warnings']! as List<Object?>).cast<Map<String, Object?>>()) w['code']! as String,
+    ];
+
+    test('the session range first, then the lost volume of every file system of its own with validated geometry', () {
+      final h = Harness();
+      final catalog = h.scan();
+      final protected = protectedOf(catalog);
+      expect(protected.first, {'start': 1048576, 'end': 4000786153472, 'reason': 'session_range'});
+      final instances = (catalog['instances']! as List<Object?>).cast<Map<String, Object?>>();
+      final own = instances.where((i) => (i['kind'] == 'main' || i['kind'] == 'other') && (i['geometry']! as Map)['validated'] == true);
+      expect(protected.skip(1), [
+        for (final instance in own)
+          {
+            'start': (instance['geometry']! as Map)['volume_offset'],
+            'end': ((instance['geometry']! as Map)['volume_offset']! as int) +
+                ((instance['geometry']! as Map)['total_clusters']! as int) * ((instance['geometry']! as Map)['cluster_size']! as int),
+            'reason': 'lost_volume',
+          },
+      ]);
+      expect(protected.skip(1), hasLength(2));
+      for (final range in protected) {
+        expect(range['end']! as int, lessThanOrEqualTo(4000787030016), reason: 'clipped to the source');
+      }
+
+      // A geometry that is not validated protects nothing of its own.
+      final changed = h.ok('geometry_set', {'instance': 0, 'cluster_size': 8192, 'volume_offset': 1048576});
+      expect(protectedOf(changed), hasLength(2));
+      expect(protectedOf(changed).first['reason'], 'session_range');
+      expect(protectedOf(h.ok('catalog_info')), protectedOf(changed));
+    });
+
+    test('a lost volume that reaches beyond the scanned partition protects the next partition as well', () {
+      final h = Harness();
+      final disk = h.ok('open_source', {'kind': 'disk', 'path': r'\\.\PhysicalDrive2'});
+      final partitions = (disk['partitions']! as List<Object?>).cast<Map<String, Object?>>();
+      final d = partitions.first;
+      final start = d['offset']! as int;
+      final end = start + (d['size']! as int);
+
+      // Before a scan nothing is known: the fake protects the whole source.
+      expect(check(h, r'F:\Rescued')['verdict'], 'overlaps_source');
+      // The scan's own check uses its range: F: is outside it, on the same disk.
+      final refused = h.error('scan_start', {'start': start, 'end': end, 'session_path': r'F:\s\d.hdsc'});
+      expect((refused['data']! as Map)['verdict'], 'same_disk');
+      h.ok('scan_start', {'start': start, 'end': end, 'session_path': r'F:\s\d.hdsc', 'allow_same_disk': true});
+      h.finishJob();
+      final catalog = h.events('scan_done').last['catalog']! as Map<String, Object?>;
+      final lost = protectedOf(catalog).firstWhere((r) => r['reason'] == 'lost_volume');
+      expect(lost['end']! as int, greaterThan(end), reason: 'the old volume was larger than the partition');
+
+      final f = check(h, r'F:\Rescued');
+      expect(f['verdict'], 'overlaps_source');
+      expect(f['reason'], 'lost_volume');
+      expect(f['lost_files']! as int, greaterThan(0));
+      expect(f['lost_bytes']! as int, greaterThan(0));
+      final inside = check(h, r'D:\Rescued');
+      expect(inside['reason'], 'session_range');
+      expect(inside['lost_files']! as int, greaterThan(f['lost_files']! as int));
+      final g = check(h, r'G:\Rescued');
+      expect(g['verdict'], 'same_disk');
+      expect(g['reason'], isNull);
+      expect(g['lost_files'], 0);
+      expect(check(h, r'X:\Rescued'), containsPair('lost_files', 0));
+
+      // The session file turned out to be inside the lost volume (B3).
+      expect(warnings(catalog), contains('session_file_at_risk'));
+      expect(h.outcome('session_save', {'path': r'G:\s\safe.hdsc'}), 'destination_refused');
+      h.ok('session_save', {'path': r'X:\s\safe.hdsc'});
+      expect(warnings(h.ok('catalog_info')), isNot(contains('session_file_at_risk')));
+    });
+
+    test('L: is inside the lost volume once a catalog knows it; before, nobody can tell', () {
+      final h = Harness()..open();
+      final before = check(h, r'L:\Rescued');
+      expect(before['verdict'], 'same_disk');
+      expect(before['message'], contains('nobody knows'));
+      h.scan();
+      final after = check(h, r'L:\Rescued');
+      expect(after['verdict'], 'overlaps_source');
+      expect(after['reason'], 'lost_volume');
+      expect(after['lost_files']! as int, greaterThan(0));
+      expect(after['message'], isNotEmpty);
+    });
+
+    test('the image file that is the source', () {
+      final h = Harness();
+      h.ok('open_source', {'kind': 'image', 'path': r'D:\images\Disk.img'});
+      for (final path in [r'D:\images\Disk.img', r'd:\IMAGES\disk.IMG', 'D:/images/Disk.img']) {
+        final same = check(h, path, 'image');
+        expect(same['verdict'], 'overlaps_source', reason: path);
+        expect(same['reason'], 'source_image');
+      }
+      expect(check(h, r'D:\images\copy.img', 'image')['verdict'], 'ok');
+      expect(check(h, r'D:\images\copy.img', 'image')['reason'], isNull);
+    });
+
+    test('session and app data on the system volume need no consent, unless it is protected (S3)', () {
+      final h = Harness();
+      final disk = h.ok('open_source', {'kind': 'disk', 'path': r'\\.\PhysicalDrive0'});
+      final recovery = (disk['partitions']! as List<Object?>).cast<Map<String, Object?>>().last;
+      final start = recovery['offset']! as int;
+      h.ok('scan_start', {'start': start, 'end': start + (recovery['size']! as int)});
+      h.finishJob();
+      expect(check(h, r'C:\Users\me\AppData\Local\HDSavior', 'app_data')['verdict'], 'ok');
+      expect(check(h, r'C:\Users\me\s.hdsc', 'session')['verdict'], 'ok');
+      expect(check(h, r'C:\Rescued')['verdict'], 'same_disk');
+
+      // The partition that holds C: itself.
+      final windows = (disk['partitions']! as List<Object?>).cast<Map<String, Object?>>()[2];
+      final from = windows['offset']! as int;
+      h.ok('scan_start', {'start': from, 'end': from + 1073741824});
+      h.finishJob();
+      expect(check(h, r'C:\Users\me\AppData\Local\HDSavior', 'app_data')['verdict'], 'overlaps_source');
+    });
+
+    test('mixed_generations when two file systems could not be separated cleanly', () {
+      final h = Harness();
+      final loaded = h.ok('session_load', {'path': r'C:\s\mixed.hdsc'});
+      expect(warnings(loaded['catalog']! as Map<String, Object?>), contains('mixed_generations'));
+      final plain = h.ok('session_load', {'path': r'C:\s\plain.hdsc'});
+      expect(warnings(plain['catalog']! as Map<String, Object?>), isNot(contains('mixed_generations')));
+
+      h.ok('open_source', {'kind': 'image', 'path': r'D:\mixed-history.img'});
+      h.ok('scan_start');
+      h.finishJob();
+      expect(warnings(h.events('scan_done').last['catalog']! as Map<String, Object?>), contains('mixed_generations'));
     });
   });
 

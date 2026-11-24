@@ -4,7 +4,18 @@
 //! Every function documents the paragraphs of `docs/ALGORITHMS.md` it
 //! exists to test; the same list is in the manifest (`Manifest::rules`).
 //! [`catalog`] lists them all, so that a test can run a property over every
-//! situation at once.
+//! situation at once. The modules group them: [`accidents`] (formats over
+//! formats, activity after the accident, file systems inside files,
+//! volumes larger than the scan), [`instances`] (contradictions between
+//! generations, copies of MFT blocks, extension records in free slots of
+//! the current MFT), [`geometry`], [`records`] (multi-record files),
+//! [`names`], [`damage`] and [`scale`].
+//!
+//! Scenarios about individual records keep the records of interest above
+//! 256, where a Windows quick format does not reach, and add a few dozen
+//! neighbours with three indexed folders (`add_neighbours`): without
+//! them the surviving records would be fewer than 16 and land in the
+//! strays (ALGORITHMS D6), and the geometry would not be validated (F6).
 //!
 //! The functions are deterministic: the same seed gives the same image and
 //! the same manifest. Images are between 32 and 200 MiB of mostly empty
@@ -15,6 +26,7 @@
 pub mod accidents;
 pub mod damage;
 pub mod geometry;
+pub mod instances;
 pub mod names;
 pub mod records;
 pub mod scale;
@@ -68,6 +80,10 @@ catalog![
     accidents::embedded_volume_fragmented,
     accidents::old_volume_larger_than_range,
     accidents::whole_disk_two_volumes,
+    instances::generations_by_references,
+    instances::generation_cut_dropped,
+    instances::copies_of_mft_blocks,
+    instances::extensions_in_free_slots,
     geometry::cluster_512,
     geometry::cluster_1k,
     geometry::cluster_2k,
@@ -160,8 +176,30 @@ pub(crate) fn stage_with(
     (disk, old, test)
 }
 
-/// Writes the staged volume, quick-formats it and finishes the image.
+/// Gives a volume what a `main` instance needs besides the records a
+/// scenario is about: 34 more records, so that it is not merged into the
+/// strays (ALGORITHMS D6: fewer than 16 records), and three folders with
+/// index blocks, which validate its geometry by structural evidence (F2,
+/// F6) — otherwise every file would be rated at most `uncertain` and the
+/// scenario would test less. Created last, their records survive a format.
+pub(crate) fn add_neighbours(v: &mut crate::volume::Volume, parent: crate::volume::NodeId) {
+    // a Windows 10 quick format rewrites records 0-255
+    v.number_from(256);
+    let home = v.mkdir(parent, "Neighbours");
+    for shelf in 1..=3 {
+        let dir = v.mkdir(home, format!("Shelf {shelf}").as_str());
+        for i in 0..10u64 {
+            v.add_tagged(dir, format!("neighbour-{shelf}-{i:02}.dat").as_str(), 300 + 10 * i);
+        }
+    }
+}
+
+/// Adds the neighbours, writes the staged volume, quick-formats it and
+/// finishes the image.
 pub(crate) fn finish_formatted(mut disk: Disk, old: VolumeId) -> Built {
+    let v = disk.volume(old);
+    let root = v.root();
+    add_neighbours(v, root);
     disk.render(old);
     reformat(&mut disk, old);
     disk.finish()

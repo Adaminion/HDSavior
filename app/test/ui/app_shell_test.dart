@@ -5,8 +5,11 @@ import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hdsavior/app.dart';
+import 'package:hdsavior/engine/engine.dart';
 import 'package:hdsavior/state/state.dart';
 import 'package:hdsavior/ui/app_shell.dart';
+import 'package:hdsavior/ui/screens/source_screen.dart';
+import 'package:hdsavior/ui/strings.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../support/fake_app.dart';
@@ -21,11 +24,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 10));
   }
 
-  Future<void> pumpApp(
-    WidgetTester tester, {
-    int protocol = 1,
-    void Function(FakeApp fake)? prepare,
-  }) async {
+  Future<void> pumpApp(WidgetTester tester, {int protocol = 1, void Function(FakeApp fake)? prepare}) async {
     fake = FakeApp(protocol: protocol, settle: () => settle(tester));
     prepare?.call(fake);
     await tester.pumpWidget(HdSaviorApp(controller: fake.app));
@@ -37,8 +36,7 @@ void main() {
     await fake.dispose();
   }
 
-  Finder destination(String label) =>
-      find.descendant(of: find.byType(NavigationRail), matching: find.text(label));
+  Finder destination(String label) => find.descendant(of: find.byType(NavigationRail), matching: find.text(label));
 
   testWidgets('starting: the notice is there from the first frame, then the screens', (tester) async {
     await pumpApp(tester);
@@ -56,7 +54,7 @@ void main() {
       expect(destination(label), findsOneWidget);
     }
     // The first screen shows what the engine reported.
-    expect(find.text('Disks found: 7'), findsOneWidget);
+    expect(find.byType(DiskCard), findsNWidgets(7));
     expect(tester.widget<MaterialApp>(find.byType(MaterialApp)).title, 'HDSavior');
     await close(tester);
   });
@@ -77,13 +75,13 @@ void main() {
   testWidgets('navigation: five screens, by tap and from the controller', (tester) async {
     await pumpApp(tester);
     await settle(tester);
+    // Nothing is open yet: each screen says what it is waiting for.
     final titles = {
-      AppScreen.source: 'Choose the disk or partition that was formatted, a disk image, or a saved scan.',
-      AppScreen.scan: 'Reads the disk once and collects what is left of the old files.',
-      AppScreen.results: 'Browse the files that were found and tick the ones to recover.',
-      AppScreen.recover: 'Copies the ticked files to another disk.',
-      AppScreen.image:
-          'Copies the whole disk to a file on another disk, so that the rescue can continue from the copy.',
+      AppScreen.source: S.sourceTitle,
+      AppScreen.scan: S.scanNoSourceTitle,
+      AppScreen.results: S.noCatalogTitle,
+      AppScreen.recover: S.recoverNoCatalogTitle,
+      AppScreen.image: S.imageNoSourceTitle,
     };
     expect(find.text(titles[AppScreen.source]!), findsOneWidget);
 
@@ -98,7 +96,11 @@ void main() {
       await tester.pump();
       expect(fake.app.screen.value, screen);
       expect(find.text(titles[screen]!), findsOneWidget);
-      expect(titles.values.where((t) => find.text(t).evaluate().isNotEmpty), hasLength(1), reason: 'one screen at a time');
+      expect(
+        titles.values.where((t) => find.text(t).evaluate().isNotEmpty),
+        hasLength(1),
+        reason: 'one screen at a time',
+      );
     }
 
     fake.app.screen.value = AppScreen.scan;
@@ -108,27 +110,48 @@ void main() {
     await close(tester);
   });
 
-  testWidgets('the placeholders follow the state', (tester) async {
+  testWidgets('a scan that ends with results shows the Results screen; a failed one stays', (tester) async {
     await pumpApp(tester);
     await settle(tester);
     await fake.openDisk();
     await fake.run(() => fake.app.scan.start());
     fake.app.screen.value = AppScreen.scan;
     await tester.pump();
-    expect(find.text('Scan: running'), findsOneWidget);
     await fake.step(3);
-    expect(find.textContaining('Phase sweep'), findsOneWidget);
+    expect(find.text(S.phaseTitle(ScanPhase.sweep)), findsOneWidget);
     await fake.finishJob();
-    expect(find.text('Result: completed'), findsOneWidget);
+    expect(fake.app.screen.value, AppScreen.results);
+    expect(find.text(S.instanceName(fake.app.catalog.info!.mainInstance!)), findsWidgets);
 
-    fake.app.screen.value = AppScreen.results;
-    await tester.pump();
-    expect(find.text('File systems found: 5'), findsOneWidget);
-    expect(find.text('Files and folders: 3440'), findsOneWidget);
-    expect(find.text('Ticked for recovery: nothing'), findsOneWidget);
-    fake.app.selection.setChecked(0, const [], true);
-    await tester.pump();
-    expect(find.text('Ticked for recovery: something'), findsOneWidget);
+    // A failure is explained where the scan was watched.
+    fake.script.scanFailAtStep = 2;
+    await fake.run(() => fake.app.scan.start());
+    fake.app.screen.value = AppScreen.scan;
+    await fake.finishJob();
+    expect(fake.app.screen.value, AppScreen.scan);
+    expect(find.text(S.sourceLostTitle), findsOneWidget);
+    await close(tester);
+  });
+
+  testWidgets('a long request shows its progress over the screens', (tester) async {
+    await pumpApp(tester, prepare: (fake) => fake.script.taskTicks = 3);
+    await settle(tester);
+    fake.app.screen.value = AppScreen.source;
+    final load = fake.app.source.loadSession(r'D:\scans\big.hdsc');
+    load.ignore();
+    await settle(tester);
+    expect(find.text(S.taskTitle(TaskKind.sessionLoad)), findsNothing, reason: 'no progress reported yet');
+    fake.engine.advance();
+    await settle(tester);
+    expect(find.text(S.taskTitle(TaskKind.sessionLoad)), findsOneWidget);
+    expect(find.textContaining('33 %'), findsOneWidget);
+    for (var i = 0; i < 5; i++) {
+      fake.engine.advance();
+      await settle(tester);
+    }
+    await load;
+    await settle(tester);
+    expect(find.text(S.taskTitle(TaskKind.sessionLoad)), findsNothing);
     await close(tester);
   });
 
@@ -148,7 +171,7 @@ void main() {
     await tester.tap(find.text('Start the engine again'));
     await settle(tester);
     expect(find.byType(NavigationRail), findsOneWidget);
-    expect(find.text('Disks found: 7'), findsOneWidget);
+    expect(find.byType(DiskCard), findsNWidgets(7));
     await close(tester);
   });
 

@@ -388,7 +388,7 @@ impl Volume {
             }
         };
         let mut records: Vec<Option<(RecordModel, Option<Vec<IndexEntry>>)>> = Vec::with_capacity(holders);
-        for holder in 0..holders {
+        for (holder, &next) in next_id.iter().enumerate() {
             let superseded = if holder == 0 { node.superseded } else { node.extensions[holder - 1].superseded };
             if superseded {
                 records.push(None);
@@ -434,7 +434,7 @@ impl Volume {
             model.lsn = node.lsn;
             model.usn = node.usn;
             model.end_tail = if windows { END_TAIL_WINDOWS } else { 0 };
-            model.next_attr_id = next_id[holder];
+            model.next_attr_id = next;
             records.push(Some((model, None)));
         }
 

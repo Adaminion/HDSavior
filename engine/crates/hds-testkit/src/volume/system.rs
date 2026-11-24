@@ -404,7 +404,9 @@ impl Volume {
         }
 
         // 24-26: $Extend\$Quota, $ObjId, $Reparse with their view indexes
-        let views: [(u64, &str, &[(&str, u32)]); 3] = [
+        // (name and collation rule of each)
+        type Views<'a> = &'a [(&'a str, u32)];
+        let views: [(u64, &str, Views); 3] = [
             (24, "$Quota", &[("$O", COLLATION_SID), ("$Q", COLLATION_ULONG)]),
             (25, "$ObjId", &[("$O", COLLATION_ULONGS)]),
             (26, "$Reparse", &[("$R", COLLATION_ULONGS)]),

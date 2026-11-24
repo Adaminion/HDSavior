@@ -1,12 +1,13 @@
 //! Helpers shared by the integration tests.
 #![allow(dead_code)]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use hds_testkit::disk::Built;
 use hds_testkit::facts::{ArtifactState, RecordFact, RecordRole};
-use hds_testkit::manifest::{Entry, Flag, Manifest, Presence};
+use hds_testkit::manifest::{CatalogInstance, Entry, Flag, FragmentFact, Manifest, Presence, RecordClass};
 
 /// The seeds the scenario tests run with: what a scenario promises must
 /// not depend on the seed.
@@ -194,4 +195,137 @@ pub fn crosscheck(python: &str, inspector: &Path, image: &Path, manifest: &Path)
         .expect("start python");
     let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     (output.status.success(), text)
+}
+
+/// The records of one MFT fragment that a correct scan groups there: old
+/// records with a stated number at `origin`.
+pub fn fragment_records<'a>(m: &'a Manifest, fragment: &FragmentFact) -> Vec<&'a RecordFact> {
+    m.records
+        .iter()
+        .filter(|r| r.expect.class == Some(RecordClass::Old) && r.size == fragment.record_size)
+        .filter(|r| r.number.is_some_and(|n| r.offset as i64 - (n * r.size as u64) as i64 == fragment.origin))
+        .collect()
+}
+
+/// A plausible MFT-change time in the sense of ALGORITHMS D2 (the manifest
+/// assumes a scan between 2026 and 2037).
+fn timed(r: &RecordFact) -> Option<u64> {
+    let t = r.standard_information?.0[2];
+    let scan = hds_testkit::expect::ASSUMED_SCAN_TIME;
+    (t != 0 && t >= hds_testkit::time::ymd(1980, 1, 1) && t <= scan + hds_testkit::time::DAY).then_some(t)
+}
+
+/// ALGORITHMS D2 written down once more, by brute force and independently
+/// of `hds_testkit::expect`: the contradictions between in-use records
+/// with intact fixups, reduced to the highest `lo` per `hi`, as a map
+/// `hi -> lo`.
+pub fn contradictions(records: &[&RecordFact]) -> BTreeMap<u64, u64> {
+    let usable: Vec<&RecordFact> =
+        records.iter().copied().filter(|r| r.flags & 1 == 1 && r.torn_blocks.is_empty()).collect();
+    let clusters = |r: &RecordFact| -> Vec<(u64, u64)> {
+        r.data
+            .iter()
+            .filter(|s| s.name.is_empty())
+            .chain(r.index_allocation.iter().filter(|s| s.name == "$I30"))
+            .filter_map(|s| s.non_resident.as_ref())
+            .flat_map(|x| x.runs.iter().filter_map(|run| run.lcn.map(|l| (l, l + run.len))))
+            .collect()
+    };
+    let directory = |r: &RecordFact| r.flags & 2 != 0 || r.names.iter().any(|n| n.flags & 0x1000_0000 != 0);
+    let mut out: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut note = |a: u64, b: u64| {
+        let (lo, hi) = (a.min(b), a.max(b));
+        let entry = out.entry(hi).or_insert(lo);
+        *entry = (*entry).max(lo);
+    };
+    for (i, x) in usable.iter().enumerate() {
+        let xn = x.number.expect("numbered");
+        for y in &usable[i + 1..] {
+            let yn = y.number.expect("numbered");
+            let shared = clusters(x).iter().any(|&(a0, a1)| clusters(y).iter().any(|&(b0, b1)| a0 < b1 && b0 < a1));
+            if shared {
+                note(xn, yn);
+            }
+        }
+        for (target, parent) in x.names.iter().map(|n| (n.parent, true)).chain(std::iter::once((x.base, false))) {
+            if target.number == xn || target.seq == 0 || (!parent && target == hds_testkit::ondisk::FileRef::NONE) {
+                continue;
+            }
+            if let Some(y) = usable.iter().find(|y| y.number == Some(target.number)) {
+                if y.sequence != target.seq || (parent && !directory(y)) {
+                    note(xn, target.number);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `true` when a changepoint of ALGORITHMS D2 lies in `(lo, hi]`.
+pub fn changepoint_between(records: &[&RecordFact], lo: u64, hi: u64) -> Option<u64> {
+    let timed: Vec<(u64, u64)> = records.iter().filter_map(|r| Some((r.number?, timed(r)?))).collect();
+    (lo + 1..=hi).rev().find(|&p| {
+        let below: Vec<u64> = timed.iter().filter(|t| t.0 < p).map(|t| t.1).collect();
+        let above: Vec<u64> = timed.iter().filter(|t| t.0 >= p).map(|t| t.1).collect();
+        !below.is_empty() && !above.is_empty() && above.iter().max() < below.iter().min()
+    })
+}
+
+/// The catalog instance whose label is `label`.
+#[track_caller]
+pub fn catalog<'a>(m: &'a Manifest, label: &str) -> &'a CatalogInstance {
+    m.catalog.iter().find(|c| c.label == label).unwrap_or_else(|| panic!("no catalog instance {label:?}: {:?}", m.catalog))
+}
+
+/// The catalog instance an entry is expected in.
+#[track_caller]
+pub fn instance_of<'a>(m: &'a Manifest, e: &Entry) -> &'a CatalogInstance {
+    m.catalog_of(e).unwrap_or_else(|| panic!("{} has no expected instance", e.path))
+}
+
+/// The value of the warning `code` in the manifest, if it is decided.
+pub fn warning(m: &Manifest, code: &str) -> Option<bool> {
+    m.warnings.iter().find(|w| w.code == code).map(|w| w.raised)
+}
+
+/// ALGORITHMS D4 (a) between two groups of old records, written for the
+/// tests: the parent references to directories and the base references
+/// from records of one group to record numbers present in the other, in
+/// both directions, without targets 5 and 11 and without references more
+/// than one scanned old record could resolve. Returns `(counted,
+/// resolving)`.
+pub fn references_between(m: &Manifest, a: &[&RecordFact], b: &[&RecordFact]) -> (usize, usize) {
+    let old: Vec<&RecordFact> = m.records.iter().filter(|r| r.expect.class == Some(RecordClass::Old)).collect();
+    let resolves = |r: &RecordFact, seq: u16| if r.flags & 1 == 1 { r.sequence == seq } else { r.sequence == seq.wrapping_add(1).max(1) };
+    let mut counted = 0;
+    let mut resolving = 0;
+    for (from, to) in [(a, b), (b, a)] {
+        for r in from {
+            let parents = r.names.iter().map(|n| (n.parent, true));
+            let base = (r.base != hds_testkit::ondisk::FileRef::NONE).then_some((r.base, false));
+            for (target, parent) in parents.chain(base) {
+                if target.number == 5 || target.number == 11 {
+                    continue;
+                }
+                let Some(t) = to.iter().find(|t| t.number == Some(target.number)) else { continue };
+                // identical copies count once
+                let candidates: Vec<u64> = old
+                    .iter()
+                    .filter(|o| o.number == Some(target.number) && resolves(o, target.seq))
+                    .map(|o| o.fnv1a64)
+                    .collect::<BTreeSet<u64>>()
+                    .into_iter()
+                    .collect();
+                if candidates.len() > 1 {
+                    continue;
+                }
+                counted += 1;
+                let directory = t.flags & 2 != 0 || t.names.iter().any(|n| n.flags & 0x1000_0000 != 0);
+                if resolves(t, target.seq) && (!parent || directory) {
+                    resolving += 1;
+                }
+            }
+        }
+    }
+    (counted, resolving)
 }

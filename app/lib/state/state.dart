@@ -10,6 +10,7 @@ export 'app_controller.dart';
 export 'browse_controller.dart';
 export 'carve_controller.dart';
 export 'catalog_controller.dart';
+export 'destination_checker.dart';
 export 'engine_controller.dart';
 export 'image_controller.dart';
 export 'job_controller.dart';

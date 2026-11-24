@@ -347,6 +347,15 @@ impl Volume {
         self.first_user_record
     }
 
+    /// Makes automatic record numbers start at `number` or later: for
+    /// records that must survive a format that rewrites the slots below it,
+    /// while lower slots stay free for the scenario. (Ignored while
+    /// `VolumeParams::reuse_records` is on, which always takes the lowest
+    /// free slot.)
+    pub fn number_from(&mut self, number: u64) {
+        self.next_record = self.next_record.max(number);
+    }
+
     /// The cluster allocator, for scenarios that place things by hand.
     pub fn allocator(&mut self) -> &mut Allocator {
         self.dirty = true;

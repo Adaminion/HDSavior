@@ -30,6 +30,9 @@ pub enum RecordRole {
     /// A copy somewhere else on the disk (shadow-copy block, old MFT
     /// cluster, …).
     StaleCopy,
+    /// An image of a record as `$LogFile` keeps it: every 512-byte block
+    /// fails its fixup check (ALGORITHMS A3 drops it).
+    LoggedImage,
 }
 
 /// What became of a structure by the time the image was finished.
@@ -205,6 +208,10 @@ pub struct RecordFact {
     pub fnv1a64: u64,
     /// State in the finished image.
     pub state: ArtifactState,
+    /// What a correct scan and catalog make of the record (class, catalog
+    /// instance, generation mark). Unlike every other field this is an
+    /// expectation, filled in when the manifest is finished.
+    pub expect: crate::manifest::RecordExpect,
 }
 
 /// One `INDX` block.
@@ -345,6 +352,7 @@ pub(crate) fn record_fact(model: &RecordModel, bytes: &[u8]) -> RecordFact {
         reparse_tag: None,
         fnv1a64: crate::hash::fnv1a64(bytes),
         state: ArtifactState::Intact,
+        expect: crate::manifest::RecordExpect::default(),
     };
     for (index, attr) in model.attrs.iter().enumerate() {
         let attr_offset = model.attr_offset(index) as u32;

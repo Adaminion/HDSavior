@@ -24,6 +24,11 @@ abstract interface class PlatformServices {
   /// Shows the folder [path] in the system's file manager. Returns whether
   /// the file manager could be started.
   Future<bool> openFolder(String path);
+
+  /// Opens the file [path] with the program the system associates with it
+  /// (the recovery report: a spreadsheet program). Returns whether that
+  /// could be started.
+  Future<bool> openFile(String path);
 }
 
 /// [PlatformServices] for the desktop systems, built on `dart:io`.
@@ -79,7 +84,14 @@ final class IoPlatformServices implements PlatformServices {
   }
 
   @override
-  Future<bool> openFolder(String path) async {
+  Future<bool> openFolder(String path) => _open(path);
+
+  @override
+  Future<bool> openFile(String path) => _open(path);
+
+  /// Explorer and `xdg-open` both show a folder and open a file with its
+  /// program.
+  Future<bool> _open(String path) async {
     try {
       // The path is one argument of its own; no shell is involved.
       if (_isWindows) {

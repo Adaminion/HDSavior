@@ -2,8 +2,8 @@
 //! copies, cycles, files that are not what their runlist says.
 
 use crate::disk::{Built, Disk};
-use crate::facts::{ArtifactState, BootFact};
-use crate::manifest::{Flag, InstanceKind, Presence};
+use crate::facts::{ArtifactState, BootFact, RecordRole};
+use crate::manifest::{InstanceKind, Presence};
 use crate::ondisk::attr::reparse_tag;
 use crate::ondisk::boot::{encode_boot_sector, BootParams};
 use crate::ondisk::record::{blank_model, BlankForm, ATTR_COMPRESSED};
@@ -12,7 +12,7 @@ use crate::ondisk::FileRef;
 use crate::populate::{populate, TreeSpec};
 use crate::rng::derive;
 use crate::time;
-use crate::volume::params::{BlankSlots, Flavor, ListForm, VolumeParams};
+use crate::volume::params::{BlankSlots, Flavor, ListForm, MftFragment, VolumeParams};
 use crate::volume::spec::{DirSpec, FileSpec, MultiSpec, Quirks, Times};
 
 use super::{finish_formatted, old_volume, reformat, stage, stage_with, MIB};
@@ -20,7 +20,8 @@ use super::{finish_formatted, old_volume, reformat, stage, stage_with, MIB};
 /// Records whose multi-sector write was interrupted.
 ///
 /// **Tests `apply_fixups` (a mismatch is reported, parsing continues),
-/// ALGORITHMS A4 (fixup status), G1 `torn_record`, G3 (`uncertain`).**
+/// ALGORITHMS A3 (a record in which every block fails the fixup check is
+/// dropped), A4 (fixup status), G1 `torn_record`, G3 (`uncertain`).**
 /// Below `Test`: a file whose second 512-byte block still ends in the
 /// previous update sequence number (its attributes all lie in the first
 /// block and are unharmed); a file with 600 bytes of resident data that
@@ -30,16 +31,17 @@ use super::{finish_formatted, old_volume, reformat, stage, stage_with, MIB};
 /// a real torn write looks like when both versions of the sector agree
 /// otherwise: the files' contents are intact, but nothing vouches for it.
 /// (Block 0 holds the update sequence array itself; no interrupted write
-/// can make it disagree with its own sector.)
+/// can make it disagree with its own sector.) In free space lies an image
+/// of `intact.dat`'s record in which *every* block fails the check, as
+/// Windows logs whole records into `$LogFile`: it is dropped at scan time.
 pub fn torn_records(seed: u64) -> Built {
-    let (mut disk, old, test) = stage("torn_records", seed, "FILE records with broken fixups.", &["A4", "G1", "G3"]);
+    let (mut disk, old, test) = stage("torn_records", seed, "FILE records with broken fixups.", &["A3", "A4", "G1", "G3"]);
     let v = disk.volume(old);
     let cs = v.cluster_size();
     let torn = |blocks: Vec<usize>| Quirks { torn_blocks: blocks, ..Quirks::default() };
     v.add_file(test, "second-block-torn.bin", FileSpec::tagged(derive(seed, "a"), 40_000).quirks(torn(vec![1])));
     v.add_file(test, "resident-torn.txt", FileSpec::tagged(derive(seed, "b"), 600).resident().quirks(torn(vec![1])));
-    let mut quirks = Quirks::default();
-    quirks.torn_extension_blocks = vec![(1, vec![1])];
+    let quirks = Quirks { torn_extension_blocks: vec![(1, vec![1])], ..Quirks::default() };
     v.add_file(
         test,
         "extension-torn.bin",
@@ -50,7 +52,14 @@ pub fn torn_records(seed: u64) -> Built {
     );
     let dir = v.mkdir_with(test, "Torn folder", DirSpec::new().quirks(torn(vec![1])));
     v.add_tagged(dir, "inside.dat", 900);
-    v.add_tagged(test, "intact.dat", 900);
+    let intact = v.add_tagged(test, "intact.dat", 900);
+    // the image $LogFile keeps of intact.dat's record: no block passes its
+    // fixup check (A3: dropped, it must never compete with the record)
+    let number = v.reference(intact).number;
+    let mut image = v.record_model(number);
+    image.torn_blocks = (0..(image.record_size / 512) as usize).collect();
+    let at = v.lcn_to_offset(v.total_clusters() - 1500);
+    disk.place_record(at, old, number, &image, RecordRole::LoggedImage);
     finish_formatted(disk, old)
 }
 
@@ -65,6 +74,8 @@ pub fn torn_records(seed: u64) -> Built {
 /// records survive — but none says which number it has, and the only
 /// numbered records near them belong to the current volume. They are
 /// strays: listed, rated at most `uncertain`, not arranged in a tree.
+/// Whether the old system records 0–15 among them are omitted (E9 needs
+/// their number) is left open.
 pub fn pre31_volume(seed: u64) -> Built {
     let mut disk = Disk::new("pre31_volume", seed, 96 * MIB);
     disk.describe(
@@ -76,7 +87,7 @@ pub fn pre31_volume(seed: u64) -> Built {
     params = params.mft_at(lcn, 1024);
     let (old, _) = old_volume(&mut disk, params, &TreeSpec::small());
     reformat(&mut disk, old);
-    disk.expect_kind(old, Some(InstanceKind::Strays));
+    disk.expect_kind(old, InstanceKind::Strays);
     let mut built = disk.finish();
     for entry in built.manifest.entries.iter_mut().filter(|e| e.expect.presence == Presence::Shown) {
         // without numbers no parent reference can be resolved
@@ -191,6 +202,9 @@ pub fn stale_copies(seed: u64) -> Built {
         },
     );
     assert_eq!(disk.volume_ref(old).reference(tree.folders[0]).number, 38);
+    let v = disk.volume(old);
+    let root = v.root();
+    super::add_neighbours(v, root);
     disk.render(old);
     let v = disk.volume_ref(old);
     let (low, high) = (v.record_offset(36), v.record_offset(300));
@@ -205,15 +219,18 @@ pub fn stale_copies(seed: u64) -> Built {
 /// Records that claim to be another record.
 ///
 /// **Tests ALGORITHMS D1 (the record number is a claim: fragments are
-/// grouped by `offset − number × record size`), D4 (a segment joins an
-/// instance only if their record numbers are disjoint), E9.** Three files
-/// below `Test` lie about their number:
+/// grouped by `offset − number × record size`), D4 (joining needs disjoint
+/// record numbers and never reaches below the old records at the origin
+/// of the current `$MFT`), D6, E9.** Three files below `Test` lie about
+/// their number:
 ///
 /// * `claims-5300.bin` (slot 300 claims 5300) — a one-record fragment whose
 ///   parent reference resolves in the main instance and whose number is
 ///   free there: it joins the main instance and is shown in `Test`.
-/// * `claims-5.bin` (slot 301 claims to be the root directory) — joins the
-///   same way and is then omitted like every record 0–15.
+/// * `claims-5.bin` (slot 301 claims to be the root directory) — may not
+///   join: number 5 lies below 256, the lowest old record at the current
+///   MFT's origin. It stays a stray, where E9 omits it like every record
+///   0–15.
 /// * `claims-303.bin` (slot 302 claims 303, which really exists) — cannot
 ///   join and ends up among the strays.
 ///
@@ -231,13 +248,11 @@ pub fn wrong_record_numbers(seed: u64) -> Built {
         v.add_tagged(test, format!("neighbour-{i:02}.dat").as_str(), 800);
     }
     let mut built = finish_formatted(disk, old);
-    let m = &mut built.manifest;
-    m.entry_mut("old", "Test/claims-5.bin").expect.presence = Presence::Hidden;
-    m.entry_mut("old", "Test/claims-5.bin").expect.path = None;
-    let liar = m.entry_mut("old", "Test/claims-303.bin");
-    liar.expect.path = None;
-    liar.expect.set(Flag::Stray);
-    m.notes.push("claims-5300.bin is record 5300 of the main instance; claims-303.bin is a stray; claims-5.bin is omitted as record 5.".into());
+    built.manifest.notes.push(
+        "claims-5300.bin is record 5300 of the main instance; claims-303.bin is a stray; claims-5.bin is a stray \
+         (its number lies below the old records at the current MFT's origin) and omitted as record 5."
+            .into(),
+    );
     built
 }
 
@@ -509,23 +524,28 @@ pub fn deleted_and_reused(seed: u64) -> Built {
 /// **Tests ALGORITHMS E6 (index entries: DOS namespace only as a last
 /// resort, highest LSN wins, stale blocks count; `Folder #P.s`), C4
 /// (entries of the current volume do not count), E5.** A Windows 7 volume
-/// with 8.3 aliases. Its top-level folders had records below 256; each has
-/// one file that survives. After the format:
+/// with 8.3 aliases. Its 30 top-level folders `Archive 00` … `Archive 29`
+/// had records below 256; each has one file that survives. The root's
+/// index is a B-tree: block 0 holds the Win32 names up to `Archive 24`, the
+/// separator `Archive 25` lives in the root's `$INDEX_ROOT`, block 1 holds
+/// the remaining Win32 names and every DOS alias (which sort behind). The
+/// format replaces block 0 and record 5. After it:
 ///
-/// * `Archive 00` … `Archive 21`: their Win32 index entries were in the
-///   root's first index block (destroyed); only their DOS aliases, which
-///   sort behind, survive in a later block. They come back as `ARCHIV~1` ….
-/// * `Archive 22`: its Win32 entry was the separator kept in the root's
-///   `$INDEX_ROOT` (destroyed with record 5); alias only.
-/// * `Archive 23` … `Archive 29`: Win32 and DOS entries survive: Win32.
-/// * `Archive 25` was renamed to `Renamed 25` after a copy of the index
-///   block had been left elsewhere (a shadow copy): the copy still says
-///   `Archive 25` with a lower LSN; the newer name wins.
+/// * the archives whose Win32 entry was in block 0 or was the separator
+///   come back under their surviving DOS alias (`ARCHIV~1` …);
+/// * the archives whose Win32 entry is in block 1 keep their Win32 name;
+///   their alias, which survives too, must lose;
+/// * one archive of block 1 was renamed (`Renamed NN`) after a copy of
+///   block 1 had been left elsewhere (a shadow copy): the copy still has
+///   the old name with a lower LSN, the live block the new one with a
+///   higher LSN; the newer name wins;
 /// * `AAA first life` was deleted with its file and its record reused by
 ///   `AAA second life`; both are nameless now and share a record number
-///   with different sequence numbers: `Folder #N.1` and `Folder #N.2`.
+///   with different sequence numbers: `Folder #N.1` and `Folder #N.2`;
 /// * `Inner survivor` (record 255) is named by the resident index root of
 ///   its surviving parent `Test`.
+///
+/// The scenario checks the B-tree layout it relies on while it builds.
 pub fn lost_folder_names(seed: u64) -> Built {
     let mut disk = Disk::new("lost_folder_names", seed, 96 * MIB);
     disk.describe(
@@ -558,15 +578,36 @@ pub fn lost_folder_names(seed: u64) -> Built {
     let second_life = v.mkdir_with(root, "AAA second life", DirSpec::new().record(shared));
     assert_eq!(v.reference(second_life), FileRef::new(shared, 2));
     v.add_tagged(second_life, "from the second life.dat", 4000);
+    super::add_neighbours(v, test);
     disk.render(old);
-    // a shadow copy keeps the root's second index block as it is now
+    // the Win32 names in block 1 of the root, as it is now
     let v = disk.volume_ref(old);
-    let root_blocks = v.index_runs(v.root());
+    let root = v.root();
+    let tree = &v.trees[&root.0];
+    assert!(tree.blocks.len() >= 2, "the root index needs two blocks");
+    let in_block_1: Vec<String> = tree.blocks[1]
+        .iter()
+        .filter_map(|e| crate::facts::name_fact(&e.key, 0))
+        .filter(|n| n.namespace != 2)
+        .map(|n| n.name)
+        .collect();
+    let renamed = (0..30)
+        .find(|i| in_block_1.contains(&format!("Archive {i:02}")))
+        .expect("an archive's Win32 entry lies in the second block of the root");
+    // a shadow copy keeps the root's second index block as it is now
+    let root_blocks = v.index_runs(root);
     let second_block = v.lcn_to_offset(root_blocks[1].lcn.expect("allocated"));
     let spare = v.lcn_to_offset(v.total_clusters() - 2000);
     disk.copy(second_block, spare, 4096);
-    disk.volume(old).rename(archives[25], "Renamed 25");
+    disk.volume(old).rename(archives[renamed], format!("Renamed {renamed:02}").as_str());
     disk.render(old);
+    let v = disk.volume_ref(old);
+    let block_1_now: Vec<String> = v.trees[&v.root().0].blocks[1]
+        .iter()
+        .filter_map(|e| crate::facts::name_fact(&e.key, 0))
+        .map(|n| n.name)
+        .collect();
+    assert!(block_1_now.contains(&format!("Renamed {renamed:02}")), "the new name must land in a surviving block");
     let new = disk.format(disk.reformat_params(old).flavor(Flavor::Win7));
     disk.render(new);
     disk.finish()
@@ -575,8 +616,12 @@ pub fn lost_folder_names(seed: u64) -> Built {
 /// Files that share clusters.
 ///
 /// **Tests ALGORITHMS G2 (winner by instance kind, in use over deleted,
-/// later MFT change time, higher LSN; `overlap` and `overwritten`).** Five
-/// pairs below `Test`, each pair cross-linked onto the same clusters:
+/// later MFT change time, higher LSN; `overlap` and `overwritten`) and D2
+/// (two in-use records of one fragment that map the same cluster are a
+/// contradiction).** The old MFT has two fragments of 512 records. Five
+/// pairs below `Test` are cross-linked onto the same clusters, member `a`
+/// in the first fragment and member `b` in the second, where D2 sees no
+/// contradiction between them:
 ///
 /// 1. two in-use files — the one changed later wins and gets `overlap`,
 ///    the other is `overwritten`;
@@ -588,28 +633,47 @@ pub fn lost_folder_names(seed: u64) -> Built {
 /// 5. two in-use files with the same change time and LSN — a full tie,
 ///    both get `overlap`, neither `overwritten`.
 ///
-/// The bytes on disk are those of the file written last in each pair.
+/// Pair 6 has both members in the first fragment: two in-use records that
+/// share a cluster cannot belong to one file system, no changepoint
+/// explains them, so D2 marks the higher-numbered one `older_generation`
+/// (warning `mixed_generations`) and it loses the overlap conflict
+/// although it was changed later. The bytes on disk are those of the file
+/// written last in each pair.
 pub fn overlap_conflicts(seed: u64) -> Built {
-    let (mut disk, old, test) = stage("overlap_conflicts", seed, "Pairs of files cross-linked onto the same clusters.", &["G2"]);
+    let mut params = VolumeParams::new(0, 64 * MIB).label("old");
+    let far = params.total_clusters() * 3 / 4;
+    params.mft = vec![MftFragment { lcn: None, records: 512 }, MftFragment { lcn: Some(far), records: 512 }];
+    let (mut disk, old, test) = stage_with(
+        "overlap_conflicts",
+        seed,
+        "Pairs of files cross-linked onto the same clusters, across two MFT fragments and inside one.",
+        &["G2", "D2"],
+        params,
+    );
     let v = disk.volume(old);
     let cs = v.cluster_size();
     let mft = v.mft_extents()[0];
     let base = mft.lcn + mft.clusters + 800;
     let t0 = time::ymd(2021, 6, 1);
-    let mut pair = |n: u64, later_first: bool| {
+    let mut pair = |n: u64, later_first: bool, same_fragment: bool| {
         let runs = vec![Run::at(base + 100 * n, 8)];
         let a = v.add_file(test, format!("pair{n}-a.bin").as_str(), FileSpec::tagged(derive(seed, "pa") + n, 8 * cs).runs(runs.clone()));
-        let b = v.add_file(test, format!("pair{n}-b.bin").as_str(), FileSpec::tagged(derive(seed, "pb") + n, 8 * cs).forced_runs(runs));
+        let mut b_spec = FileSpec::tagged(derive(seed, "pb") + n, 8 * cs).forced_runs(runs);
+        if !same_fragment {
+            b_spec = b_spec.record(600 + n);
+        }
+        let b = v.add_file(test, format!("pair{n}-b.bin").as_str(), b_spec);
         let (ta, tb) = if later_first { (t0 + time::HOUR, t0) } else { (t0, t0 + time::HOUR) };
         v.set_times(a, Times::all(ta));
         v.set_times(b, Times::all(tb));
         (a, b)
     };
-    pair(1, false);
-    let (deleted, _) = pair(2, false);
-    let (d1, d2) = pair(3, true);
-    let (e1, e2) = pair(4, false);
-    let (f1, f2) = pair(5, false);
+    pair(1, false, false);
+    let (deleted, _) = pair(2, false, false);
+    let (d1, d2) = pair(3, true, false);
+    let (e1, e2) = pair(4, false, false);
+    let (f1, f2) = pair(5, false, false);
+    pair(6, false, true);
     v.delete(deleted);
     v.delete(d1);
     v.delete(d2);

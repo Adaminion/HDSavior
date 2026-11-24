@@ -377,25 +377,47 @@ pub fn lost_base_with_extensions(seed: u64) -> Built {
     let mut built = finish_formatted(disk, old);
 
     // the mechanical expectation for a destroyed base is "gone"; orphan
-    // groups come back by E7
+    // groups come back by E7, in the instance of their extension records
     let m = &mut built.manifest;
-    let e = m.entry_mut("old", "Test/named.bin");
-    e.expect.presence = Presence::Shown;
-    e.expect.path = Some(vec!["Test".into(), "named.bin".into()]);
-    for flag in [Flag::MissingFragments, Flag::SizeEstimated, Flag::Deleted] {
-        e.expect.clear(flag);
-    }
-    let e = m.entry_mut("old", "Test/nameless.bin");
-    e.expect.presence = Presence::Shown;
-    e.expect.path = Some(vec!["[Orphaned files]".into(), "File #201".into()]);
-    for flag in [Flag::MissingFragments, Flag::SizeEstimated, Flag::Deleted] {
-        e.expect.clear(flag);
+    let orphan = |m: &mut crate::manifest::Manifest, path: &str, shown_at: &[&str]| {
+        let id = m.instance("old").id;
+        let at: Vec<u64> = m.entry("old", path).extension_records.iter().map(|&(_, o)| o).collect();
+        let instance = m
+            .records
+            .iter()
+            .find(|r| r.instance == id && at.contains(&r.offset) && r.expect.instance.is_some())
+            .and_then(|r| r.expect.instance)
+            .expect("the extension records belong to an instance");
+        let kind = m.catalog[instance as usize].kind;
+        let e = m.entry_mut("old", path);
+        e.expect.presence = Presence::Shown;
+        e.expect.instance = Some(instance);
+        e.expect.path = Some(shown_at.iter().map(|s| s.to_string()).collect());
+        for (flag, on) in [
+            (Flag::OlderGeneration, kind == crate::manifest::InstanceKind::Older),
+            (Flag::Embedded, false),
+            (Flag::Stray, kind == crate::manifest::InstanceKind::Strays),
+        ] {
+            if on {
+                e.expect.set(flag);
+            } else {
+                e.expect.clear(flag);
+            }
+        }
+    };
+    orphan(m, "Test/named.bin", &["Test", "named.bin"]);
+    orphan(m, "Test/nameless.bin", &["[Orphaned files]", "File #201"]);
+    orphan(m, "Test/headless.bin", &["[Orphaned files]", "File #202"]);
+    for path in ["Test/named.bin", "Test/nameless.bin"] {
+        let e = m.entry_mut("old", path);
+        for flag in [Flag::MissingFragments, Flag::SizeEstimated, Flag::Deleted] {
+            e.expect.clear(flag);
+        }
     }
     let e = m.entry_mut("old", "Test/headless.bin");
-    e.expect.presence = Presence::Shown;
-    e.expect.path = Some(vec!["[Orphaned files]".into(), "File #202".into()]);
     e.expect.set(Flag::MissingFragments);
     e.expect.set(Flag::SizeEstimated);
+    e.expect.clear(Flag::Deleted);
     m.notes.push("Expected size of Test/headless.bin: (highest mapped VCN + 1) x 4096 = 49152 bytes.".into());
     m.notes.push("Record 310 is an extension of base record 20 and must be dropped (E7).".into());
     built

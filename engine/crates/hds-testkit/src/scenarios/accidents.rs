@@ -2,7 +2,7 @@
 //! volume, file systems inside files, volumes larger than the scan.
 
 use crate::disk::{Built, Disk, VolumeId};
-use crate::manifest::{Flag, InstanceKind, InstanceRole, Presence};
+use crate::manifest::{InstanceKind, InstanceRole, Presence};
 use crate::ondisk::runlist::{total_clusters, Run};
 use crate::partition::{write_mbr, Partition};
 use crate::populate::{populate, TreeSpec};
@@ -193,7 +193,7 @@ pub fn repartitioned_other_offset(seed: u64) -> Built {
     disk.render(new);
     write_mbr(&mut disk, 512, &[Partition { offset: MIB, size: size - MIB }]);
     disk.set_scan_range(MIB, size);
-    disk.expect_kind(old, Some(InstanceKind::Main));
+    disk.expect_kind(old, InstanceKind::Main);
     disk.finish()
 }
 
@@ -371,7 +371,10 @@ fn generations(disk: &mut Disk, size: u64, files: &[usize], capacities: &[u64], 
 
 /// Two file systems before the current one on the same partition.
 ///
-/// **Tests ALGORITHMS D2 (generation cut), D3, D4, D8 (1), D9 `older`, G1
+/// **Tests ALGORITHMS D2 (a generation cut needs a changepoint and
+/// contradictions with two different stale records), D3, D4 (a kept cut
+/// forbids joining), D8 (1), D9 `older`, E6 (index entries of the older
+/// generation must not name folders of the newer one), G1
 /// `older_generation`, G2.** 2017: a volume with some 1000 records. 2020:
 /// formatted and filled again, its MFT grew to 512 records. 2023: the
 /// accidental format. Every format put the MFT at the same place, so the
@@ -379,12 +382,15 @@ fn generations(disk: &mut Disk, size: u64, files: &[usize], capacities: &[u64], 
 /// file system (the one to rescue: `main`), zeros to 511, then records
 /// 512–~1000 of the 2017 file system (`older`), with MFT change times
 /// strictly older than everything before them. The 2020 files were written
-/// over the first clusters of the 2017 files.
+/// over the first clusters of the 2017 files: dozens of in-use 2017 records
+/// map clusters that in-use 2020 records map too, which is what keeps the
+/// cut at 512. Both generations gave records 38–97 to their top-level
+/// folders, under different names.
 pub fn two_generations(seed: u64) -> Built {
     let mut disk = Disk::new("two_generations", seed, 128 * MIB);
     disk.describe(
         "Three formats on one partition (2017, 2020, 2023): the tail of the 2017 MFT survives behind the 2020 one.",
-        &["D2", "D3", "D4", "D8", "D9", "G1", "G2"],
+        &["D2", "D3", "D4", "D8", "D9", "E6", "G1", "G2"],
     );
     generations(&mut disk, 128 * MIB, &[650, 130, 0], &[1024, 512, 256], &[2017, 2020, 2023]);
     disk.finish()
@@ -392,16 +398,16 @@ pub fn two_generations(seed: u64) -> Built {
 
 /// Three file systems before the current one.
 ///
-/// **Tests ALGORITHMS D2 ("cut at every such position"), D3 (labels count
-/// boundaries).** As [`two_generations`] with one more layer: 2014 (about
-/// 1700 records, MFT of 2048), 2017 (MFT of 1024), 2020 (MFT of 512), 2023
-/// the accident. Three old segments with labels 0, 1 and 2; the two with a
-/// label above 0 are `older`.
+/// **Tests ALGORITHMS D2 (several kept cuts in one fragment), D3, D4, D9.**
+/// As [`two_generations`] with one more layer: 2014 (about 1700 records,
+/// MFT of 2048), 2017 (MFT of 1024), 2020 (MFT of 512), 2023 the accident.
+/// Kept cuts at 512 and 1024 split the fragment into three segments; the
+/// two older ones are `older` instances of their own.
 pub fn three_generations(seed: u64) -> Built {
     let mut disk = Disk::new("three_generations", seed, 160 * MIB);
     disk.describe(
         "Four formats on one partition (2014, 2017, 2020, 2023): two older generations behind the main one.",
-        &["D2", "D3", "D9"],
+        &["D2", "D3", "D4", "D9"],
     );
     generations(&mut disk, 160 * MIB, &[1300, 650, 130, 0], &[2048, 1024, 512, 256], &[2014, 2017, 2020, 2023]);
     disk.finish()
@@ -409,22 +415,25 @@ pub fn three_generations(seed: u64) -> Built {
 
 /// Two generations whose MFT change times do not separate them.
 ///
-/// **Tests ALGORITHMS D2 (no cut without strict ordering) and D4 (one
-/// segment, one instance).** As [`two_generations`], but the last 40
-/// records of the 2017 file system carry MFT change times from 2021 (a
-/// wrong clock, or files touched by a tool): newer than the 2020 records
-/// in front of them. No position has "everything above older than
-/// everything below", so there is no cut, both generations share label 0
-/// and — their record numbers being disjoint — end up in one instance.
-/// That is the documented limit of the method. The manifest therefore
-/// states only what is safe: both file systems are expected as `main`, no
-/// entry of the 2017 one has an expected path or generation flag, and
-/// nothing may be reported intact that is not (`truth` says what is).
+/// **Tests ALGORITHMS D2 (no cut without a changepoint; every contradiction
+/// is then unexplained and marks its stale record `older_generation`,
+/// warning `mixed_generations`), D4 (one segment, one instance), E5 (a
+/// marked record is never a parent).** As [`two_generations`], but the last
+/// 40 records of the 2017 file system carry MFT change times from 2021 (a
+/// wrong clock, or files touched by a tool): newer than the 2020 records in
+/// front of them, so no changepoint exists. The contradictions are there
+/// (shared clusters), but nothing explains them: the fragment stays one
+/// segment, both file systems form one `main` instance, and exactly the
+/// 2017 records that contradict a 2020 record are flagged
+/// `older_generation`. That is the documented limit of the method. The
+/// manifest states instance, kind and flags; it leaves the paths open,
+/// because where 2017 files land among 2020 folders of equal record number
+/// is an accident of the trees, not something the scenario is about.
 pub fn generations_not_separable(seed: u64) -> Built {
     let mut disk = Disk::new("generations_not_separable", seed, 128 * MIB);
     disk.describe(
         "Like two_generations, but 40 records of the 2017 file system have MFT change times from 2021: no generation cut exists.",
-        &["D2", "D4"],
+        &["D2", "D4", "E5"],
     );
     let size = 128 * MIB;
     let gen1 = disk.format(
@@ -448,18 +457,16 @@ pub fn generations_not_separable(seed: u64) -> Built {
         VolumeParams::new(0, size).label("current").formatted_at(time::ymd(2023, 5, 17)).mft_capacity(256),
     );
     disk.render(current);
-    disk.expect_kind(gen1, Some(InstanceKind::Main));
-    disk.expect_kind(gen2, Some(InstanceKind::Main));
+    disk.expect_kind(gen1, InstanceKind::Main);
+    disk.expect_kind(gen2, InstanceKind::Main);
     let mut built = disk.finish();
     for entry in built.manifest.entries.iter_mut().filter(|e| e.expect.presence == Presence::Shown) {
-        // one merged instance: parents of the two generations get mixed up
         entry.expect.path = None;
-        for flag in [Flag::OlderGeneration, Flag::Overwritten, Flag::Overlap] {
-            entry.expect.open(flag);
-        }
     }
     built.manifest.notes.push(
-        "gen1 and gen2 cannot be told apart by ALGORITHMS D2: a correct scan reports one instance holding both.".into(),
+        "gen1 and gen2 cannot be told apart by ALGORITHMS D2: a correct scan reports one instance holding both, \
+         with the contradicting 2017 records marked older_generation. Paths are left open."
+            .into(),
     );
     built
 }
@@ -467,7 +474,13 @@ pub fn generations_not_separable(seed: u64) -> Built {
 fn embedded(name: &str, seed: u64, fragments: u64) -> Built {
     // the inner disk: a plain volume image with more records than its host
     let mut inner = Disk::new("inner", derive(seed, "inner"), 24 * MIB);
-    let inner_params = VolumeParams::new(0, 24 * MIB).label("volume").volume_name("VM disk").mft_capacity(1024);
+    // the inner volume was used before the image file was copied onto the
+    // host: the container is newer than everything inside it (D7)
+    let inner_params = VolumeParams::new(0, 24 * MIB)
+        .label("volume")
+        .volume_name("VM disk")
+        .mft_capacity(1024)
+        .formatted_at(time::ymd(2020, 9, 1));
     let inner_volume = inner.format(inner_params);
     let inner_tree = TreeSpec {
         folders: 30,
@@ -482,8 +495,7 @@ fn embedded(name: &str, seed: u64, fragments: u64) -> Built {
     };
     populate(inner.volume(inner_volume), &inner_tree);
     inner.render(inner_volume);
-    let inner = inner.finish();
-    let inner_records = inner.manifest.records.len();
+    let inner_records = inner.volume_ref(inner_volume).user_nodes().len();
 
     let mut disk = Disk::new(name, seed, 128 * MIB);
     let (old, tree) = old_volume(
@@ -510,11 +522,9 @@ fn embedded(name: &str, seed: u64, fragments: u64) -> Built {
     disk.render(old);
     reformat(&mut disk, old);
     disk.note(
-        "The volume inside the image file is expected as an embedded instance (ALGORITHMS D7, ARCHITECTURE section 1): \
-         its files are shown browse-only and the image file itself is not `overwritten`. ALGORITHMS C1 read literally \
-         disagrees while the file is stored in one piece: the inner boot sector is a BootHit and an in-use record 0 \
-         named $MFT lies exactly where it points, which would make the inner volume a current volume, its records \
-         `live` and its allocated clusters part of the overwritten set.",
+        "The volume inside the image file is an embedded instance (ALGORITHMS D7): its files are shown browse-only and \
+         the image file itself is not `overwritten`. Its boot sector is not at the range start or a partition start, so \
+         it never defines a current volume (C1), even though an in-use record 0 named $MFT lies where it points.",
     );
     disk.finish()
 }
@@ -557,31 +567,42 @@ pub fn embedded_volume_fragmented(seed: u64) -> Built {
 /// The old volume was larger than what gets scanned.
 ///
 /// **Tests ALGORITHMS G1 `out_of_bounds`, H7 (runs outside the session
-/// range yield zeros and are never reported OK), F5, safety invariant S2
-/// (nothing outside the range is read).** The disk held one 160 MiB volume.
-/// It was re-partitioned: a 96 MiB partition was created and formatted at
-/// the same start, and that partition is the scan range. The old MFT (at a
-/// third of 160 MiB) is inside the range; the new MFT lies at a third of
-/// 96 MiB, somewhere else, so the old MFT survives completely, system
-/// records included. Three old files are placed by hand: one entirely
-/// behind the range, one that starts inside and ends outside, one entirely
-/// inside. The bytes behind the range are part of the image so that a test
-/// can prove they are never read.
+/// range yield zeros and are never reported OK), F5 (volume size from the
+/// files when the boot sector at the old volume's offset is the new,
+/// smaller volume's), safety invariant S2 (nothing outside the range is
+/// read; the lost-volume range is protected beyond the scanned
+/// partition).** The disk held one 160 MiB volume at 1 MiB. It was
+/// re-partitioned: partition 1 (96 MiB, same start) was formatted, and
+/// partition 2 behind it (64 MiB) holds a healthy `Data` volume that a scan
+/// of partition 1 never sees. Partition 1 is the scan range. The old MFT
+/// (at a third of 160 MiB) is inside the range; the new one lies at a third
+/// of 96 MiB, so the old MFT survives completely. Old files placed by hand:
+/// four entirely behind the range, one that starts inside and ends
+/// outside, one inside. Because more than three files end behind the
+/// range, the boot sectors of partition 1 do not decide the old volume's
+/// size: its lost-volume range reaches into partition 2, which therefore
+/// must be refused as a destination. The bytes behind the range are part
+/// of the image so that a test can prove they are never read.
 pub fn old_volume_larger_than_range(seed: u64) -> Built {
-    let size = 160 * MIB;
-    let range_end = 96 * MIB;
+    let size = 162 * MIB;
+    let first = Partition { offset: MIB, size: 96 * MIB };
+    let second = Partition { offset: 97 * MIB, size: 64 * MIB };
     let mut disk = Disk::new("old_volume_larger_than_range", seed, size);
     disk.describe(
-        "160 MiB volume; a 96 MiB partition was formatted over its start and is the scan range.",
+        "160 MiB volume; a 96 MiB partition was formatted over its start and is the scan range, a data partition behind it.",
         &["G1", "H7", "F5", "S2"],
     );
-    let old = disk.format(VolumeParams::new(0, size).label("old"));
+    let old = disk.format(VolumeParams::new(MIB, 160 * MIB).label("old"));
     let tree = populate(disk.volume(old), &TreeSpec::default());
     let v = disk.volume(old);
     let cs = v.cluster_size();
-    let boundary = range_end / cs;
+    let boundary = first.size / cs;
     let home = tree.folders[1];
-    v.add_file(home, "entirely-outside.bin", FileSpec::tagged(derive(seed, "out"), 50 * cs).runs(vec![Run::at(boundary + 1000, 50)]));
+    for (i, at) in [7000u64, 8000, 9000, 10_000].into_iter().enumerate() {
+        let name = if i == 0 { "entirely-outside.bin".to_string() } else { format!("also-outside-{i}.bin") };
+        let file = FileSpec::tagged(derive(seed, &name), 50 * cs).runs(vec![Run::at(boundary + at, 50)]);
+        v.add_file(home, name.as_str(), file);
+    }
     v.add_file(
         home,
         "straddles-the-end.bin",
@@ -589,31 +610,42 @@ pub fn old_volume_larger_than_range(seed: u64) -> Built {
     );
     v.add_file(home, "entirely-inside.bin", FileSpec::tagged(derive(seed, "in"), 30 * cs).runs(vec![Run::at(boundary - 500, 30)]));
     disk.render(old);
-    let new = disk.format(
-        VolumeParams::new(0, range_end).label("new").formatted_at(disk.volume_ref(old).clock() + time::DAY).mft_capacity(256),
-    );
+    let formatted = disk.volume_ref(old).clock() + time::DAY;
+    let new = disk.format(VolumeParams::new(first.offset, first.size).label("new").formatted_at(formatted).mft_capacity(256));
     disk.render(new);
-    disk.set_scan_range(0, range_end);
+    let data = disk.format(
+        VolumeParams::new(second.offset, second.size).label("data").volume_name("Data").formatted_at(formatted + time::HOUR),
+    );
+    let v = disk.volume(data);
+    let root = v.root();
+    let docs = v.mkdir(root, "Documents");
+    for i in 0..5u64 {
+        v.add_tagged(docs, format!("letter-{i}.dat").as_str(), 3000 + 100 * i);
+    }
+    disk.render(data);
+    write_mbr(&mut disk, 512, &[first, second]);
+    disk.set_scan_range(first.offset, first.offset + first.size);
     disk.finish()
 }
 
 /// A whole disk with two partitions: one was quick-formatted, the other
 /// was deleted and its start wiped.
 ///
-/// **Tests ALGORITHMS D9 `other`, D8 (1), F2 (partition starts), A2 (probe
-/// offsets per partition).** MBR disk. Partition 1 (1 MiB, 64 MiB) is the
+/// **Tests ALGORITHMS D9 `other`, D8 (1), F2 (partition starts), F5, A2
+/// (probe offsets per partition), S2.** MBR disk. Partition 1 (1 MiB, 64 MiB) is the
 /// usual accident: old volume, quick format. Partition 2 (65 MiB, 62 MiB)
 /// held a second volume from the same years; its partition entry is gone
 /// and its first 64 KiB (boot sector included) and its `$MFT` records 0–15
 /// were zeroed, so it is not a current volume but a second lost file
 /// system: `other`. It has three large folders, so its geometry is
-/// validated at its own volume offset.
+/// validated at its own volume offset, and its lost-volume range (F5) is
+/// protected by S2 like that of `main`.
 pub fn whole_disk_two_volumes(seed: u64) -> Built {
     let size = 128 * MIB;
     let mut disk = Disk::new("whole_disk_two_volumes", seed, size);
     disk.describe(
         "MBR disk: partition 1 quick-formatted, a second NTFS volume behind it deleted and beheaded.",
-        &["A2", "D8", "D9", "F2"],
+        &["A2", "D8", "D9", "F2", "F5", "S2"],
     );
     let first = Partition { offset: MIB, size: 64 * MIB };
     let second = Partition { offset: 65 * MIB, size: 62 * MIB };
@@ -641,6 +673,6 @@ pub fn whole_disk_two_volumes(seed: u64) -> Built {
     disk.fill(backup, 512, 0);
     write_mbr(&mut disk, 512, &[first]);
     disk.set_role(other, InstanceRole::Lost);
-    disk.expect_kind(other, Some(InstanceKind::Other));
+    disk.expect_kind(other, InstanceKind::Other);
     disk.finish()
 }

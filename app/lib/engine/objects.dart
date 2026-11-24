@@ -507,6 +507,19 @@ final class ProtectedRange {
   ProtectionReason get reason => ProtectionReason.parse(reasonName);
 
   ByteRange get range => ByteRange(start, end);
+
+  @override
+  bool operator ==(Object other) =>
+      other is ProtectedRange &&
+      other.start == start &&
+      other.end == end &&
+      other.reasonName == reasonName;
+
+  @override
+  int get hashCode => Object.hash(start, end, reasonName);
+
+  @override
+  String toString() => 'ProtectedRange($start, $end, $reasonName)';
 }
 
 /// PROTOCOL `CatalogInfo`: what the scan found. Node ids are valid for one

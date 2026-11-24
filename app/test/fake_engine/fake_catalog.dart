@@ -1,12 +1,14 @@
 /// The catalog of the fake engine: a [FakeTree] plus what changes at run
-/// time (carved nodes, geometry overrides), and the catalog queries of
-/// docs/PROTOCOL.md answered as JSON maps.
+/// time (carved nodes, geometry overrides, the user's verdicts about the file
+/// systems), and the catalog queries of docs/PROTOCOL.md answered as JSON
+/// maps.
 library;
 
 import 'dart:convert';
 
 import 'fake_content.dart';
 import 'fake_tree.dart';
+import 'fake_world.dart';
 
 /// An error response: thrown by the fake's command handlers.
 final class FakeError implements Exception {
@@ -104,18 +106,42 @@ final class _Geometry {
     required this.signatureChecked,
     required this.signatureOk,
     required this.validated,
-    required this.rangeEnd,
+    required this.volumeEnd,
   });
 
-  int clusterSize;
-  int volumeOffset;
-  String clusterSource;
-  String offsetSource;
-  int indexDirs;
-  int signatureChecked;
-  int signatureOk;
-  bool validated;
-  final int rangeEnd;
+  final int clusterSize;
+  final int volumeOffset;
+  final String clusterSource;
+  final String offsetSource;
+  final int indexDirs;
+  final int signatureChecked;
+  final int signatureOk;
+  final bool validated;
+
+  /// Where the volume ends on the source (exclusive): `volume_offset +
+  /// total_clusters * cluster_size`, clipped to the source.
+  final int volumeEnd;
+
+  int get totalClusters => volumeEnd > volumeOffset ? (volumeEnd - volumeOffset) ~/ clusterSize : 0;
+
+  /// The lost-volume range of docs/ALGORITHMS.md, F5.
+  (int, int) get range => (volumeOffset, volumeOffset + totalClusters * clusterSize);
+
+  bool sameValues(int clusterSize, int volumeOffset) =>
+      this.clusterSize == clusterSize && this.volumeOffset == volumeOffset;
+
+  /// This geometry as another instance inherits it (docs/ALGORITHMS.md, F4).
+  _Geometry inherited() => _Geometry(
+    clusterSize: clusterSize,
+    volumeOffset: volumeOffset,
+    clusterSource: clusterSource,
+    offsetSource: 'inherited',
+    indexDirs: 0,
+    signatureChecked: 0,
+    signatureOk: 0,
+    validated: false,
+    volumeEnd: volumeEnd,
+  );
 
   Map<String, Object?> toJson() => {
     'cluster_size': clusterSize,
@@ -127,20 +153,8 @@ final class _Geometry {
     'signature_checked': signatureChecked,
     'signature_ok': signatureOk,
     'validated': validated,
-    'total_clusters': rangeEnd > volumeOffset ? (rangeEnd - volumeOffset) ~/ clusterSize : 0,
+    'total_clusters': totalClusters,
   };
-
-  _Geometry copy() => _Geometry(
-    clusterSize: clusterSize,
-    volumeOffset: volumeOffset,
-    clusterSource: clusterSource,
-    offsetSource: offsetSource,
-    indexDirs: indexDirs,
-    signatureChecked: signatureChecked,
-    signatureOk: signatureOk,
-    validated: validated,
-    rangeEnd: rangeEnd,
-  );
 }
 
 final class _InstanceStats {
@@ -171,6 +185,7 @@ final class FakeCatalog {
     required this.epoch,
     required this.rangeStart,
     required this.rangeEnd,
+    required this.sourceSize,
     required this.scannedBytes,
     required this.collectCarveHits,
     this.sourceAttached = true,
@@ -178,23 +193,11 @@ final class FakeCatalog {
   }) : warnings = List.of(warnings) {
     _nextDynId = tree.count;
     for (final instance in tree.instances) {
-      final main = instance.kind == 'main';
-      final own = main || instance.kind == 'other';
-      final best = _Geometry(
-        clusterSize: 4096,
-        volumeOffset: instance.kind == 'other' ? rangeStart + 104857600 : rangeStart,
-        clusterSource: own ? 'attr' : 'default',
-        offsetSource: main ? 'index' : (own ? 'boot' : 'inherited'),
-        indexDirs: main ? 310 : (own ? 12 : 0),
-        signatureChecked: own ? 200 : 0,
-        signatureOk: own ? 197 : 0,
-        validated: own,
-        rangeEnd: rangeEnd,
-      );
-      _geometry.add(best);
+      final own = _ownGeometry(instance);
+      _own.add(own);
       _candidates.add([
-        best.copy(),
-        if (main)
+        own,
+        if (instance.kind == 'main')
           _Geometry(
             clusterSize: 4096,
             volumeOffset: rangeStart + 32256,
@@ -204,12 +207,20 @@ final class FakeCatalog {
             signatureChecked: 200,
             signatureOk: 3,
             validated: false,
-            rangeEnd: rangeEnd,
+            volumeEnd: own.volumeEnd,
           ),
       ]);
+      _manual.add(null);
     }
+    _applyKinds();
     _computeStats();
   }
+
+  /// How far the lost main file system reaches beyond the end of the scanned
+  /// range, where the source has room: an old volume that was larger than the
+  /// partition it was scanned as (re-partitioned disk). A destination on a
+  /// partition behind the scanned one then overlaps a `lost_volume` range.
+  static const int mainVolumeReach = 64 * 1024 * 1024 * 1024;
 
   final FakeTree tree;
 
@@ -217,14 +228,38 @@ final class FakeCatalog {
   int epoch;
   final int rangeStart;
   final int rangeEnd;
+
+  /// Size of the source in bytes (lost volumes are clipped to it).
+  final int sourceSize;
   final int scannedBytes;
   final bool collectCarveHits;
   bool sourceAttached;
   final List<Map<String, Object?>> warnings;
 
-  final List<_Geometry> _geometry = [];
+  /// What the evidence of each instance says (its own geometry), the best
+  /// candidates, and the user's `geometry_set` overrides.
+  final List<_Geometry> _own = [];
   final List<List<_Geometry>> _candidates = [];
+  final List<_Geometry?> _manual = [];
   final List<_InstanceStats> _stats = [];
+
+  /// The user's verdicts (`instance_set`): instance -> `main` or `other`.
+  ///
+  /// Inside the fake an instance is known by its index in
+  /// `FakeTree.instances` for good. On the wire `Instance.id` is its position
+  /// in `CatalogInfo.instances` (the main one is 0), which changes when the
+  /// user chooses another main instance: the protocol does not promise that
+  /// instance ids survive `instance_set` (it starts a new epoch), so a client
+  /// must take them from the current catalog, and the fake makes sure it
+  /// does.
+  final Map<int, String> _overrides = {};
+
+  /// Current kind, label and container of each instance (by index), after
+  /// the overrides.
+  late List<String> _kinds;
+  late List<String> _labels;
+  late List<String?> _embeddedIn;
+  int _mainId = 0;
 
   final Map<int, _DynNode> _dyn = {};
   int _nextDynId = 0;
@@ -240,12 +275,208 @@ final class FakeCatalog {
 
   int get carveHits => collectCarveHits ? 48213 * scannedBytes ~/ (rangeEnd - rangeStart) : 0;
 
-  int get mainRoot => tree.instances.first.root;
+  /// The root of the main instance.
+  int get mainRoot => tree.instances[_mainId].root;
 
   /// The node id of `[Carved files]`, `null` before carving found anything.
   int? get carvedRoot => _carvedRoot;
 
   int get carvedFiles => _carvedFiles;
+
+  // --- file systems --------------------------------------------------------
+
+  /// What the evidence of [instance] alone says about its geometry.
+  _Geometry _ownGeometry(FakeInstance instance) => switch (instance.kind) {
+    'main' => _Geometry(
+      clusterSize: 4096,
+      volumeOffset: rangeStart,
+      clusterSource: 'attr',
+      offsetSource: 'index',
+      indexDirs: 310,
+      signatureChecked: 200,
+      signatureOk: 197,
+      validated: true,
+      volumeEnd: _clip(rangeEnd + mainVolumeReach),
+    ),
+    'other' => _Geometry(
+      clusterSize: 4096,
+      volumeOffset: rangeStart + 104857600,
+      clusterSource: 'attr',
+      offsetSource: 'boot',
+      indexDirs: 12,
+      signatureChecked: 200,
+      signatureOk: 197,
+      validated: true,
+      volumeEnd: rangeEnd,
+    ),
+    // An older file system on the same partition: its own records place it
+    // well, but most of its clusters have been reused since.
+    'older' => _Geometry(
+      clusterSize: 4096,
+      volumeOffset: rangeStart,
+      clusterSource: 'attr',
+      offsetSource: 'boot',
+      indexDirs: 4,
+      signatureChecked: 120,
+      signatureOk: 102,
+      validated: true,
+      volumeEnd: rangeEnd,
+    ),
+    // The clusters of a file system inside a disk-image file are offsets in
+    // that file, not on the source: read directly they rarely match.
+    _ => _Geometry(
+      clusterSize: 4096,
+      volumeOffset: rangeStart + 209715200,
+      clusterSource: 'attr',
+      offsetSource: 'default',
+      indexDirs: 0,
+      signatureChecked: 40,
+      signatureOk: 9,
+      validated: false,
+      volumeEnd: rangeEnd,
+    ),
+  };
+
+  int _clip(int offset) => offset > sourceSize ? sourceSize : offset;
+
+  /// The geometry instance [id] is read with: the user's choice, its own
+  /// when it is a volume of its own (`main`, `other`), else the main
+  /// instance's (docs/ALGORITHMS.md, F4).
+  _Geometry _geometryOf(int id) {
+    final manual = _manual[id];
+    if (manual != null) return manual;
+    final kind = _kinds[id];
+    if (kind == 'main' || kind == 'other') return _own[id];
+    return _geometryOf(_mainId).inherited();
+  }
+
+  static int _kindFlag(String kind) => switch (kind) {
+    'older' => fOlderGeneration,
+    'embedded' => fEmbedded,
+    'strays' => fStray,
+    _ => 0,
+  };
+
+  /// Computes kinds, labels and containers from the engine's verdict and
+  /// the user's overrides.
+  void _applyKinds() {
+    final kinds = [for (final instance in tree.instances) instance.kind];
+    final engineMain = kinds.indexOf('main');
+    _overrides.forEach((id, kind) {
+      if (kind == 'other') kinds[id] = 'other';
+    });
+    for (final MapEntry(key: id, value: kind) in _overrides.entries) {
+      if (kind != 'main') continue;
+      if (engineMain != id && kinds[engineMain] == 'main') kinds[engineMain] = 'other';
+      kinds[id] = 'main';
+    }
+    _kinds = kinds;
+    _mainId = kinds.indexOf('main');
+    _labels = [
+      for (final instance in tree.instances)
+        if (kinds[instance.id] == 'main')
+          ''
+        else if (kinds[instance.id] == instance.kind)
+          instance.label
+        else
+          // A file system that became a volume of its own by the user's word.
+          '[File system ${instance.id + 3}]',
+    ];
+    _embeddedIn = [
+      for (final instance in tree.instances) kinds[instance.id] == 'embedded' ? instance.embeddedIn : null,
+    ];
+  }
+
+  /// The index of the instance whose `Instance.id` is [wireId]; `not_found`
+  /// if there is none.
+  int _index(int wireId) {
+    final order = _instanceOrder();
+    if (wireId < 0 || wireId >= order.length) {
+      throw FakeError('not_found', 'instance $wireId does not exist');
+    }
+    return order[wireId];
+  }
+
+  /// `Instance.id` of the instance with [index].
+  int _wireId(int index) => _instanceOrder().indexOf(index);
+
+  /// `instance_set`: the user overrules the engine's verdict about the
+  /// instance with `Instance.id` [wireId]. The caller gives the catalog a new
+  /// epoch. Carved nodes are discarded.
+  void setInstanceKind(int wireId, String kind) {
+    final id = _index(wireId);
+    if (!const ['main', 'other', 'auto'].contains(kind)) {
+      throw FakeError('bad_request', '"kind" must be "main", "other" or "auto"');
+    }
+    if (tree.instances[id].kind == 'strays') {
+      throw FakeError('bad_request', 'The stray records are no file system of their own and cannot be changed.');
+    }
+    // "other turns an embedded or older instance into a volume of its own."
+    final verdict = tree.instances[id].kind;
+    if (kind == 'other' && verdict != 'embedded' && verdict != 'older') {
+      throw FakeError(
+        'bad_request',
+        verdict == 'main'
+            ? 'Choose the file system that should be the main one instead.'
+            : 'This file system is a volume of its own already.',
+      );
+    }
+    switch (kind) {
+      case 'auto':
+        _overrides.remove(id);
+      case 'main':
+        _overrides.removeWhere((_, k) => k == 'main');
+        _overrides[id] = 'main';
+      default:
+        _overrides[id] = 'other';
+    }
+    _applyKinds();
+    _discardAllCarved();
+    _generation++;
+  }
+
+  /// PROTOCOL `CatalogInfo.protected`: the session range, then the
+  /// lost-volume range of every `main` and `other` instance with validated
+  /// geometry (docs/ALGORITHMS.md, F5), clipped to the source.
+  List<FakeProtectedRange> protectedRanges() => [
+    FakeProtectedRange(rangeStart, rangeEnd, 'session_range'),
+    for (final id in _instanceOrder())
+      if ((_kinds[id] == 'main' || _kinds[id] == 'other') && _geometryOf(id).validated)
+        FakeProtectedRange(
+          _geometryOf(id).range.$1,
+          _clip(_geometryOf(id).range.$2),
+          'lost_volume',
+          main: id == _mainId,
+        ),
+  ];
+
+  /// The catalog files, and their bytes, stored in the absolute byte range
+  /// `[start, end)`: for every volume of its own, its share of the files in
+  /// proportion to how much of its lost-volume range the range covers.
+  (int, int) filesIn(int start, int end) {
+    var files = 0;
+    var bytes = 0;
+    for (final instance in tree.instances) {
+      final kind = _kinds[instance.id];
+      if (kind != 'main' && kind != 'other') continue;
+      final (from, to) = _geometryOf(instance.id).range;
+      final overlap = (end < to ? end : to) - (start > from ? start : from);
+      if (overlap <= 0 || to <= from) continue;
+      final share = overlap / (to - from);
+      final stats = _stats[instance.id];
+      files += ((stats.files + stats.deletedFiles) * share).round();
+      bytes += (stats.bytes * share).round();
+    }
+    return (files, bytes);
+  }
+
+  /// Instance ids in the order of `CatalogInfo.instances`: the main one
+  /// first, then the others by id.
+  List<int> _instanceOrder() => [
+    _mainId,
+    for (final instance in tree.instances)
+      if (instance.id != _mainId) instance.id,
+  ];
 
   // --- node access (generated and run-time nodes alike) --------------------
 
@@ -269,16 +500,34 @@ final class FakeCatalog {
 
   int _parent(int id) => id < tree.count ? tree.parent[id] : _dyn[id]!.parent;
 
-  String _name(int id) => id < tree.count ? tree.nameOf(id) : _dyn[id]!.name;
+  String _name(int id) {
+    if (id >= tree.count) return _dyn[id]!.name;
+    // An instance root is named after its instance's current label.
+    if (tree.parent[id] < 0) return _labels[tree.instanceOf[id]];
+    return tree.nameOf(id);
+  }
 
   String _ext(int id) =>
       id < tree.count ? (_isFolder(id) ? '' : fakeExts[tree.ext[id]]) : _dyn[id]!.ext;
 
-  int _flags(int id) => id < tree.count ? tree.flags[id] : _dyn[id]!.flags;
+  /// The flags of node [id]. The flags that follow from an instance's kind
+  /// (`older_generation`, `embedded`, `stray`) change with the user's
+  /// verdicts: a file of an older file system that the user made a volume of
+  /// its own is no longer `older_generation`.
+  int _flags(int id) {
+    if (id >= tree.count) return _dyn[id]!.flags;
+    final flags = tree.flags[id];
+    final instance = tree.instanceOf[id];
+    final generated = tree.instances[instance].kind;
+    final current = _kinds[instance];
+    if (generated == current) return flags;
+    return flags & ~_kindFlag(generated) | _kindFlag(current);
+  }
 
   bool _deleted(int id) => _flags(id) & fDeleted != 0;
 
-  int _instance(int id) => id < tree.count ? tree.instanceOf[id] : 0;
+  /// Carved nodes belong to the main instance.
+  int _instance(int id) => id < tree.count ? tree.instanceOf[id] : _mainId;
 
   int? _modified(int id) {
     if (id >= tree.count) return null;
@@ -326,13 +575,13 @@ final class FakeCatalog {
       final node = _dyn[id]!;
       return fakeRating(
         node.flags,
-        geometryValidated: _geometry[0].validated,
+        geometryValidated: _geometryOf(_mainId).validated,
         carvedUnverified: !node.endVerified,
       );
     }
     return fakeRating(
-      tree.flags[id],
-      geometryValidated: _geometry[tree.instanceOf[id]].validated,
+      _flags(id),
+      geometryValidated: _geometryOf(tree.instanceOf[id]).validated,
     );
   }
 
@@ -440,33 +689,35 @@ final class FakeCatalog {
     }
   }
 
-  /// PROTOCOL `CatalogInfo`.
-  Map<String, Object?> info() => {
+  /// PROTOCOL `CatalogInfo`. [sessionFileAtRisk]: the engine found the
+  /// session file inside a protected range (docs/ALGORITHMS.md, B3).
+  Map<String, Object?> info({bool sessionFileAtRisk = false}) => {
     'epoch': epoch,
     'instances': [
-      for (final instance in tree.instances)
+      for (final (position, id) in _instanceOrder().indexed)
         {
-          'id': instance.id,
-          'kind': instance.kind,
-          'label': instance.label,
-          'root': instance.root,
-          'records': _stats[instance.id].records,
-          'files': _stats[instance.id].files,
-          'dirs': _stats[instance.id].dirs,
-          'deleted_files': _stats[instance.id].deletedFiles,
-          'lost_dirs': _stats[instance.id].lostDirs,
-          'bytes': _stats[instance.id].bytes,
-          'time_from': _stats[instance.id].timeFrom,
-          'time_to': _stats[instance.id].timeTo,
-          'embedded_in': instance.embeddedIn,
-          'geometry': _geometry[instance.id].toJson(),
+          'id': position,
+          'kind': _kinds[id],
+          'manual': _overrides.containsKey(id),
+          'label': _labels[id],
+          'root': tree.instances[id].root,
+          'records': _stats[id].records,
+          'files': _stats[id].files,
+          'dirs': _stats[id].dirs,
+          'deleted_files': _stats[id].deletedFiles,
+          'lost_dirs': _stats[id].lostDirs,
+          'bytes': _stats[id].bytes,
+          'time_from': _stats[id].timeFrom,
+          'time_to': _stats[id].timeTo,
+          'embedded_in': _embeddedIn[id],
+          'geometry': _geometryOf(id).toJson(),
           'geometry_candidates': [
-            for (final candidate in _candidates[instance.id]) candidate.toJson(),
+            for (final candidate in _candidates[id]) candidate.toJson(),
           ],
           'virtual': {
-            'lost': instance.lost,
-            'orphans': instance.orphans,
-            'carved': instance.id == 0 ? _carvedRoot : null,
+            'lost': tree.instances[id].lost,
+            'orphans': tree.instances[id].orphans,
+            'carved': id == _mainId ? _carvedRoot : null,
           },
         },
     ],
@@ -482,6 +733,7 @@ final class FakeCatalog {
       },
     ],
     'range': {'start': rangeStart, 'end': rangeEnd},
+    'protected': [for (final range in protectedRanges()) range.toJson()],
     'scanned_bytes': scannedBytes,
     'scan_complete': scanComplete,
     'bad_bytes': 0,
@@ -501,6 +753,13 @@ final class FakeCatalog {
         'code': 'out_of_range_files',
         'message': '2 files have data outside the scanned area. Scan the whole disk to reach them.',
       },
+      if (sessionFileAtRisk)
+        {
+          'code': 'session_file_at_risk',
+          'message':
+              'The session file lies inside the lost file system. HDSavior no longer writes to it: '
+              'save the session somewhere else.',
+        },
     ],
   };
 
@@ -696,7 +955,7 @@ final class FakeCatalog {
     final folder = _isFolder(node);
     final k = _kind(node);
     final h = mix64(node * 0x9E3779B97F4A7C15 + 99) & 0x7fffffffffffffff;
-    final geometry = _geometry[_instance(node)];
+    final geometry = _geometryOf(_instance(node));
     final size = _size(node);
     final resident = !folder && size > 0 && size <= 700;
     final lcn = 4 + h % 200000000;
@@ -708,7 +967,7 @@ final class FakeCatalog {
         for (final a in _ancestors(node)) {'id': a, 'name': _name(a)},
       ],
       'path': _path(node),
-      'instance': _instance(node),
+      'instance': _wireId(_instance(node)),
       'accessed': modified == null ? null : modified + 86400000,
       'other_names': [
         if (!folder && h % 50 == 0) 'Copy of ${_name(node)}',
@@ -910,11 +1169,20 @@ final class FakeCatalog {
     return (found, bytesFound);
   }
 
-  /// Checks the arguments of `geometry_set`.
-  void checkGeometry({required int instance, required int clusterSize, required int volumeOffset, required int sourceSize}) {
-    if (instance < 0 || instance >= _geometry.length) {
-      throw FakeError('not_found', 'instance $instance does not exist');
+  /// Discards every carved node, `[Carved files]` included.
+  void _discardAllCarved() {
+    _discardCarved((_) => true);
+    final root = _carvedRoot;
+    if (root != null) {
+      _dyn[root]!.removed = true;
+      _carvedRoot = null;
     }
+  }
+
+  /// Checks the arguments of `geometry_set` ([instance] is an
+  /// `Instance.id`).
+  void checkGeometry({required int instance, required int clusterSize, required int volumeOffset}) {
+    _index(instance);
     final powerOfTwo = clusterSize > 0 && clusterSize & (clusterSize - 1) == 0;
     if (!powerOfTwo || clusterSize < 512 || clusterSize > 2097152) {
       throw FakeError('bad_request', 'cluster_size must be a power of two from 512 to 2 MiB');
@@ -925,35 +1193,26 @@ final class FakeCatalog {
   }
 
   /// `geometry_set` (arguments already checked with [checkGeometry]). The
-  /// tree and the epoch stay; ratings are recomputed; carved nodes are
-  /// discarded when the main instance changes.
+  /// tree and the epoch stay; ratings and the protected ranges are
+  /// recomputed; carved nodes are discarded when the geometry of the main
+  /// instance changes. A pair equal to a candidate selects that candidate.
   void setGeometry({required int instance, required int clusterSize, required int volumeOffset}) {
-    final candidate = _candidates[instance].where(
-      (c) => c.clusterSize == clusterSize && c.volumeOffset == volumeOffset,
-    );
-    if (candidate.isNotEmpty) {
-      _geometry[instance] = candidate.first.copy();
-    } else {
-      _geometry[instance] = _Geometry(
-        clusterSize: clusterSize,
-        volumeOffset: volumeOffset,
-        clusterSource: 'manual',
-        offsetSource: 'manual',
-        indexDirs: 0,
-        signatureChecked: 200,
-        signatureOk: 1,
-        validated: false,
-        rangeEnd: rangeEnd,
-      );
-    }
-    if (instance == 0) {
-      _discardCarved((_) => true);
-      final root = _carvedRoot;
-      if (root != null) {
-        _dyn[root]!.removed = true;
-        _carvedRoot = null;
-      }
-    }
+    final id = _index(instance);
+    final candidates = _candidates[id].where((c) => c.sameValues(clusterSize, volumeOffset));
+    _manual[id] = candidates.isNotEmpty
+        ? candidates.first
+        : _Geometry(
+            clusterSize: clusterSize,
+            volumeOffset: volumeOffset,
+            clusterSource: 'manual',
+            offsetSource: 'manual',
+            indexDirs: 0,
+            signatureChecked: 200,
+            signatureOk: 1,
+            validated: false,
+            volumeEnd: rangeEnd > volumeOffset ? rangeEnd : _clip(volumeOffset + clusterSize),
+          );
+    if (id == _mainId) _discardAllCarved();
     _generation++;
   }
 }

@@ -49,7 +49,7 @@ class AppController {
     scan = ScanController(api, catalog, source, tracker: jobs);
     recover = RecoverController(api, catalog, source, tracker: jobs);
     carve = CarveController(api, catalog, source, tracker: jobs);
-    image = ImageController(api, source, tracker: jobs);
+    image = ImageController(api, source, catalog, tracker: jobs);
 
     _subscriptions = [
       client.on<TaskProgress>().listen((event) => task.value = event),
