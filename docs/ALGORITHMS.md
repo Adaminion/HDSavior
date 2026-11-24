@@ -145,7 +145,9 @@ now (normally: the result of the accidental format).
 
 **C1. Discovery.** A current volume is one the operating system can reach
 now. Candidates: a valid NTFS boot sector at the range start and at each
-partition start inside the range (partition table as read from the source). A
+partition start inside the range (partition table as read from the source; a
+partition session reads nothing outside its range, so only its start is a
+candidate there). A
 candidate is a current volume when the record at `offset + mft_lcn ×
 cluster_size` parses as an in-use `FILE` record 0 named `$MFT`. A boot sector
 found anywhere else never defines a current volume, however intact the file
@@ -237,7 +239,13 @@ a time boundary **and** a contradiction. Within one fragment:
   highest-numbered partner `lo` is kept.
 - *Choosing cuts.* Take the contradictions by ascending `hi`. If no cut chosen
   so far lies in `(lo, hi]`, choose the highest changepoint in that interval;
-  if there is none, the contradiction is *unexplained*.
+  if there is none, the record number `p` in `(lo, hi]` that leaves the fewest
+  timed records of the fragment out of order for the best time `T` (numbered
+  below `p` and not newer than `T`, or numbered `p` or above and newer than
+  `T`), the highest such `p` on ties, provided at most a quarter of the
+  fragment's timed records are out of order (one session under a wrong clock
+  must not hide a generation boundary); otherwise the contradiction is
+  *unexplained*.
 - A chosen cut is *kept* when it lies in the intervals of contradictions with
   at least 2 different `hi` records; otherwise it is dropped and those
   contradictions are unexplained.
@@ -251,7 +259,8 @@ kept cut is one segment.
 
 **D3. Boundary times.** For a kept cut `c`: `B_c` = the newest change time
 among the timed records of the segment directly above it (the older side),
-`A_c` = the oldest among those of the segment directly below (`B_c < A_c`;
+`A_c` = the oldest among those of the segment directly below that are newer
+than `B_c` (for a cut at a changepoint that is all of them, and `B_c < A_c`:
 the format happened in between). A segment `X` of another fragment is
 *before* `c` when its newest time ≤ `B_c`; *after* `c` when its oldest time
 > `B_c` and its newest time ≥ `A_c`; otherwise *undecided* (also when it has
@@ -273,7 +282,13 @@ Evidence:
   signature their extension promises.
 - (c) *MFT map.* One side holds a record 0 named `$MFT` whose extents place at
   least 16 records of the other side exactly where they were found, with one
-  volume offset.
+  volume offset, and that offset is the one at which this record 0 itself lies:
+  as the first record of its `$MFT`, or as the first record of the `$MFTMirr`
+  that the same side's record 1 describes; and the initialized size of this
+  `$MFT:$DATA` covers every record number of the other side. (The first `$MFT`
+  extent of every volume formatted by the same tool starts at the same cluster,
+  so a record 0 of any other volume places this volume's records too; one that
+  held fewer records cannot describe them.)
 - (d) *Same geometry.* Both sides have a validated geometry of their own and
   the two are equal.
 
@@ -282,8 +297,8 @@ Forbidden when any of these holds:
 - their sets of record numbers intersect;
 - a kept cut separates them: one holds the segment below `c` and the other the
   segment above it, or one holds the segment below `c` and the other is not
-  *after* `c`, or one holds the segment above `c` and the other is not
-  *before* `c` (D3);
+  *after* `c`, or one holds the segment above `c` and the other is *after* `c`
+  (D3);
 - one holds old records at the origin of a current volume's `$MFT` and the
   other holds a record number below the lowest of those — the format
   overwrote these slots of that file system, so whatever shows them elsewhere
@@ -300,15 +315,17 @@ until no pair qualifies. An instance without evidence stays on its own.
 
 **D5. Order of work.** (1) fragments, cuts, segments; (2) joining by evidence
 (a) and (c) until nothing changes; (3) geometry (F) of every instance with at
-least 16 records; (4) the embedded test (D7), then joining by (b) and (d),
+least 16 records and of the anchor (D8); (4) the embedded test (D7), then joining by (b) and (d),
 recomputing the geometry of merged instances, until nothing changes; (5)
 copies and strays (D6), main (D8), kinds (D9); (6) trees (E) and health (G).
 
-**D6. Strays and copies.** Instances with fewer than 16 records, and *copy
-sets*, are merged into one pseudo-instance `strays`. A copy set is an
-instance, other than the anchor (D8), at least 90 % of whose records repeat
-the number and sequence of a record of a larger instance (shadow-copy storage,
-an MFT that was moved). Inside `strays` no record is a parent target: its
+**D6. Strays and copies.** Instances with fewer than 16 records other than
+the anchor (D8), and *copy sets*, are merged into one pseudo-instance
+`strays`. A copy set is an instance, other than the anchor, at least 90 % of
+whose records repeat the number, the sequence and the `$STANDARD_INFORMATION`
+creation time (for an extension record: the base reference) of a record of a
+larger instance (shadow-copy storage, an MFT that was moved). Number and
+sequence alone are not enough: most records of every volume have sequence 1. Inside `strays` no record is a parent target: its
 files are grouped into lost folders by their parent reference, listed under
 the strays root and rated at most `uncertain`. Stray directory records can
 name lost folders of other instances (E6).
@@ -317,9 +334,13 @@ name lost folders of other instances (E6).
 `Y` has a validated geometry, at least 90 % of `X`'s records lie inside data
 extents of in-use non-directory files of `Y`, and the file that holds most of
 them (the *container*) has an MFT-change time not more than a day older than
-`X`'s newest change time. If only the last condition fails, the container is
-a stale file whose clusters `X`'s file system has reused: the file gets
-`overwritten` and `X` is not embedded. The anchor (D8) is never embedded. An
+the oldest change time of `X`'s records inside it. If only the last condition
+fails, or if `X` is a volume of the disk itself — its validated geometry puts
+its volume at the range start or at a partition start, and fewer than 90 % of
+its records repeat records of another instance as D6 compares them — the
+container is a stale file whose clusters `X`'s file system has reused: the
+file gets `overwritten` and `X` is not embedded. The anchor (D8) is never
+embedded. An
 embedded instance is labelled with the container's name; its files are
 browse-only (flag `embedded`, rating `unsupported`): the way to them is to
 recover the container and open it as a disk image. The user can overrule the
@@ -328,12 +349,19 @@ label (`instance_set`).
 **D8. Main instance.** The *anchor* is the instance that holds old records at
 the origin of a current volume's `$MFT`; when cuts split that fragment, the
 one holding its segment 0. Among instances that are neither embedded nor
-strays, `main` is the first that exists in this order: (1) an anchor (the one
-with most records if there are several current volumes); (2) an instance with
+strays, `main` is the first that exists in this order: (1) an anchor (if there
+are several, one of the current volume with the newest `format_time` first —
+the accident is the latest format — then the one with most records); (2) an instance with
 validated geometry whose volume offset equals the range start or a partition
 start, newest change time first; (3) the instance with the newest change
 time; (4) the one with most records. `instance_set` overrules the choice; the
-choice is stored in the session.
+choice is stored in the session. Two accidents on the same volume (formatted,
+used, formatted again) are handled the same way: the file system lost last is
+`main`, the one lost first is `older`, and the user picks it with
+`instance_set` (the results screen offers this whenever an `older` instance
+holds more in-use files than `main`). The same applies when the user formatted
+another partition of the disk after the accident: its leftovers win (1), and
+`instance_set` is the way back.
 
 **D9. Kinds.** `main`; `older` — an instance that a kept cut puts on the
 older side of `main` (it holds the segment above the cut, or is *before* it),
@@ -387,13 +415,23 @@ links are listed in `node_info` only.
 `Folder #P.s` when several sequences share a number. A lost folder gets its
 real name and its own parent reference from, in this order: (a) a usable
 `IndexEntry` whose child reference is `(P, s)`; (b) an in-use directory record
-with number `P` and sequence `s` among the strays (a stale copy). With several
+with number `P` and sequence `s` among the strays that comes from a group at
+least 90 % of whose records repeat records of `I` as D6 compares them (a stale
+copy of `I` itself). With several
 entries: skip the DOS namespace when another exists, then take the one with
-the highest source LSN. An entry is *usable* for instance `I` when it is not
+the latest MFT-change time, then the highest source LSN, then the lowest
+source offset (LSNs of different file systems are not comparable: a new
+`$LogFile` may restart below the old one's numbers). An entry is *usable* for instance `I` when it is not
 current-volume data (C4); it belongs to `I` — it comes from an `$INDEX_ROOT`
-of a record of `I`, or from an index block whose owner resolves to a
-directory of `I`, or, failing both, from a block whose owner number is not
-present in any instance; it is on `I`'s side of every kept cut that concerns
+of a record of `I`, or from an index block in which some entry names a
+record of `I` exactly (number, sequence, name and parent reference equal to
+one of the record's `$FILE_NAME`s) and no entry names a record of another
+instance so; a block in which no entry names any record so belongs to `I`
+when its owner resolves to a directory of `I`, or, failing that, when its
+owner number is not present in any instance and the entry's MFT-change time
+is not more than a day older than the oldest change time of `I`'s records
+(an older file system whose records are all gone still leaves index blocks;
+`strays` counts as an instance here); it is on `I`'s side of every kept cut that concerns
 `I` (its MFT-change time compared as in D3); and its source offset is not
 inside a data extent of an in-use non-directory file of `I` (which would make
 it part of an embedded file system). A named lost folder is attached by the
@@ -432,7 +470,9 @@ byte offset of cluster 0 of that instance's volume.
 **F1. Cluster size** = the most frequent value of `allocated_size /
 (last_vcn + 1)` over non-resident attributes with start VCN 0 and
 `last_vcn ≥ 0`, accepting only powers of two from 512 to 2 MiB. Source `attr`.
-If no attribute qualifies: the cluster size of a matching boot hit, else 4096.
+If no attribute qualifies: the cluster size of the boot hit at the range start
+or a partition start that is nearest below the instance's lowest record, else
+4096.
 
 **F2. Offset candidates**, all required to be ≥ 0, sector-aligned and inside
 the source:
@@ -473,14 +513,19 @@ geometry (source `inherited`).
 
 **F5. Volume size.** `end_by_files` = the 4th-largest value of (highest mapped
 cluster + 1) over the in-use files of the instance with intact fixups and
-complete runlists; 0 with fewer than 4 such files (a few damaged runlists
-must not decide). `total_clusters` = the value of a boot hit that agrees with
-the chosen geometry, provided `end_by_files` does not exceed it — after a
-re-partitioning the boot sector found at the old volume's offset is the new,
-smaller volume's; otherwise `max(end_by_files, (range end − volume_offset) /
-cluster_size)`. The *lost-volume range* of an instance is `[volume_offset,
-volume_offset + total_clusters × cluster_size)` clipped to the source; for
-`main` and `other` instances with validated geometry it is protected by S2.
+complete runlists; with fewer than 4 such files the smallest of their values,
+0 without any (a few damaged runlists must not decide). `total_clusters` = the
+largest value of a boot hit that agrees with the chosen geometry, provided
+`end_by_files` does not exceed it — after a re-partitioning the boot sector
+found at the old volume's offset is the new, smaller volume's; otherwise
+`max(end_by_files, (range end − volume_offset) / cluster_size)`. The
+*lost-volume range* of an instance is `[volume_offset, volume_offset +
+max(total_clusters, end_of_all) × cluster_size)` clipped to the source, where
+`end_of_all` is the largest (highest mapped cluster + 1) over the in-use files
+of the instance with intact fixups and complete runlists; for `main` and
+`other` instances with validated geometry, and for the anchor (D8), it is
+protected by S2. (`total_clusters` keeps the 4th-largest rule: it decides
+`out_of_bounds`.)
 
 **F6. Validated.** With at least 20 files checked: at least 80 % matched; or
 at least 50 % matched together with structural evidence. With fewer than 20
@@ -508,8 +553,8 @@ of the group), `missing_fragments`, `size_estimated`, `out_of_bounds`,
 - `placeholder` — reparse tag with `(tag & 0xFFFF0FFF) == 0x9000001A` (cloud)
   or 0x80000013 (deduplication): the content is not on this disk.
 - `sparse` — the runlist has a hole or the attribute flag 0x8000 is set.
-- `out_of_bounds` — a run with LCN ≥ `total_clusters`, or mapped bytes outside
-  the session range.
+- `out_of_bounds` — a run that reaches beyond `total_clusters` (LCN + length >
+  `total_clusters`), or mapped bytes outside the session range.
 - `bad_sectors` — an extent intersects a bad range of the scan; set again by
   any read that meets unreadable sectors.
 - `overwritten` — an extent intersects the overwritten set (C5), or the file
