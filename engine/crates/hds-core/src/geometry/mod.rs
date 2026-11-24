@@ -15,10 +15,11 @@
 //! * F1 ties: the smaller cluster size.
 //! * F2 MFT map ties: the lower offset.
 //! * F3 "the best candidates (at most 8)": ranked by distinct voting
-//!   directories, signature votes, a boot sector reading consistent with
-//!   its hidden sectors, the source order of F4 (`mft`, `boot`,
-//!   `backup_boot`, `default`, then `index` and `signature`), agreeing MFT
-//!   records, and the lower offset.
+//!   directories, signature votes, the source order of F4 (`mft`; the
+//!   boot readings, one consistent with its hidden sectors first, then
+//!   `boot`, then `backup_boot`; `default`; then `index` and `signature`),
+//!   agreeing MFT records, and the lower offset. Only the best
+//!   [`MAX_CANDIDATES`] are kept.
 //! * F3 sample: the files checkable under the candidate (first cluster
 //!   inside the session range, outside the overwritten set) are sampled,
 //!   evenly over their record numbers.
@@ -576,9 +577,9 @@ impl MftMap {
 }
 
 /// F3's ranking of candidates: distinct voting directories, signature
-/// votes, a boot reading consistent with its hidden sectors, the source
-/// order, agreeing MFT records (each descending except the source order).
-type RankKey = (Reverse<u64>, Reverse<u64>, Reverse<bool>, usize, Reverse<u64>);
+/// votes, the source order ([`Cand::source_rank`]), agreeing MFT records
+/// (each descending except the source order).
+type RankKey = (Reverse<u64>, Reverse<u64>, usize, Reverse<u64>);
 
 /// One offset candidate under construction.
 #[derive(Debug, Clone, Default)]
@@ -599,11 +600,21 @@ impl Cand {
         self.sources & s.bit() != 0
     }
 
+    /// F4's source order: `mft`, then the boot readings — one consistent
+    /// with its hidden sectors first (F2), then `boot`, then
+    /// `backup_boot` — then `default`, `index`, `signature`.
     fn source_rank(&self) -> usize {
-        SOURCE_ORDER
-            .iter()
-            .position(|&s| self.has(s))
-            .unwrap_or(SOURCE_ORDER.len())
+        let boot = self.has(OffsetSource::Boot) || self.has(OffsetSource::BackupBoot);
+        if self.has(OffsetSource::Mft) {
+            0
+        } else if boot && self.boot_pref {
+            1
+        } else {
+            SOURCE_ORDER
+                .iter()
+                .position(|&s| self.has(s))
+                .map_or(SOURCE_ORDER.len().saturating_add(1), |p| p.saturating_add(1))
+        }
     }
 
     /// F3's ranking key (smaller is better; the offset breaks ties).
@@ -611,7 +622,6 @@ impl Cand {
         (
             Reverse(self.dirs),
             Reverse(self.sig),
-            Reverse(self.boot_pref),
             self.source_rank(),
             Reverse(self.mft_agree),
         )
@@ -966,12 +976,7 @@ pub(crate) fn compute(
         .filter_map(|&o| {
             let c = cands.get(&o)?;
             Some((
-                (
-                    Reverse(sigkey(c)),
-                    Reverse(c.dirs),
-                    Reverse(c.boot_pref),
-                    c.source_rank(),
-                ),
+                (Reverse(sigkey(c)), Reverse(c.dirs), c.source_rank()),
                 o,
             ))
         })
