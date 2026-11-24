@@ -1,0 +1,28 @@
+# Rust
+engine/target/
+**/*.rs.bk
+
+# Flutter / Dart
+app/.dart_tool/
+app/build/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/.packages
+app/pubspec_overrides.yaml
+app/linux/
+app/windows/flutter/ephemeral/
+
+# Build output and test fixtures
+dist/
+fixtures-out/
+*.img
+*.vhd
+*.vhdx
+*.hdsc
+
+# Editors / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
