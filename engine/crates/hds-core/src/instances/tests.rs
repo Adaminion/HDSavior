@@ -531,6 +531,80 @@ fn s2_protected_ranges_session_first_then_validated_lost_volumes() {
     assert_eq!(p.len(), 2);
 }
 
+/// A volume whose record 0 (named `$MFT`, change time `time`) maps its
+/// `$MFT` at `mft_lcn` of a volume at `vol`, with resident files 30..49:
+/// a geometry validated by its MFT map (20 agreeing records).
+fn mft_volume(lab: &mut Lab, vol: u64, mft_lcn: u64, time: u64) {
+    let origin = vol + mft_lcn * 4096;
+    let r0 = Rec::new(0)
+        .si([time; 4], 6)
+        .name(ROOT, "$MFT", 3, 6)
+        .data_extent(
+            0,
+            63,
+            (64 * 4096, 256 * 1024, 256 * 1024),
+            &runlist(&[(Some(mft_lcn), 64)]),
+            0,
+        );
+    lab.rec(origin, &r0);
+    for n in 30..50 {
+        lab.rec(origin, &file(n, 1, ROOT, "r.txt", time, None));
+    }
+}
+
+#[test]
+fn s2_validated_other_and_older_volumes_are_protected_unvalidated_ones_not() {
+    // Review findings: no test covered the protection of a validated
+    // `other` instance; and S2 (every lost file system with a validated
+    // geometry) is wider than F5 (main, other, anchor): an `older` file
+    // system larger than main must be protected too.
+    let mut lab = Lab::new(32);
+    // Main: a volume at 0 whose boot sector says 8 MiB (its MFT LCN names
+    // no record 0: not a current volume).
+    lab.put(0, &boot_sector(512, 8, 16383, 100, 8, -10, 1, 0));
+    mft_volume(&mut lab, 0, 256, t(1000));
+    // Older: the same volume offset, older times, files reaching 23 MiB.
+    mft_volume(&mut lab, 0, 2048, t(10));
+    for (i, n) in (50..54).enumerate() {
+        let l = 6000 + i as u64;
+        lab.rec(8 * MIB, &file(n, 1, ROOT, "big.bin", t(10), Some((l, 1))));
+    }
+    // Other, validated: a volume at 16 MiB.
+    mft_volume(&mut lab, 16 * MIB, 256, t(900));
+    // Other, not validated: newer files that nothing ties to anything.
+    for n in 60..80 {
+        lab.rec(26 * MIB, &file(n, 1, ROOT, "d.txt", t(2000), None));
+    }
+    let run = lab.run(None);
+    let l = &run.layout;
+    let inst = |off: u64| l.instance(run.inst(off).unwrap()).unwrap();
+    let main = inst(MIB);
+    let older = inst(8 * MIB);
+    let other = inst(17 * MIB);
+    let loose = inst(26 * MIB + 60 * 1024);
+    assert_eq!(l.main(), Some(main.id));
+    assert_eq!(older.kind, InstanceKind::Older);
+    assert_eq!(other.kind, InstanceKind::Other);
+    assert_eq!(loose.kind, InstanceKind::Other);
+    assert!(main.validated() && older.validated() && other.validated());
+    assert!(!loose.validated());
+    let range = |i: &Instance| i.geometry.as_ref().unwrap().lost_volume.clone();
+    assert_eq!(range(main), 0..8 * MIB);
+    assert_eq!(range(other), 16 * MIB..32 * MIB);
+    assert_eq!(range(older), 0..32 * MIB);
+    assert_eq!(
+        l.protected(),
+        &[
+            hds_io::Protected::session(0..32 * MIB),
+            hds_io::Protected::lost_volume(0..8 * MIB),
+            hds_io::Protected::lost_volume(16 * MIB..32 * MIB),
+            hds_io::Protected::lost_volume(0..32 * MIB),
+        ]
+    );
+    assert_eq!(older.protected, Some(0..32 * MIB));
+    assert_eq!(loose.protected, None);
+}
+
 #[test]
 fn analysis_from_stored_state_is_identical() {
     let mut lab = Lab::new(16);
@@ -870,30 +944,86 @@ mod synth {
     }
 }
 
-/// Review finding: many record-0 holders whose $MFT runs cover the whole
-/// disk made each D4(c) placement scan every record inside its runs
-/// (holders x records). Measurement: `RV_HOLDERS`, `RV_RECS`.
-#[test]
-#[ignore]
-fn scale_many_mft_holders() {
-    let holders: u64 = std::env::var("RV_HOLDERS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
-    let recs: u32 = std::env::var("RV_RECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30000);
-    let mib = (8 + u64::from(recs) * 1024 / MIB + holders * 3 * 1024 / MIB + 4) as usize;
+/// `holders` (at most 3,500) records 0 named `$MFT` at 1 MiB + k x 4 KiB,
+/// each with a first run of one cluster (itself) and a second run of 2^20
+/// clusters that places the records of the fragment at 16 MiB when
+/// `place`, or nothing; and `recs` files 30.. at origin 16 MiB.
+fn holders_lab(holders: u64, recs: u32, place: bool) -> Lab {
+    let files_origin = 16 * MIB;
+    let mib = (16 + u64::from(recs + 30) * 1024 / MIB + 2) as usize;
     let mut lab = Lab::new(mib);
     for n in 30..30 + recs {
-        lab.rec(4 * MIB + holders * 3 * 1024, &file(n, 1, ROOT, "f.txt", t(100), None));
+        lab.rec(files_origin, &file(n, 1, ROOT, "f.txt", t(100), None));
     }
-    let base = 2 * MIB;
+    for k in 0..holders {
+        let at = MIB + k * 4096;
+        // Volume at `at` (record 0 at LCN 0); VCN 1.. at LCN l2 with
+        // l2 x 4096 + at - 4096 = the files' origin when `place`.
+        let l2 = if place {
+            1 + (files_origin - at) / 4096
+        } else {
+            1 + (files_origin - at) / 4096 + 7
+        };
+        let r0 = Rec::new(0)
+            .si([t(1); 4], 6)
+            .name(ROOT, "$MFT", 3, 6)
+            .data_extent(
+                0,
+                (1 << 20) as i64,
+                (1 << 42, 1 << 42, 1 << 42),
+                &runlist(&[(Some(0), 1), (Some(l2), 1 << 20)]),
+                0,
+            );
+        lab.rec_at(at, &r0);
+    }
+    lab
+}
+
+#[test]
+fn d4c_many_holders_cost_neither_holders_squared_nor_holders_x_records() {
+    // Review finding: each D4(c) placement walked every record inside its
+    // runs (holders x records on crafted input), and every root asked
+    // every holder (holders squared). 8,000 holders whose runs cover the
+    // disk behind them took 8 s (release); now well under a second.
+    let holders = 8000u64;
+    let mut lab = Lab::new((2 + holders * 3 * 1024 / MIB + 6) as usize);
+    for n in 30..1030 {
+        lab.rec(
+            4 * MIB + holders * 3 * 1024,
+            &file(n, 1, ROOT, "f.txt", t(100), None),
+        );
+    }
     for k in 0..holders {
         let r0 = Rec::new(0)
             .si([t(1); 4], 6)
             .name(ROOT, "$MFT", 3, 6)
-            .data_extent(0, (1 << 30) - 1, (1 << 42, 1 << 42, 1 << 42), &runlist(&[(Some(0), 1 << 30)]), 0);
-        lab.rec_at(base + k * 3 * 1024, &r0);
+            .data_extent(
+                0,
+                (1 << 30) - 1,
+                (1 << 42, 1 << 42, 1 << 42),
+                &runlist(&[(Some(0), 1 << 30)]),
+                0,
+            );
+        lab.rec_at(2 * MIB + k * 3 * 1024, &r0);
     }
     let t0 = std::time::Instant::now();
     let run = lab.run(None);
-    println!("records {} instances {} scan+analysis {:.2}s", run.store().record_count(), run.layout.instances().len(), t0.elapsed().as_secs_f64());
+    let secs = t0.elapsed().as_secs_f64();
+    assert!(secs < 4.0, "{secs:.1} s");
+    assert_eq!(run.kind(2 * MIB), Some(InstanceKind::Strays));
+    // Nothing is placed: the files stay alone.
+    let run = holders_lab(3000, 3000, false).run(None);
+    let f = run.inst(16 * MIB + 30 * 1024).unwrap();
+    assert!(run.layout.instance(f).unwrap().record_numbered(0).is_none());
+    assert_eq!(run.kind(MIB), Some(InstanceKind::Strays));
+    // When every holder places the files, exactly one joins them (record
+    // numbers 0 intersect for the others): the lowest instance id.
+    let run = holders_lab(200, 3000, true).run(None);
+    let f = run.inst(16 * MIB + 30 * 1024).unwrap();
+    assert_eq!(run.inst(MIB), Some(f));
+    let joined = run.layout.instance(f).unwrap();
+    assert_eq!(joined.records.len(), 3001);
+    assert_eq!(run.kind(MIB + 4096), Some(InstanceKind::Strays));
 }
 
 /// Two old instances B (files 300..329 at 1 MiB naming directories
