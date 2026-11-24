@@ -262,6 +262,14 @@ old files the latest `$FILE_NAME` time is not later than the `$SI` MFT-change ti
 are equal). So the latest of the two is "the time this record was last written here" for copies and
 equals the MFT-change time otherwise. ALGORITHMS calls it the *record time* and uses it in C3, C4,
 D2/D3, D7, D8/D9 and E6.
+Index entries of copies (fifth run): in all 60 copies the parent's `$I30` entry carries exactly the
+copy's four `$SI` times, last access included, not its `$FILE_NAME` times. For Copy-Item and Move-Item
+the entry's creation time is the copy time, so the entry looks new; for robocopy, which keeps the
+creation time, all of the entry's creation, modification and MFT-change times are the backup's old
+times (0 of 20 later than the copy's start). The last-access time moves later than the write times on
+its own (3 and 7 of 20). So an entry's own times cannot tell a restored file from an old one: the
+*entry time* leaves last access out, and C4 excludes entries of the current volume by their source
+(a live-allocated block or a current-volume record), not by their time [CI].
 A sparse file with one 4 KiB block every 128 KiB (1500 blocks) got a resident `$ATTRIBUTE_LIST`
 with 19 entries and 17 extension records (1560–1576), all intact after the format. (With one block
 every 8 KiB it got one run: sparse files allocate in 64 KiB units.)
