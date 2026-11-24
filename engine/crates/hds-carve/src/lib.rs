@@ -83,6 +83,40 @@
 //!   these kinds is measured as `Exact` all the same. No carver can do better
 //!   without decoding the payload.
 //!
+//! # Verified ends
+//!
+//! [`Measured::end_verified`] says whether the structure *proves* the end:
+//! bytes at the computed end were read and confirmed by the format, so a
+//! file whose clusters are not contiguous would almost certainly have
+//! failed the walk instead of being measured. It is `true` exactly in these
+//! cases:
+//!
+//! | Kind | `end_verified` |
+//! |---|---|
+//! | JPEG | always: the entropy-coded data was scanned into `EOI` |
+//! | PNG | always: `IEND` after a chain of chunks whose CRCs all match |
+//! | GIF | always: the trailer after a walk of every block |
+//! | PDF | always: `%%EOF` whose `startxref` leads to a cross-reference section of this file (or a linearized length confirmed by `%%EOF`) |
+//! | ZIP | when the end record also agrees with the entry count and directory size the walk found (that is, when `Exact`) |
+//! | 7z | when the end header was read and its CRC matched (that is, when `Exact`) |
+//! | RAR | when the end-of-archive block was found (its header CRC checked) |
+//! | MP4, MOV, HEIC, AVIF, CR3 | when `Exact` and a structure box came after the last media box (`mdat`, `imda`, `moof`): a `moov` or `meta` whose children form a consistent chain, or an `mfra` ending in an `mfro` that repeats its size. Files that end in `mdat` (`faststart` MP4, every HEIC) are not verified |
+//! | AVI, WAV, WebP | when `Exact` (the chunk chain lands on the RIFF size) and the last chunk is not bulk payload (`LIST movi`, `data`, `VP8 `, `VP8L`, `ALPH`, `ANMF`): an `idx1`, `LIST INFO`, `EXIF` read behind the payload |
+//! | Matroska, WebM | when the segment has a size, the top-level chain lands on it, and the last element that is not padding is neither a `Cluster` nor `Attachments` (typically `Cues` or `Tags`) |
+//! | BMP, TIFF, MP3 | never: header arithmetic, the furthest pointer, a stream that is complete after any frame |
+//!
+//! A carver cannot do better for the "never" kinds without decoding the
+//! payload; the carving job rates such files `uncertain`.
+//!
+//! What is verified is the end, and only as deeply as each walker looks.
+//! For the chain formats (ISO BMFF, RIFF, Matroska) the header of the last
+//! structure is read where the chain leads, but its payload is not: foreign
+//! data inside an `idx1`, a `Cues` element or the last child of `moov` goes
+//! unnoticed. For PDF the trailer between the cross-reference section and
+//! `%%EOF` is not checked. A JPEG continued by another JPEG's data passes
+//! (see "Known gaps"). `tests/end_verified.rs` holds every kind to these
+//! limits with cut, damaged and interrupted files.
+//!
 //! # Formats
 //!
 //! "Signature" is what `sniff` insists on, with the number of bits that a
@@ -193,7 +227,8 @@
 //! them to its exact length whatever follows it on the disk;
 //! `tests/synthetic.rs` and `tests/large.rs` cover what those encoders do
 //! not produce on demand (64-bit boxes, OpenDML, files without `ftyp`,
-//! multi-gigabyte layouts, damage); `tests/robustness.rs` feeds mutated and
+//! multi-gigabyte layouts, damage); `tests/end_verified.rs` holds every kind
+//! to the "Verified ends" rule; `tests/robustness.rs` feeds mutated and
 //! hostile input; `tests/false_positives.rs` and `tests/throughput.rs`
 //! measure `sniff`. `examples/probe.rs` runs both functions over any files
 //! given to it - the quickest way to try a camera's or a phone's output.
@@ -414,6 +449,21 @@ pub struct Measured {
     /// kind's [`default_ext`](FileKind::default_ext) or something more
     /// specific found inside: `docx`, `mov`, `nef`, `webm`, ...
     pub ext: &'static str,
+    /// Whether the structure proves the end: the walk reached `len` by
+    /// following the format's own chain through every payload, and what it
+    /// found there confirms the end (an end marker, an end record, an
+    /// index or header read *behind* the last payload). `false` when the
+    /// end is only arithmetic on a header written before the payload, or
+    /// when the format has no end at all. The rule for every kind is in
+    /// the crate documentation ("Verified ends"); the carving job rates a
+    /// carved file `good` only when this is `true` (ALGORITHMS I3).
+    ///
+    /// This is a statement about where the file ends, independent of
+    /// [`confidence`](Self::confidence): a PDF that may have been appended
+    /// to is `Probable` but its `%%EOF` is verified; a BMP whose size field
+    /// agrees with its pixel arithmetic is `Exact` but nothing at its end
+    /// was looked at.
+    pub end_verified: bool,
 }
 
 /// Bounds on the work one [`measure`] call may do.

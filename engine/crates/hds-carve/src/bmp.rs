@@ -107,11 +107,14 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
         len,
         confidence: Confidence::Exact,
         ext: "bmp",
+        // header arithmetic: nothing at the end is checked
+        end_verified: false,
     };
     let probable = |len| Measured {
         len,
         confidence: Confidence::Probable,
         ext: "bmp",
+        end_verified: false,
     };
 
     if matches!(h.compression, 1 | 2) {

@@ -248,6 +248,8 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
         len: pos,
         confidence: Confidence::Probable,
         ext: "mp3",
+        // the stream is complete after any frame
+        end_verified: false,
     })
 }
 

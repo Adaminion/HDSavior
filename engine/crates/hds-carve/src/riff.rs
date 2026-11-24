@@ -40,6 +40,9 @@ struct Seen {
     hdrl: bool,
     movi: bool,
     image: bool,
+    /// The chunk read last carries the bulk payload (`data`, `LIST movi`,
+    /// image data), whose length only its own header states.
+    payload_last: bool,
 }
 
 /// 64-bit sizes of an RF64 file.
@@ -93,13 +96,23 @@ fn walk(src: &mut Src, start: u64, end: u64, ds64: Option<&Ds64>, seen: &mut See
         let Some(unpadded) = body.checked_add(size).filter(|&e| e <= end) else {
             return Some(false);
         };
+        seen.payload_last = false;
         match &id {
             b"fmt " => seen.fmt = true,
-            b"data" => seen.data = true,
-            b"VP8 " | b"VP8L" | b"ANMF" => seen.image = true,
+            b"data" => {
+                seen.data = true;
+                seen.payload_last = true;
+            }
+            b"VP8 " | b"VP8L" | b"ANMF" | b"ALPH" => {
+                seen.image |= id != *b"ALPH";
+                seen.payload_last = true;
+            }
             b"LIST" => match &src.arr::<4>(body)? {
                 b"hdrl" => seen.hdrl = true,
-                b"movi" => seen.movi = true,
+                b"movi" => {
+                    seen.movi = true;
+                    seen.payload_last = true;
+                }
                 _ => {}
             },
             _ => {}
@@ -199,5 +212,9 @@ pub(crate) fn measure(src: &mut Src, kind: FileKind) -> Option<Measured> {
         len: end,
         confidence,
         ext,
+        // A chunk header read behind the last payload, with the chain
+        // landing on the RIFF size, confirms that payload's extent; a file
+        // that ends in its payload has only header arithmetic for its end.
+        end_verified: exact && !seen.payload_last,
     })
 }

@@ -212,6 +212,10 @@ pub(crate) fn measure(src: &mut Src, kind: FileKind) -> Option<Measured> {
     // can follow it
     let mut moov_last = false;
     let mut confidence = Confidence::Exact;
+    // A structure box whose children were walked came after the last media
+    // box: the file does not end in payload whose extent only its own
+    // header states (see `Measured::end_verified`).
+    let mut tail_checked = false;
 
     let mut index = 0u32;
     loop {
@@ -295,6 +299,7 @@ pub(crate) fn measure(src: &mut Src, kind: FileKind) -> Option<Measured> {
                 }
                 moov = true;
                 moov_last = media_boxes > 0 && !fragments;
+                tail_checked = true;
             }
             b"meta" => {
                 // a full box (version and flags) in ISO files, a plain
@@ -307,14 +312,28 @@ pub(crate) fn measure(src: &mut Src, kind: FileKind) -> Option<Measured> {
                 };
                 meta |= found & 1 != 0;
                 media |= found & 2 != 0;
+                tail_checked = found & 1 != 0;
             }
             b"moof" => {
                 fragments = true;
                 moov_last = false;
+                tail_checked = false;
             }
             b"mdat" | b"imda" => {
                 media_boxes += 1;
                 media = true;
+                tail_checked = false;
+            }
+            b"mfra" => {
+                // the random access index ends with `mfro`, which repeats
+                // the size of the `mfra` box
+                let body = pos.checked_add(b.head)?;
+                let stated = match (next.checked_sub(4), u32::try_from(size)) {
+                    (Some(at), Ok(size)) if at >= body => src.be32(at) == Some(size),
+                    _ => false,
+                };
+                tail_checked =
+                    stated && children(src, body, next, &[b"mfro"]).is_some_and(|m| m != 0);
             }
             _ => {}
         }
@@ -356,6 +375,7 @@ pub(crate) fn measure(src: &mut Src, kind: FileKind) -> Option<Measured> {
         len: pos,
         confidence,
         ext,
+        end_verified: confidence == Confidence::Exact && tail_checked,
     })
 }
 

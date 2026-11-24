@@ -86,5 +86,7 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
         len: end,
         confidence,
         ext: "7z",
+        // the end header was read and its CRC matched
+        end_verified: confidence == Confidence::Exact,
     })
 }

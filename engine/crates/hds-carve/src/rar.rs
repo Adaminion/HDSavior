@@ -97,7 +97,9 @@ fn measure_v4(src: &mut Src) -> Option<Measured> {
                     len: block.end,
                     confidence: Confidence::Exact,
                     ext: "rar",
-                })
+                    // the end-of-archive block, its header CRC verified
+                    end_verified: true,
+                });
             }
             _ => {}
         }
@@ -112,6 +114,8 @@ fn measure_v4(src: &mut Src) -> Option<Measured> {
         len: pos,
         confidence: Confidence::Probable,
         ext: "rar",
+        // no end block: more blocks may have followed
+        end_verified: false,
     })
 }
 
@@ -204,7 +208,9 @@ fn measure_v5(src: &mut Src) -> Option<Measured> {
                     len: end,
                     confidence: Confidence::Exact,
                     ext: "rar",
-                })
+                    // the end-of-archive block, its header CRC verified
+                    end_verified: true,
+                });
             }
             _ => {}
         }

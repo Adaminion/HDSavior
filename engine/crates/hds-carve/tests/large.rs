@@ -24,7 +24,16 @@ fn find(data: &[u8], needle: &[u8]) -> usize {
 }
 
 /// Measures `file` and checks length, confidence and the amount of I/O.
-fn check(what: &str, kind: FileKind, file: &Sparse, ext: &'static str, max_reads: u64) {
+/// `end_verified` is what `Measured::end_verified` must say: whether a
+/// structure behind the last payload confirms the end.
+fn check(
+    what: &str,
+    kind: FileKind,
+    file: &Sparse,
+    ext: &'static str,
+    end_verified: bool,
+    max_reads: u64,
+) {
     let counted = Counting::new(file);
     let got = measure(kind, &counted, u64::MAX);
     assert_eq!(
@@ -32,7 +41,8 @@ fn check(what: &str, kind: FileKind, file: &Sparse, ext: &'static str, max_reads
         Some(Measured {
             len: file.len,
             confidence: Confidence::Exact,
-            ext
+            ext,
+            end_verified,
         }),
         "{what}"
     );
@@ -107,7 +117,14 @@ fn mp4_with_media_data_beyond_4_gib() {
         .put(&(payload + 16).to_be_bytes());
     f.gap(payload);
     f.put(get(&b, b"moov"));
-    check("mp4, 64-bit mdat, moov last", FileKind::Mp4, &f, "mp4", 8);
+    check(
+        "mp4, 64-bit mdat, moov last",
+        FileKind::Mp4,
+        &f,
+        "mp4",
+        true,
+        8,
+    );
 
     // 32-bit size just below the limit, moov first
     let b = boxes(&sample("mp4_ffmpeg_faststart.mp4").data);
@@ -118,7 +135,14 @@ fn mp4_with_media_data_beyond_4_gib() {
         .put(get(&b, b"free"));
     f.put(&((payload + 8) as u32).to_be_bytes()).put(b"mdat");
     f.gap(payload);
-    check("mp4, moov first, 4 GiB mdat", FileKind::Mp4, &f, "mp4", 8);
+    check(
+        "mp4, moov first, 4 GiB mdat",
+        FileKind::Mp4,
+        &f,
+        "mp4",
+        false,
+        8,
+    );
 }
 
 #[test]
@@ -134,7 +158,7 @@ fn fragmented_mp4_of_many_gigabytes() {
         f.gap((64 << 20) - 8);
     }
     f.put(get(&b, b"mfra"));
-    check("fragmented mp4", FileKind::Mp4, &f, "mp4", 420);
+    check("fragmented mp4", FileKind::Mp4, &f, "mp4", true, 420);
 }
 
 #[test]
@@ -158,7 +182,7 @@ fn avi_opendml_beyond_4_gib() {
         f.put(b"LIST").put(&movi_size.to_le_bytes()).put(b"movi");
         f.gap(movi_size as u64 - 4);
     }
-    check("avi, OpenDML", FileKind::Avi, &f, "avi", 40);
+    check("avi, OpenDML", FileKind::Avi, &f, "avi", false, 40);
 }
 
 #[test]
@@ -171,7 +195,7 @@ fn rf64_wav_beyond_4_gib() {
     head[28..36].copy_from_slice(&data_size.to_le_bytes()); // data size
     let mut f = Sparse::new();
     f.put(&head).gap(data_size);
-    check("wav, RF64", FileKind::Wav, &f, "wav", 8);
+    check("wav, RF64", FileKind::Wav, &f, "wav", false, 8);
 }
 
 #[test]
@@ -193,7 +217,7 @@ fn matroska_of_many_gigabytes() {
     for _ in 0..clusters {
         f.put(&cluster_head).gap(cluster_payload);
     }
-    check("matroska", FileKind::Mkv, &f, "mkv", 320);
+    check("matroska", FileKind::Mkv, &f, "mkv", false, 320);
 }
 
 /// Rewrites a central directory entry so that it states a 64-bit
@@ -285,7 +309,7 @@ fn zip64_with_an_entry_beyond_4_gib() {
         .put(&zip[second..cd])
         .put(&directory)
         .put(&tail);
-    check("zip64", FileKind::Zip, &f, "zip", 8);
+    check("zip64", FileKind::Zip, &f, "zip", true, 8);
 }
 
 #[test]
@@ -314,7 +338,7 @@ fn sevenz_with_packed_streams_beyond_4_gib() {
         .put(&z[32..32 + next_offset as usize])
         .gap(grow)
         .put(&z[32 + next_offset as usize..]);
-    check("7z", FileKind::SevenZip, &f, "7z", 8);
+    check("7z", FileKind::SevenZip, &f, "7z", true, 8);
 }
 
 #[test]
@@ -361,5 +385,12 @@ fn rar_with_a_file_beyond_4_gib() {
         .put(&rar[block + size..block + size + pack]);
     f.gap((high as u64) << 32);
     f.put(&rar[block + size + pack..]);
-    check("rar 4, 64-bit pack size", FileKind::Rar, &f, "rar", 12);
+    check(
+        "rar 4, 64-bit pack size",
+        FileKind::Rar,
+        &f,
+        "rar",
+        true,
+        12,
+    );
 }

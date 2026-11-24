@@ -57,6 +57,8 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
                     len: pos + 1,
                     confidence: Confidence::Exact,
                     ext: "gif",
+                    // the trailer, reached by walking every block
+                    end_verified: true,
                 });
             }
             _ => return None,

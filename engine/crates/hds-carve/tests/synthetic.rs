@@ -15,20 +15,34 @@ fn sample(name: &str) -> Sample {
         .unwrap_or_else(|| panic!("{name} missing"))
 }
 
-fn run(kind: FileKind, data: &[u8]) -> Option<Measured> {
-    measure(kind, &data, data.len() as u64)
+/// What the tests here compare of a measurement: length, confidence and
+/// extension. `Measured::end_verified` is left out; `end_verified.rs`
+/// holds every kind to its rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Want {
+    len: u64,
+    confidence: Confidence,
+    ext: &'static str,
 }
 
-fn exact(len: usize, ext: &'static str) -> Option<Measured> {
-    Some(Measured {
+fn run(kind: FileKind, data: &[u8]) -> Option<Want> {
+    measure(kind, &data, data.len() as u64).map(|m: Measured| Want {
+        len: m.len,
+        confidence: m.confidence,
+        ext: m.ext,
+    })
+}
+
+fn exact(len: usize, ext: &'static str) -> Option<Want> {
+    Some(Want {
         len: len as u64,
         confidence: Confidence::Exact,
         ext,
     })
 }
 
-fn probable(len: usize, ext: &'static str) -> Option<Measured> {
-    Some(Measured {
+fn probable(len: usize, ext: &'static str) -> Option<Want> {
+    Some(Want {
         len: len as u64,
         confidence: Confidence::Probable,
         ext,

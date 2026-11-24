@@ -9,6 +9,8 @@ publish.workspace = true
 hds-ntfs = { workspace = true }
 hds-io = { workspace = true }
 hds-carve = { workspace = true }
+# Carving reads candidates through hds-recover's CarveReader and builds its plans.
+hds-recover = { workspace = true }
 # Progress and summary objects cross the engine protocol (the engine serializes them).
 serde = { version = "1", features = ["derive"] }
 

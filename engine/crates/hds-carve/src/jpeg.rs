@@ -75,6 +75,8 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
                     len: pos + 2,
                     confidence: Confidence::Exact,
                     ext: "jpg",
+                    // the scan ran into EOI at marker level
+                    end_verified: true,
                 });
             }
             // stuffed zero, TEM, a restart marker outside a scan, a second SOI

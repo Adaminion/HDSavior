@@ -407,6 +407,10 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
         len: end,
         confidence,
         ext: contents.ext(),
+        // the end record, found where the walk through every entry and the
+        // central directory led, names that directory's offset; with counts
+        // or size that disagree it is not trusted
+        end_verified: consistent,
     })
 }
 

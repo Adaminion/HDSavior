@@ -206,9 +206,18 @@ fn every_single_bit_of_the_first_bytes() {
             }
             // One flipped bit never yields a confident answer that differs
             // from the undamaged file's: the damage is either irrelevant to
-            // the length, or noticed.
+            // the length, or noticed. One exception is inherent: a RIFF
+            // size that shrinks by exactly the chunks behind the payload
+            // (one bit can do that to `wav_python_list_after_data.wav`)
+            // describes a complete, shorter file - whose end then rests on
+            // header arithmetic alone and is not reported as verified.
             if let Some(r) = measure(s.kind, &m, m.len() as u64) {
-                if r.confidence == Confidence::Exact && Some(r.len) != original.map(|o| o.len) {
+                let shorter_unverified =
+                    !r.end_verified && original.is_some_and(|o| o.end_verified && r.len < o.len);
+                if r.confidence == Confidence::Exact
+                    && Some(r.len) != original.map(|o| o.len)
+                    && !shorter_unverified
+                {
                     wrong.push(format!("{}: {r:?} instead of {original:?}", what()));
                 }
             }
@@ -279,10 +288,13 @@ fn random_buffers() {
 /// front (pixels, samples, one compressed image, an `mdat` behind its
 /// `moov`): nothing behind the headers can contradict the headers.
 fn length_from_header_alone(s: &Sample) -> bool {
-    matches!(
-        s.kind,
-        FileKind::Bmp | FileKind::Wav | FileKind::Webp | FileKind::Heic
-    ) || s.name == "mp4_ffmpeg_faststart.mp4"
+    match s.kind {
+        FileKind::Bmp | FileKind::Heic => true,
+        // the samples with a chunk behind the payload are the exceptions
+        FileKind::Wav => s.name != "wav_python_list_after_data.wav",
+        FileKind::Webp => s.name != "webp_exif.webp",
+        _ => s.name == "mp4_ffmpeg_faststart.mp4" || s.name == "mkv_mkvmerge_no_cues.mkv",
+    }
 }
 
 #[test]
@@ -309,6 +321,33 @@ fn real_heads_with_random_bodies() {
                 let Some(r) = measure(s.kind, &m, m.len() as u64) else {
                     continue;
                 };
+                // A verified end is never one the noise provided: it is the
+                // end of a complete part, or the file's own end, found
+                // through structures that lie before the noise (the payload
+                // of the last structure of a chain format is not read).
+                if r.end_verified {
+                    assert!(
+                        r.len <= keep as u64 || r.len == s.data.len() as u64,
+                        "{}: {r:?}",
+                        what()
+                    );
+                    if r.len > keep as u64 {
+                        assert!(
+                            matches!(
+                                s.kind,
+                                FileKind::Avi
+                                    | FileKind::Wav
+                                    | FileKind::Webp
+                                    | FileKind::Mkv
+                                    | FileKind::Mp4
+                                    | FileKind::Heic
+                                    | FileKind::Cr3
+                            ),
+                            "{}: {r:?}",
+                            what()
+                        );
+                    }
+                }
                 if keep == s.data.len()
                     || r.len <= keep as u64
                     || r.confidence == Confidence::Probable
@@ -320,7 +359,13 @@ fn real_heads_with_random_bodies() {
                 // Reported as certain although the tail is noise. This is
                 // the known blind spot of the formats that end in payload
                 // sized by a header - and of no other.
-                assert!(length_from_header_alone(&s), "{}: {r:?}", what());
+                // Or, with a verified end, the noise fell into the payload
+                // of the last structure of a chain (checked above).
+                assert!(
+                    length_from_header_alone(&s) != r.end_verified,
+                    "{}: {r:?}",
+                    what()
+                );
                 assert_eq!(r.len, s.data.len() as u64, "{}", what());
                 unnoticed += 1;
             }

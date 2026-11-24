@@ -80,7 +80,8 @@ fn probe(path: &str) -> io::Result<bool> {
                 std::cmp::Ordering::Less => "short",
                 std::cmp::Ordering::Greater => "long",
             };
-            (format!("{} {confidence} .{}", m.len, m.ext), verdict)
+            let end = if m.end_verified { "end ok" } else { "end ?" };
+            (format!("{} {confidence} {end} .{}", m.len, m.ext), verdict)
         }
     };
     println!(

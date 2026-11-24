@@ -367,6 +367,21 @@ $FF -i tone.wav -ac 1 -c:a pcm_u8 -af aresample=8000,atrim=end_sample=4001 wav_p
 $FF -i tone.wav -t 0.5 -ac 2 -ar 8000 -c:a pcm_s16le -rf64 always wav_rf64.wav
 $FF -i tone.wav -ac 1 -ar 8000 -c:a pcm_s16le -write_bext 1 -metadata title="bext and LIST" wav_bext_list.wav
 $FF -i tone.wav -ac 1 -ar 8000 -c:a adpcm_ms wav_adpcm_fact.wav
+# Python's wave module, then a LIST INFO chunk appended behind the audio data
+# the way tagging tools do it: the one WAV whose end is verified by structure
+python3 - <<'PYEOF'
+import math, struct, wave
+with wave.open("w.wav", "wb") as w:
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+    w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(i / 9))) for i in range(3001)))
+d = bytearray(open("w.wav", "rb").read())
+info = b"INFO" + b"INAM" + struct.pack("<I", 12) + b"HDS sample\0\0"
+if len(d) % 2:
+    d += b"\0"
+d += b"LIST" + struct.pack("<I", len(info)) + info
+d[4:8] = struct.pack("<I", len(d) - 8)
+open("wav_python_list_after_data.wav", "wb").write(d)
+PYEOF
 $FF -i src.nut -c:v mpeg4 -q:v 6 -c:a libmp3lame -b:a 32k avi_ffmpeg_mpeg4_mp3.avi
 $FF -i src.nut -c:v mjpeg -q:v 10 -c:a pcm_s16le -ar 8000 -ac 1 avi_ffmpeg_mjpeg_pcm.avi
 $FF -i src.nut -an -c:v mpeg4 -q:v 6 -reserve_index_space 4096 avi_ffmpeg_video_only.avi
@@ -388,6 +403,10 @@ $FF -i src.nut -c:v libvpx-vp9 -b:v 60k -an -cluster_time_limit 200 mkv_ffmpeg_v
 printf 'CHAPTER01=00:00:00.000\nCHAPTER01NAME=Start\nCHAPTER02=00:00:00.500\nCHAPTER02NAME=Middle\n' > chapters.txt
 mkvmerge -q -o mkv_mkvmerge.mkv --chapters chapters.txt --attach-file text1.txt --title "HDSavior sample" mp4_ffmpeg_moov_last.mp4
 mkvmerge -q -o mkv_mkvmerge_audio.mka -D mp4_ffmpeg_moov_last.mp4
+# no Cues and no Tags: the file ends in its last Cluster (end not verified by
+# structure)
+mkvmerge -q --no-cues --disable-track-statistics-tags -o mkv_mkvmerge_no_cues.mkv mp4_ffmpeg_moov_last.mp4
+mkvpropedit -q mkv_mkvmerge_no_cues.mkv --tags all:
 # written to a pipe: the muxer cannot seek back, the segment size stays unknown
 $FF -i src.nut $X264 -c:a libvorbis -b:a 32k -cluster_time_limit 300 -f matroska - > special_mkv_unknown_size.mkv
 $FF -i src.nut -c:v libvpx -b:v 60k -an -f webm -live 1 - > special_mkv_live_stream.webm

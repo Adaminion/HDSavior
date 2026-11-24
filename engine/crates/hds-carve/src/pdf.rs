@@ -210,6 +210,9 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
             len,
             confidence,
             ext: "pdf",
+            // every end ends with `%%EOF` whose `startxref` leads to a
+            // cross-reference section of this file
+            end_verified: true,
         })
     };
 

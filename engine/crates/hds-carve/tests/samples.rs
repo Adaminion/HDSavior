@@ -30,6 +30,29 @@ fn expected_confidence(s: &Sample) -> Confidence {
     }
 }
 
+/// Whether the end must be verified by structure (see "Verified ends" in
+/// the crate documentation), from what each encoder is known to write.
+fn expected_end_verified(s: &Sample) -> bool {
+    match s.kind {
+        // header arithmetic, the furthest pointer, a stream complete after
+        // any frame
+        FileKind::Bmp | FileKind::Tiff | FileKind::Mp3 => false,
+        // libheif and Pillow write `meta` first and the item data last
+        FileKind::Heic => false,
+        // only one WAV sample has a chunk behind its `data` chunk
+        FileKind::Wav => s.name == "wav_python_list_after_data.wav",
+        // without Cues and Tags mkvmerge ends the file in its last Cluster
+        FileKind::Mkv => s.name != "mkv_mkvmerge_no_cues.mkv",
+        // only the Exif chunk comes behind the image data
+        FileKind::Webp => s.name == "webp_exif.webp",
+        // FFmpeg puts `moov` last unless told otherwise; the fragmented
+        // sample ends in `mfra`
+        FileKind::Mp4 => s.name != "mp4_ffmpeg_faststart.mp4",
+        // end markers, end records, `idx1` and `Cues` behind the payload
+        _ => true,
+    }
+}
+
 /// The extension `measure` must report.
 fn expected_ext(s: &Sample) -> &str {
     match s.name.as_str() {
@@ -44,6 +67,7 @@ fn check(s: &Sample, what: &str, data: &[u8]) {
         len: s.data.len() as u64,
         confidence: expected_confidence(s),
         ext: leak(expected_ext(s)),
+        end_verified: expected_end_verified(s),
     };
     let got = measure(s.kind, &data, data.len() as u64);
     assert_eq!(got, Some(expected), "{} {what}", s.name);
@@ -450,6 +474,7 @@ fn matroska_without_segment_size_is_probable() {
             len,
             confidence: Confidence::Probable,
             ext,
+            end_verified: false,
         });
         assert_eq!(measure(FileKind::Mkv, &data, len), want, "{name}");
 

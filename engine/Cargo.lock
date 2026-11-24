@@ -13,6 +13,7 @@ dependencies = [
  "hds-carve",
  "hds-io",
  "hds-ntfs",
+ "hds-recover",
  "serde",
  "serde_json",
 ]

@@ -76,6 +76,8 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
                     len: end,
                     confidence: Confidence::Exact,
                     ext: "png",
+                    // IEND, reached through a chain of CRC-checked chunks
+                    end_verified: true,
                 });
             }
             _ => {}

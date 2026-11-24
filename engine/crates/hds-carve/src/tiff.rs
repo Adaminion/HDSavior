@@ -413,6 +413,8 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
         len: end,
         confidence: Confidence::Probable,
         ext,
+        // no end marker: the furthest byte anything points to
+        end_verified: false,
     })
 }
 

@@ -170,6 +170,9 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
     let mut clusters = 0u32;
     let mut audio = false;
     let mut last = (data, false);
+    // the last element that is not padding carries bulk payload (a
+    // `Cluster`, `Attachments`), whose extent only its own header states
+    let mut payload_last = false;
     let mut elements = 0u32;
     loop {
         elements += 1;
@@ -186,6 +189,9 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
                     len: end,
                     confidence: Confidence::Exact,
                     ext,
+                    // an element header read behind the last cluster, and
+                    // the chain landing on the segment size
+                    end_verified: !payload_last,
                 });
             }
         }
@@ -206,6 +212,11 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
             }
             ID_CLUSTER => clusters += 1,
             _ => {}
+        }
+        match id {
+            ID_CLUSTER | ID_ATTACHMENTS => payload_last = true,
+            ID_VOID | ID_CRC32 => {}
+            _ => payload_last = false,
         }
         last = (p, id == ID_CLUSTER);
         p = next;
@@ -231,6 +242,8 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
         len: p,
         confidence: Confidence::Probable,
         ext: ext_for(doctype, audio),
+        // without a segment size nothing says this was all
+        end_verified: false,
     })
 }
 
