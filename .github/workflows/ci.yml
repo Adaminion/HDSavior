@@ -17,7 +17,7 @@ env:
   # add lints, so the bump is a deliberate change.
   RUST_TOOLCHAIN: 1.97.0
   # Crates that are finished; the others join as they are completed.
-  CRATES: -p hds-ntfs -p hds-io -p hds-carve
+  CRATES: -p hds-ntfs -p hds-io -p hds-carve -p hds-core -p hds-recover -p hds-engine
 
 jobs:
   linux:

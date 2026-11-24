@@ -6,3 +6,12 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+hds-ntfs = { workspace = true }
+hds-io = { workspace = true }
+hds-carve = { workspace = true }
+# Flags, ratings, plans, progress and summaries cross the engine protocol.
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Tests check the wire form against PROTOCOL.md and read the fixture manifests.
+serde_json = "1"

@@ -1,0 +1,271 @@
+//! The command-line interface as a child process: exit codes, usage errors
+//! on stderr, results and events as JSON lines on stdout.
+
+mod common;
+
+use std::process::{Command, Output};
+
+use common::{zero_image, TempDir};
+use serde_json::Value;
+
+fn run(args: &[&str], backend: Option<&str>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hdsavior-engine"));
+    command.args(args);
+    match backend {
+        Some(name) => command.env("HDS_ENGINE_TEST_BACKEND", name),
+        None => command.env_remove("HDS_ENGINE_TEST_BACKEND"),
+    };
+    command.output().expect("run the engine")
+}
+
+/// Every stdout line as JSON.
+fn json_lines(output: &Output) -> Vec<Value> {
+    String::from_utf8(output.stdout.clone())
+        .expect("UTF-8 stdout")
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}")))
+        .collect()
+}
+
+#[test]
+fn usage_errors_exit_2_with_a_message_on_stderr() {
+    for args in [
+        &[][..],
+        &["frobnicate"],
+        &["disks", "extra"],
+        &["scan"],
+        &["scan", "img"],
+        &[
+            "scan",
+            "img",
+            "--session",
+            "s",
+            "--partition",
+            "1",
+            "--start",
+            "0",
+        ],
+        &["recover", "--session", "s", "--dest", "d"],
+        &[
+            "recover",
+            "--session",
+            "s",
+            "--dest",
+            "d",
+            "--all",
+            "--on-exists",
+            "replace",
+        ],
+        &["ls", "--session", "s", "--limit", "many"],
+        &["image", "img"],
+        &["info"],
+        &["serve", "--port", "1"],
+    ] {
+        let out = run(args, None);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("usage:"), "{args:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{args:?}: nothing on stdout");
+    }
+}
+
+#[test]
+fn help_and_disks() {
+    let help = run(&["--help"], None);
+    assert_eq!(help.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("hdsavior-engine scan"));
+
+    let disks = run(&["disks"], None);
+    assert_eq!(
+        disks.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&disks.stderr)
+    );
+    let lines = json_lines(&disks);
+    assert_eq!(lines.len(), 1);
+    let list = lines[0]["disks"].as_array().expect("a disk list");
+    if !cfg!(windows) {
+        assert!(list.is_empty());
+    }
+    for disk in list {
+        // The disk list is made without reading a sector.
+        for partition in disk["partitions"].as_array().unwrap() {
+            assert_eq!(partition["type"], "");
+            assert_eq!(partition["type_id"], "");
+            assert_eq!(partition["ntfs"], Value::Null);
+        }
+    }
+}
+
+#[test]
+fn commands_that_need_the_scanner_fail_with_exit_1() {
+    let dir = TempDir::new("cli");
+    let image = zero_image(&dir, "src.img", 1 << 20);
+    let session = dir.join("s.hds");
+    let out = run(&["scan", &image, "--session", &session], None);
+    assert_eq!(out.status.code(), Some(1));
+    let lines = json_lines(&out);
+    assert!(
+        lines[0]["source"].is_object(),
+        "the open_source result comes first"
+    );
+    assert_eq!(lines.last().unwrap()["error"]["code"], "unsupported");
+    let out = run(&["info", "--session", &session], None);
+    assert_eq!(out.status.code(), Some(1));
+    let out = run(
+        &[
+            "image",
+            &image,
+            "--dest",
+            &dir.join("x.img"),
+            "--partition",
+            "3",
+        ],
+        None,
+    );
+    assert_eq!(out.status.code(), Some(1), "no partition 3");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no partition 3"));
+}
+
+#[test]
+fn subcommands_drive_the_same_dispatcher() {
+    let dir = TempDir::new("cli");
+    let image = zero_image(&dir, "src.img", 1 << 20);
+    let session = dir.join("s.hds");
+    let fake = Some("fake");
+
+    let out = run(
+        &[
+            "scan",
+            &image,
+            "--session",
+            &session,
+            "--start",
+            "512",
+            "--end",
+            "4096",
+        ],
+        fake,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines = json_lines(&out);
+    assert_eq!(
+        lines[1],
+        serde_json::json!({"job": "scan", "bytes_total": 3584})
+    );
+    assert!(lines.iter().any(|l| l["event"] == "scan_progress"));
+    let done = lines.last().unwrap();
+    assert_eq!(done["event"], "scan_done");
+    assert_eq!(done["data"]["status"], "completed");
+
+    // A session path inside the source image is refused before anything is read.
+    let out = run(&["scan", &image, "--session", &image], fake);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        json_lines(&out).last().unwrap()["error"]["code"],
+        "destination_refused"
+    );
+
+    let out = run(&["ls", "--session", &session, "--path", "photos"], fake);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows = json_lines(&out).last().unwrap()["rows"].clone();
+    assert_eq!(
+        rows[0]["name"], "IMG_0001.JPG",
+        "the path was resolved case-insensitively"
+    );
+    let out = run(
+        &["ls", "--session", &session, "--path", "nothing/here"],
+        fake,
+    );
+    assert_eq!(out.status.code(), Some(1));
+
+    let out = run(
+        &["find", "--session", &session, "img", "--ext", "jpg"],
+        fake,
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(json_lines(&out).last().unwrap()["total"], 1);
+
+    let out = run(
+        &[
+            "recover",
+            "--session",
+            &session,
+            "--source",
+            &image,
+            "--dest",
+            &dir.join("out"),
+            "--all",
+        ],
+        fake,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(json_lines(&out).last().unwrap()["event"], "recover_done");
+
+    let out = run(
+        &[
+            "recover",
+            "--session",
+            &session,
+            "--dest",
+            &dir.join("out"),
+            "--all",
+        ],
+        fake,
+    );
+    assert_eq!(out.status.code(), Some(1), "no source attached");
+    assert_eq!(
+        json_lines(&out).last().unwrap()["error"]["code"],
+        "no_source"
+    );
+
+    let out = run(
+        &[
+            "carve",
+            "--session",
+            &session,
+            "--source",
+            &image,
+            "--kinds",
+            "jpeg,png",
+        ],
+        fake,
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let out = run(
+        &[
+            "carve",
+            "--session",
+            &session,
+            "--source",
+            &image,
+            "--kinds",
+            "doc",
+        ],
+        fake,
+    );
+    assert_eq!(out.status.code(), Some(1));
+
+    let out = run(&["image", &image, "--dest", &dir.join("copy.img")], fake);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        json_lines(&out).last().unwrap()["data"]["status"],
+        "completed"
+    );
+}

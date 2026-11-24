@@ -5,8 +5,26 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+# The library holds the protocol types, the server and the command-line
+# interface, so that integration tests and the step that connects hds-core
+# and hds-recover can use them; the binary is a thin `main`.
+[lib]
+name = "hds_engine"
+path = "src/lib.rs"
+
 [[bin]]
 name = "hdsavior-engine"
 path = "src/main.rs"
 
 [dependencies]
+hds-io = { workspace = true }
+hds-carve = { workspace = true }
+# The wire form of the protocol (PROTOCOL.md): one JSON object per line.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# SetErrorMode(SEM_FAILCRITICALERRORS) at start, so that an empty card
+# reader never raises a system dialog. Same version as hds-io uses.
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61.2"
+features = ["Win32_System_Diagnostics_Debug"]

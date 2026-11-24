@@ -6,3 +6,12 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+hds-ntfs = { workspace = true }
+hds-io = { workspace = true }
+hds-carve = { workspace = true }
+# Progress and summary objects cross the engine protocol (the engine serializes them).
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# The fixture tests read the JSON manifests and the output of scripts/linux/inspect-ntfs.py.
+serde_json = "1"

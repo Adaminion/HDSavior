@@ -9,10 +9,24 @@ version = "0.1.0"
 [[package]]
 name = "hds-core"
 version = "0.1.0"
+dependencies = [
+ "hds-carve",
+ "hds-io",
+ "hds-ntfs",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "hds-engine"
 version = "0.1.0"
+dependencies = [
+ "hds-carve",
+ "hds-io",
+ "serde",
+ "serde_json",
+ "windows-sys",
+]
 
 [[package]]
 name = "hds-io"
@@ -31,6 +45,13 @@ version = "0.1.0"
 [[package]]
 name = "hds-recover"
 version = "0.1.0"
+dependencies = [
+ "hds-carve",
+ "hds-io",
+ "hds-ntfs",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "hds-testkit"
