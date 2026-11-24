@@ -2568,14 +2568,16 @@ def tool_versions():
     return v
 
 
-RESERVED_DEVICE_NAMES = set(["CON", "PRN", "AUX", "NUL"] + ["COM%d" % i for i in range(1, 10)]
-                            + ["LPT%d" % i for i in range(1, 10)])
+# ALGORITHMS.md H4 step 4
+RESERVED_DEVICE_NAMES = set(["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+                            + ["COM%d" % i for i in range(10)] + ["LPT%d" % i for i in range(10)]
+                            + ["COM\u00b9", "COM\u00b2", "COM\u00b3", "LPT\u00b9", "LPT\u00b2", "LPT\u00b3"])
 
 
 def name_issues(name, folded_siblings):
     """Why a name cannot be re-created unchanged in an ordinary Windows folder (or on Linux).
 
-    These are the cases ARCHITECTURE.md 6.8 step 3 sanitizes; a recovered copy
+    These are the cases ALGORITHMS.md H4 sanitizes; a recovered copy
     of such an entry cannot sit at exactly the manifest's path.
     folded_siblings maps the upper-cased names of the folder to their count.
     """
@@ -2586,7 +2588,8 @@ def name_issues(name, folded_siblings):
         issues.append("control-char")
     if name[-1] in ". ":
         issues.append("trailing-dot-or-space")
-    if name.split(".")[0].rstrip(" ").upper() in RESERVED_DEVICE_NAMES:
+    if "".join(c.upper() if "a" <= c <= "z" else c for c in name.split(".")[0].rstrip(" ")) \
+            in RESERVED_DEVICE_NAMES:                         # ASCII case-insensitive
         issues.append("reserved-device-name")
     if folded_siblings[name.upper()] > 1:
         issues.append("case-collision")
@@ -2822,7 +2825,8 @@ def _(state, ctx):
     if not ok or not reused or not broken:
         fail("g1: %d files intact, %d with clusters reused by g2, %d of them damaged; all three are required"
              % (len(ok), len(reused), len(broken)))
-    nobody = [x for x in broken if x["after"]["damage_evidence"] == ["none"]]
+    damaged = [x for x in survivors if x["type"] == "file" and not x["after"]["content_intact"]]
+    nobody = [x for x in damaged if x["after"]["damage_evidence"] == ["none"]]
     g1_changed = max(x["mft_changed"] for x in survivors)
     g2_changed = min(e["mft_changed"] for e in g2 if e["after"]["record_intact"])
     g1_last = state["history"][0]["last_old_write"]
@@ -2832,11 +2836,11 @@ def _(state, ctx):
     if not taken:
         fail("no g1 entry names a parent slot that now holds a g2 record")
     return ("g1 (%d entries) was formatted over by g2 (%d entries) at the same MFT origin; %d g1 entries keep "
-            "their record, all numbered above g2's last record %d; %d g1 files are intact, %d had clusters "
-            "reused by g2 and %d of those lost content (%d without evidence in g2's surviving records: g2 "
-            "files deleted before the accident); %d g1 entries name a parent slot that g2 took over; every g1 "
-            "MFT-change time is older than every g2 one"
-            % (len(g1), len(g2), len(survivors), top2, len(ok), len(reused), len(broken), len(nobody),
+            "their record, all numbered above g2's last record %d; %d g1 files are intact, %d lost content: %d "
+            "to clusters g2 still had allocated, %d to g2 files deleted before the accident (no evidence on "
+            "the disk); %d g1 entries name a parent slot that g2 took over; every g1 MFT-change time is older "
+            "than every g2 one"
+            % (len(g1), len(g2), len(survivors), top2, len(ok), len(damaged), len(broken), len(nobody),
                len(taken)))
 
 

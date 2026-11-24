@@ -298,8 +298,11 @@ class _FilePreviewState extends State<FilePreview> {
   @override
   void initState() {
     super.initState();
-    // Small files are previewed at once; large pictures on request.
-    if (widget.row.size <= 2 * 1024 * 1024 || !_picture) unawaited(_load());
+    // Small files are previewed at once, large pictures on request; nothing
+    // is read for a file that cannot be read (see build).
+    final readable =
+        widget.app.catalog.sourceAttached && widget.row.rating != Rating.unsupported && widget.row.size > 0;
+    if (readable && (widget.row.size <= 2 * 1024 * 1024 || !_picture)) unawaited(_load());
   }
 
   Future<void> _load() async {

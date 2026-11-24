@@ -352,7 +352,10 @@ class _AttachDialogState extends State<_AttachDialog> {
     super.initState();
     final recorded = app.source.current?.info;
     if (recorded?.kind == SourceKind.disk) _diskPath = recorded!.path;
-    unawaited(app.source.refreshDisks());
+    // Not during this build: the refresh notifies its listeners at once.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(app.source.refreshDisks());
+    });
   }
 
   Future<void> _attach(SourceKind kind, String path, {bool force = false}) async {

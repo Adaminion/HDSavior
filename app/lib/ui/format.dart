@@ -22,11 +22,13 @@ final class Formats {
   }
 
   /// Formats for the system's locale (for example `de_DE`), with the date
-  /// symbols of that locale loaded. Falls back to `en_US`.
+  /// symbols loaded. Falls back to `en_US`. (The plain constructor knows
+  /// `en_US` only, until this has run once.)
   static Future<Formats> forLocale(String? systemLocale) async {
-    final locale = _supported(systemLocale ?? 'en_US');
-    await initializeDateFormatting(locale);
-    return Formats(locale);
+    // The symbols of all locales are compiled in; loading them is cheap and
+    // must happen before a locale can even be looked up.
+    await initializeDateFormatting();
+    return Formats(systemLocale ?? 'en_US');
   }
 
   static String _supported(String locale) {

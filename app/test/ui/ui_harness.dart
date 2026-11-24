@@ -32,6 +32,12 @@ Future<void> settle(WidgetTester tester) async {
   await tester.pump(const Duration(milliseconds: 10));
 }
 
+/// Lets a dialog finish opening or closing (its route animates).
+Future<void> settleDialog(WidgetTester tester) async {
+  await settle(tester);
+  await tester.pump(const Duration(milliseconds: 400));
+}
+
 /// Waits until [finder] finds something (rows arrive page by page).
 Future<void> pumpUntil(WidgetTester tester, Finder finder, {int tries = 50}) async {
   for (var i = 0; i < tries && finder.evaluate().isEmpty; i++) {
@@ -51,6 +57,7 @@ Future<FakeApp> pumpApp(
   bool elevated = true,
   String os = 'windows',
   int pageSize = 200,
+  String? sessionDirectory,
   void Function(FakeApp fake)? prepare,
   bool start = true,
 }) async {
@@ -59,7 +66,14 @@ Future<FakeApp> pumpApp(
   tester.platformDispatcher.platformBrightnessTestValue = brightness;
   addTearDown(tester.view.reset);
   addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
-  final fake = FakeApp(mainNodes: mainNodes, elevated: elevated, pageSize: pageSize, settle: () => settle(tester));
+  final fake = FakeApp(
+    mainNodes: mainNodes,
+    elevated: elevated,
+    os: os,
+    pageSize: pageSize,
+    sessionDirectory: sessionDirectory,
+    settle: () => settle(tester),
+  );
   prepare?.call(fake);
   await tester.pumpWidget(
     RepaintBoundary(
@@ -69,6 +83,21 @@ Future<FakeApp> pumpApp(
   );
   if (start) await settle(tester);
   return fake;
+}
+
+/// Taps [finder] after scrolling it into view.
+Future<void> tapVisible(WidgetTester tester, Finder finder) async {
+  await tester.ensureVisible(finder);
+  await tester.pump();
+  await tester.tap(finder);
+  await settle(tester);
+}
+
+/// Types [text] into the field [finder] and presses Enter.
+Future<void> typeAndSubmit(WidgetTester tester, Finder finder, String text) async {
+  await tester.enterText(finder, text);
+  await tester.testTextInput.receiveAction(TextInputAction.done);
+  await settle(tester);
 }
 
 /// Unmounts the app and shuts the fake engine down.

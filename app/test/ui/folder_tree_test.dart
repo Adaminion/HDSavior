@@ -1,6 +1,7 @@
 // The flattened, lazily loaded folder tree of the Results screen, against
 // the fake engine: what each line is, expanding and collapsing, paging of
 // large folders, and what happens when the listings change underneath.
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hdsavior/engine/engine.dart';
 import 'package:hdsavior/state/state.dart';
@@ -106,6 +107,13 @@ void main() {
   });
 
   test('a folder with thousands of subfolders is paged, not loaded at once', () async {
+    tree.dispose();
+    await fake.dispose();
+    fake = FakeApp(mainNodes: 100000);
+    await fake.start();
+    await fake.scan();
+    tree = FolderTree(app().catalog, app().browse);
+    expect(fake.landmarks.manyFoldersCount, greaterThan(1000));
     final entries = await lines();
     final many = entries.firstWhere((e) => e.id == fake.landmarks.manyFolders);
     fake.engine.requests.clear();
@@ -116,7 +124,7 @@ void main() {
     expect(requests.single.args['limit'], 200);
     expect(tree.length, entries.length + fake.landmarks.manyFoldersCount);
     // A line far down is a placeholder until its page arrives.
-    final far = tree.length - 2;
+    final far = entries.indexOf(many) + fake.landmarks.manyFoldersCount; // its last subfolder
     expect(tree.entryAt(far).loading, isTrue);
     await fake.settle();
     expect(tree.entryAt(far).loading, isFalse);
@@ -152,22 +160,31 @@ void main() {
     expect(entries.any((e) => e.id == fake.landmarks.deletedOnlyFolder), isTrue);
   });
 
-  test('a listing that changed under an expansion drops that expansion', () async {
+  test('a listing that changed under an expansion drops that expansion instead of showing wrong folders', () async {
     var entries = await lines();
-    final documents = entries.firstWhere((e) => e.id == fake.landmarks.documents);
-    tree.expand(documents);
+    tree.expand(entries.firstWhere((e) => e.id == fake.landmarks.documents));
     await lines();
-    // Same epoch, other rows at the same positions: the fake rebuilds its
-    // catalog with another epoch, so pretend by sorting differently.
-    // (A geometry or carving refresh keeps positions; this covers the
-    // defensive path.) Simulate by expanding a placeholder position whose
-    // row then turns out to be another folder.
-    final mainIndex = 0;
-    final rows = app().browse.folders(entries[mainIndex].id!)!;
-    rows.refresh();
+    // Carving keeps the epoch but adds [Carved files] to the main root, so
+    // every folder after it moves down by one position.
+    await fake.run(() => app().carve.start());
+    await fake.finishJob();
     entries = await lines();
-    expect(entries.firstWhere((e) => e.id == fake.landmarks.documents).expanded, isTrue,
-        reason: 'unchanged positions keep the expansion');
+    await fake.settle();
+    entries = await lines();
+    final carved = app().catalog.info!.mainInstance!.virtual.carved;
+    expect(carved, isNotNull);
+    expect(entries.where((e) => e.id == carved), hasLength(1));
+    // No line claims to be the expanded Documents unless it really is.
+    for (final entry in entries.where((e) => e.expanded && !e.isRoot)) {
+      final children = await fake.run(
+        () => app().api.listChildren(epoch: app().catalog.epoch!, node: entry.id!, dirsOnly: true),
+      );
+      final index = entries.indexOf(entry);
+      if (children.total > 0) expect(entries[index + 1].ancestors.last, entry.id);
+    }
+    // Each folder appears once.
+    final ids = [for (final e in entries) e.id];
+    expect(ids.toSet(), hasLength(ids.length));
   });
 
   test('a failed listing is a line with the error, and retry loads it', () async {
@@ -185,4 +202,3 @@ void main() {
   });
 }
 
-bool listEquals(List<int> a, List<int> b) => a.length == b.length && [for (var i = 0; i < a.length; i++) a[i] == b[i]].every((x) => x);

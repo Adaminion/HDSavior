@@ -47,7 +47,6 @@ import os
 import struct
 import sys
 import time
-import zlib
 
 sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))

@@ -231,6 +231,8 @@ class FolderTree extends ChangeNotifier {
   TreeEntry _within(_Folder folder, int index, int depth) {
     final ancestors = folder.childAncestors;
     if (folder.rows.total == null) {
+      // Ask for the first page (again, after a retry); safe during a build.
+      folder.rows.load();
       return TreeEntry._(depth: depth, ancestors: ancestors, loading: true, error: folder.rows.error, parent: folder);
     }
     var rest = index;

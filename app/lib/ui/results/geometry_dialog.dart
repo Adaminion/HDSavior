@@ -181,11 +181,15 @@ class _GeometryDialogState extends State<_GeometryDialog> {
                           SizedBox(
                             width: 180,
                             child: DropdownButtonFormField<int>(
+                              isExpanded: true,
                               initialValue: clusterSizes.contains(_clusterSize) ? _clusterSize : 4096,
                               decoration: const InputDecoration(labelText: S.factClusterSize),
                               items: [
                                 for (final size in clusterSizes)
-                                  DropdownMenuItem(value: size, child: Text(formats.bytes(size))),
+                                  DropdownMenuItem(
+                                    value: size,
+                                    child: Text(formats.bytes(size), overflow: TextOverflow.ellipsis),
+                                  ),
                               ],
                               onChanged: (value) => setState(() => _clusterSize = value ?? 4096),
                             ),
