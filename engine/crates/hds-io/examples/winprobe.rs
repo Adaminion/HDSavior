@@ -574,11 +574,21 @@ fn out_steps(base: &Path, steps: &mut Steps) -> Result<(), String> {
     drop(file);
     let report = photos.set_times(&times);
     let dir_meta = std::fs::metadata(photos.path()).map_err(|e| e.to_string())?;
+    let dir_entry_meta = std::fs::read_dir(root.path())
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .find(|e| e.file_name() == "Photos")
+        .and_then(|e| e.metadata().ok());
     steps.check(
         "directory times are applied",
         report.modified == TimeOutcome::Applied
             && dir_meta.modified().ok() == expected(times.modified),
-        format!("{report:?}"),
+        format!(
+            "{report:?}; expected {:?}, by handle {:?}, by parent listing {:?}",
+            expected(times.modified),
+            dir_meta.modified().ok(),
+            dir_entry_meta.and_then(|m| m.modified().ok()),
+        ),
     );
 
     // Leftovers of a killed run.
