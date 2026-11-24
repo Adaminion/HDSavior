@@ -9,6 +9,13 @@
 //!   geometry, health) build on.
 //! * [`scan`] - the scanner (ALGORITHMS A).
 //! * [`session`] - the session file and the identity check (ALGORITHMS B).
+//! * [`live`] - current volumes (ALGORITHMS C).
+//! * [`instances`] - MFT instances (ALGORITHMS D).
+//! * [`geometry`] - geometry per instance (ALGORITHMS F).
+//! * [`catalog`] - the catalog build (ALGORITHMS E).
+//! * [`health`] - health flags and ratings (ALGORITHMS G).
+//! * [`query`] - catalog queries and recovery plans.
+//! * [`carve`] - carving (ALGORITHMS I).
 //!
 //! ```
 //! use std::sync::atomic::AtomicBool;
@@ -50,6 +57,13 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod carve;
+pub mod catalog;
+pub mod geometry;
+pub mod health;
+pub mod instances;
+pub mod live;
+pub mod query;
 pub mod scan;
 pub mod session;
 pub mod store;
