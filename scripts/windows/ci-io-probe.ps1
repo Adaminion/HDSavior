@@ -112,7 +112,7 @@ try {
     Write-Host '== winprobe read (raw disk, elevated)'
     $r = Run-Probe @('read', "$srcDisk")
     Write-Host $r.Text
-    if ($r.Code -eq 0) { Pass "read PhysicalDrive$srcDisk: first and last sector readable" } else { Fail "read exited $($r.Code)" }
+    if ($r.Code -eq 0) { Pass "read PhysicalDrive${srcDisk}: first and last sector readable" } else { Fail "read exited $($r.Code)" }
     if ($r.Text -match ('"disk_number":\s*' + $srcDisk + '\b')) { Pass 'read: disk number reported by the device' } else { Fail 'read: disk number missing' }
     if ($r.Text -match '"mounted_volume"') { Pass 'read: mounted_volume warning' } else { Fail 'read: no mounted_volume warning for T:' }
     if ($r.Text -notmatch '"system_disk"') { Pass 'read: no system_disk warning for the VHD' } else { Fail 'read: system_disk warning on the VHD' }

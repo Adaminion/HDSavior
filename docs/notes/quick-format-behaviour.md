@@ -256,9 +256,12 @@ robocopy, Copy-Item and Move-Item all carry the source's `$STANDARD_INFORMATION`
 the copy, to the 100 ns tick (60 of 60; the raw `$SI`, the time the system reports and the source's time
 are identical, so this is not an unflushed record). A volume filled from a backup therefore holds
 records whose `$SI` times say nothing about when they were written to this volume: a whole generation
-can look years old. Candidate remedy, being measured: `$FILE_NAME` times are written when the name is
-created on the volume and cannot be set through the file API, so "the time this record was last
-written here" would be the latest of the `$SI` MFT-change time and the record's `$FILE_NAME` times.
+can look years old. Remedy, measured in the fourth run: in all 60 copies every `$FILE_NAME` time is the moment the
+copy was created on the volume (robocopy, Copy-Item and Move-Item alike), and in all 1491 ordinary
+old files the latest `$FILE_NAME` time is not later than the `$SI` MFT-change time (the creation times
+are equal). So the latest of the two is "the time this record was last written here" for copies and
+equals the MFT-change time otherwise. ALGORITHMS calls it the *record time* and uses it in C3, C4,
+D2/D3, D7, D8/D9 and E6.
 A sparse file with one 4 KiB block every 128 KiB (1500 blocks) got a resident `$ATTRIBUTE_LIST`
 with 19 entries and 17 extension records (1560–1576), all intact after the format. (With one block
 every 8 KiB it got one run: sparse files allocate in 64 KiB units.)

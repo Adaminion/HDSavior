@@ -16,8 +16,19 @@ Vocabulary
 - **Reference rule.** A reference `(N, s)` *resolves* to record `R` with number
   `N` when `R` is in use and `R.seq == s`, or `R` is not in use and
   `R.seq == next(s)` (freeing a record bumps its sequence; reuse does not).
-- *MFT-change time* — the third timestamp of `$STANDARD_INFORMATION`. Unlike
-  creation time it cannot be back-dated by copy or backup tools.
+- *Record time* — the latest of a record's `$STANDARD_INFORMATION` MFT-change
+  time (its third timestamp) and the four times of each of its `$FILE_NAME`
+  attributes; a record with neither has none. It stands for "when this record was
+  last written on its volume". The MFT-change time alone does not: Windows' copy
+  tools (robocopy, Copy-Item and Explorer's copy, Move-Item across volumes) copy
+  the source's MFT-change time to the tick, so a volume filled from a backup holds
+  records whose MFT-change times are years old. `$FILE_NAME` times are written
+  when the name is created on the volume and cannot be set through the file API;
+  for files that were not copied they are never later than the MFT-change time,
+  so the record time equals it (measured on Windows 11 24H2's kernel:
+  docs/notes/quick-format-behaviour.md, 7a).
+- *Entry time* — of an `IndexEntry`: the latest of the four times of its
+  `$FILE_NAME` copy.
 
 ---
 
@@ -67,7 +78,7 @@ disk offset; record size; record number (absent for pre-3.1 headers); sequence;
 header flags; link count; LSN; base reference; `hash`; fixup status;
 `$STANDARD_INFORMATION` (four times, file-attribute flags) when present; every
 `$FILE_NAME` (parent reference, namespace, flags, attribute id, name as UTF-16
-units); the unnamed `$DATA` extents present in this record — resident
+units), and the latest of all `$FILE_NAME` times (for the record time); the unnamed `$DATA` extents present in this record — resident
 (attribute offset and length **inside the record**; content is not stored) or
 non-resident (start VCN, header last VCN, runs, attribute flags, and
 allocated / real / initialized size, which are meaningful only when the start
@@ -80,7 +91,7 @@ are otherwise ignored. Directory entries found in a `$INDEX_ROOT:$I30` are
 emitted as `IndexEntry` values with the record's offset and LSN as source.
 
 **A5. IndexEntry** (directory entries only): child reference, parent reference,
-namespace, name, the entry's MFT-change time (from its `$FILE_NAME` copy),
+namespace, name, the entry time (from its `$FILE_NAME` copy),
 source disk offset (block or record), source LSN.
 
 **A6. Read errors** are classified by `hds-io` (media / device lost / caller /
@@ -171,7 +182,7 @@ volume at all can be read where a boot sector says there is one, the warning
 a current `$MFT`'s extents below the initialized size is classified:
 
 - slot in use per the live `$BITMAP` → `live`: hidden, counted;
-- slot free, the record has a `$STANDARD_INFORMATION`: MFT-change time ≥
+- slot free, the record has a `$STANDARD_INFORMATION`: record time ≥
   `format_time` → `post_format`, a file deleted on the current volume;
   an older time → an old record that survived in an unused slot;
 - slot free, no `$STANDARD_INFORMATION` (an extension record): header flag
@@ -189,7 +200,7 @@ are never the target of a parent or base reference: a reference that only
 such a record would satisfy leads to a lost folder or an orphan group.
 
 **C4. Current index data.** An `IndexBlock` inside live-allocated ranges, and
-any `IndexEntry` whose MFT-change time is ≥ `format_time` or whose source is
+any `IndexEntry` whose entry time is ≥ `format_time` or whose source is
 such a block or a current-volume record, belongs to the current volume and is
 excluded from lost-folder naming (E6) and geometry votes (F).
 
@@ -218,12 +229,12 @@ whose gap lies at another origin.
 
 **D2. Generation cuts.** Every format puts the MFT in the same place, so the
 tail of an older file system's MFT survives directly behind the newer one's:
-same origin, higher record numbers, older change times. Time alone does not
+same origin, higher record numbers, older record times. Time alone does not
 prove this — deleting an old folder and copying new files in, or renaming the
 oldest files, leaves the same pattern inside one file system — so a cut needs
 a time boundary **and** a contradiction. Within one fragment:
 
-- A *timed* record has a plausible MFT-change time: not 0, not before 1980,
+- A *timed* record has a plausible record time: not 0, not before 1980,
   not more than a day after the scan.
 - A *changepoint* is a record number `p`, with at least one timed record on
   each side, such that every timed record numbered ≥ `p` is strictly older
@@ -257,7 +268,7 @@ The pieces between kept cuts are *segments*, numbered from 0 at the lowest
 record numbers (the newest generation of that fragment). A fragment without a
 kept cut is one segment.
 
-**D3. Boundary times.** For a kept cut `c`: `B_c` = the newest change time
+**D3. Boundary times.** For a kept cut `c`: `B_c` = the newest record time
 among the timed records of the segment directly above it (the older side),
 `A_c` = the oldest among those of the segment directly below that are newer
 than `B_c` (for a cut at a changepoint that is all of them, and `B_c < A_c`:
@@ -333,8 +344,8 @@ name lost folders of other instances (E6).
 **D7. Embedded instances.** Instance `X` is *embedded* in instance `Y` when
 `Y` has a validated geometry, at least 90 % of `X`'s records lie inside data
 extents of in-use non-directory files of `Y`, and the file that holds most of
-them (the *container*) has an MFT-change time not more than a day older than
-the oldest change time of `X`'s records inside it. If only the last condition
+them (the *container*) has a record time not more than a day older than
+the oldest record time of `X`'s records inside it. If only the last condition
 fails, or if `X` is a volume of the disk itself — its validated geometry puts
 its volume at the range start or at a partition start, and fewer than 90 % of
 its records repeat records of another instance as D6 compares them — the
@@ -353,7 +364,7 @@ strays, `main` is the first that exists in this order: (1) an anchor (if there
 are several, one of the current volume with the newest `format_time` first —
 the accident is the latest format — then the one with most records); (2) an instance with
 validated geometry whose volume offset equals the range start or a partition
-start, newest change time first; (3) the instance with the newest change
+start, newest record time first; (3) the instance with the newest change
 time; (4) the one with most records. `instance_set` overrules the choice; the
 choice is stored in the session. Two accidents on the same volume (formatted,
 used, formatted again) are handled the same way: the file system lost last is
@@ -365,7 +376,7 @@ another partition of the disk after the accident: its leftovers win (1), and
 
 **D9. Kinds.** `main`; `older` — an instance that a kept cut puts on the
 older side of `main` (it holds the segment above the cut, or is *before* it),
-or whose newest change time is older than `main`'s oldest and whose geometry
+or whose newest record time is older than `main`'s oldest and whose geometry
 is not validated at a different volume offset: a file system from before the
 previous format; `other` — a different volume (whole-disk scans) or records
 that nothing ties to `main`; `embedded`; `strays`. Every instance is a root of
@@ -419,7 +430,7 @@ with number `P` and sequence `s` among the strays that comes from a group at
 least 90 % of whose records repeat records of `I` as D6 compares them (a stale
 copy of `I` itself). With several
 entries: skip the DOS namespace when another exists, then take the one with
-the latest MFT-change time, then the highest source LSN, then the lowest
+the latest entry time, then the highest source LSN, then the lowest
 source offset (LSNs of different file systems are not comparable: a new
 `$LogFile` may restart below the old one's numbers). An entry is *usable* for instance `I` when it is not
 current-volume data (C4); it belongs to `I` — it comes from an `$INDEX_ROOT`
@@ -428,11 +439,11 @@ record of `I` exactly (number, sequence, name and parent reference equal to
 one of the record's `$FILE_NAME`s) and no entry names a record of another
 instance so; a block in which no entry names any record so belongs to `I`
 when its owner resolves to a directory of `I`, or, failing that, when its
-owner number is not present in any instance and the entry's MFT-change time
-is not more than a day older than the oldest change time of `I`'s records
+owner number is not present in any instance and the entry time
+is not more than a day older than the oldest record time of `I`'s records
 (an older file system whose records are all gone still leaves index blocks;
 `strays` counts as an instance here); it is on `I`'s side of every kept cut that concerns
-`I` (its MFT-change time compared as in D3); and its source offset is not
+`I` (its entry time compared as in D3); and its source offset is not
 inside a data extent of an in-use non-directory file of `I` (which would make
 it part of an embedded file system). A named lost folder is attached by the
 rules of E5/E6 applied to the entry's parent reference; a nameless one, and
@@ -569,7 +580,7 @@ of the group), `missing_fragments`, `size_estimated`, `out_of_bounds`,
 **G2. Overlap conflicts.** All extents of all non-embedded instances are
 compared in absolute bytes (sort, sweep). For two files that share bytes, the
 winner is decided by, in order: instance kind (`main` over `other` over
-`older` over `strays`); in use over deleted; later MFT-change time; higher LSN.
+`older` over `strays`); in use over deleted; later record time; higher LSN.
 The loser gets `overwritten`. The winner gets `overlap` only when both are in
 use and of the same instance kind. A full tie gives both `overlap`.
 

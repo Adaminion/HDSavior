@@ -443,7 +443,9 @@ whenever a catalog arrives or a geometry changes.
    resident attribute lists produced by real NTFS, destination guard on a
    volume of that disk, junction, symlink, dangling file symlink and mounted
    folder inside the destination, timestamp edge values, the MFT-change time
-   after a move and a `robocopy` between volumes, the slot a new file gets
+   after a move and a `robocopy` between volumes (measured: copies keep the
+   source's MFT-change time, which is why ALGORITHMS uses the *record time*
+   with the `$FILE_NAME` times), the slot a new file gets
    after low slots were freed); then `flutter build windows`, bundling and
    artifact upload.
 5. Flutter: widget tests against a fake engine that replays the recorded
