@@ -1,4 +1,6 @@
-* text=auto
+# LF everywhere, also in Windows checkouts: tests on Windows read the documents
+# (PROTOCOL.md examples and lists) and must see the same bytes as on Linux.
+* text=auto eol=lf
 *.sh text eol=lf
 *.py text eol=lf
 *.rs text eol=lf
