@@ -61,7 +61,8 @@
 #   embedded        a host holding a sparse, fragmented file that is itself an
 #                   NTFS volume with more entries than the host
 #   repartition     one 128 MiB volume replaced by two 56 MiB partitions, both
-#                   quick-formatted; the nominal scan range is the first
+#                   quick-formatted; the nominal scan range is the first; the
+#                   old volume was full, four files straddle the first's end
 #   live-collision  quick format, then new folders created in exactly the
 #                   record slots of destroyed old folders whose children survive
 #

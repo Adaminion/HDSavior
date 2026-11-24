@@ -33,7 +33,7 @@ scripts/linux/make-fixtures.sh --list
 ```
 
 The whole build (16 scenarios) takes about 80 seconds on a 4-core machine and
-leaves about 550 MB on disk (1.7 GiB apparent size; the images are sparse). It
+leaves about 610 MB on disk (1.7 GiB apparent size; the images are sparse). It
 needs root because it mounts. Per scenario it writes `<name>.img` and
 `<name>.manifest.json`; with `--keep-pre` also `<name>.pre.img`, the same image
 right before the accident (for `repartition`: with the old partition table).
@@ -248,7 +248,7 @@ inside the scan range / all).
 | `generations` | 128 MiB volume | g2 on top of g1, 4 KiB clusters | quick format, same parameters | g2: 349 / 82 / 14; g1: 2599 / 32 | 0-255 | 192, 76 (55) | g1: 284 |
 | `generations-restored` | as generations | g2's files with g1-era creation times | as generations | as generations | 0-255 | 192, 76 (55) | g1: 284 |
 | `embedded` | 128 MiB volume | host 4 KiB clusters, 32 MiB inner volume in a file | quick format of the host | host 365 / 83 / 14; inner 691 / 13 | 0-255 | 192, 76 (55) | 0 |
-| `repartition` | 136 MiB disk, MBR | 128 MiB partition at sector 2048 | two 56 MiB partitions, both quick-formatted | 1364 / 98 / 14 | 0-255 | 192, 76 (15 in scan range) | 15 (outside the scan range) |
+| `repartition` | 136 MiB disk, MBR | 128 MiB partition at sector 2048 | two 56 MiB partitions, both quick-formatted | 1435 / 100 / 14 | 0-255 | 192, 76 (15 in scan range) | 22 (17 outside the scan range) |
 | `live-collision` | 128 MiB volume | 4 KiB clusters | quick format, then 144 new entries (76 folders in old folders' slots), 5 deleted again | 1598 / 111 / 14 | 0-255 (219 changed) | 192, 76 (1) | 239 |
 
 "219 changed": slots 27-63 of the old `$MFT` held never-used blank records that
@@ -335,9 +335,20 @@ What each one is for:
 - **repartition** - one 128 MiB volume at sector 2048 was replaced by two
   56 MiB partitions (the last 16 MiB stay unpartitioned; the old backup boot
   sector survives at the old volume's last sector); both were quick-formatted.
-  `scan_range` is the first partition. 98 intact old files lie wholly inside
-  it, 361 reach beyond it (346 of them intact, 15 damaged by the second
-  partition's format): `after.data_inside_scan_range`. The smaller first
+  `scan_range` is the first partition. 130 intact old files lie wholly inside
+  it, 394 reach beyond it (377 of them intact, 17 damaged by the second
+  partition's format): `after.data_inside_scan_range`. 12 of those straddle
+  the first partition's end (a run starting inside it, data behind it); four
+  of them, `across/`, by construction: the old volume was filled up with
+  1 MiB files (`fill/`), and four times a fill file lying wholly in front of
+  the boundary and one lying wholly behind it were cut to half their size
+  and a file of exactly the 256 clusters this freed was written, so it had
+  to take clusters on both sides (`straddle-plan`, run on the unmounted
+  volume between the populate phases, picks the pairs; populating takes
+  three mounts here). Where ntfs-3g puts the other files depends on all
+  that was written before them, including the toolchain-dependent samples:
+  without `rar` (as on CI runners) two fewer files shift the layout. The
+  check requires at least 50 / 100 / 5 / 4 of the four kinds. The smaller first
   partition put its root index elsewhere, so the old root's first INDX block
   survives too; but INDX blocks outside the scan range are invisible to a scan
   of it, so `after.ancestry` (scan range) and `after.ancestry_whole_image`
@@ -363,7 +374,8 @@ with exactly this layout.
 
 `basic` and `wiped` carry the full tree described here, `cluster-change`,
 `post-write` and `live-collision` a medium one, `repartition` a medium one with
-ten 3-4 MiB files and 200 typed files written last, the others a small one: the
+ten 3-4 MiB files and 200 typed files, then `across/` and `fill/` (see the
+scenario list), the others a small one: the
 same folders with fewer names in each `names/` folder and fewer, smaller
 files elsewhere. `fragmented` has its own tree (see the scenario list) plus
 `typed/`, `names/` and `sizes/`. All of them start with the prelude.
@@ -390,6 +402,7 @@ files elsewhere. `fragmented` has its own tree (see the scenario list) plus
 | g2: `G2 Documents/`, `G2 Photos/` | generations only, besides the prelude |
 | inner: `Guest Documents/`, `Guest Pictures/`, `Guest Projects/` | embedded only: the volume inside the container |
 | host: `Host Documents/`, `typed/`, `Virtual Machines/` | embedded only, besides the prelude |
+| `across/`, `fill/` | repartition only: four files that straddle the first new partition's end, and the 1 MiB files that filled the rest of the volume (nine of them later cut to half their size; the last one written is shorter, any left over stay empty) |
 
 **Deleted entries.** Each tree deletes six entries "early" (two files and a
 folder with three files) and eight "late" (three files and a folder with two
