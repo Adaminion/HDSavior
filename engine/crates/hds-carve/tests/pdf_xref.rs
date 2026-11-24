@@ -87,6 +87,12 @@ impl Pdf {
     /// Ends the revision with a cross-reference stream (its data is not
     /// decoded by the walker; a plausible uncompressed one is written).
     fn stream_end(&mut self, num: u32, size: u32) -> usize {
+        self.stream_end_with(num, size, "")
+    }
+
+    /// [`Pdf::stream_end`] with `extra` written into the dictionary before
+    /// `/Root` (a long `/Index` array, as a large update writes).
+    fn stream_end_with(&mut self, num: u32, size: u32, extra: &str) -> usize {
         let xref = self.data.len();
         let mut objects = std::mem::take(&mut self.objects);
         objects.push((num, xref));
@@ -99,13 +105,15 @@ impl Pdf {
         let first = objects[0].0;
         let mut obj = format!(
             "{num} 0 obj\n<< /Type /XRef /Size {size} /W [1 2 1] /Index [0 1 {first} {}] \
-             /Root 1 0 R{prev} /Length {} >>\nstream\n",
+             {extra}/Root 1 0 R{prev} /Length {} >>\nstream\n",
             objects.len(),
             rows.len()
         )
         .into_bytes();
         obj.extend_from_slice(&rows);
-        obj.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+        obj.extend_from_slice(
+            format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
         self.data.extend_from_slice(&obj);
         self.prev = Some(xref);
         xref
@@ -200,11 +208,16 @@ fn incremental_updates_follow_the_prev_chain() {
     let mut p = Pdf::basic();
     let first = p.classic_end(5);
     let end1 = p.data.len();
-    p.object(4, "<< /Length 21 >>\nstream\n0 0 m 150 150 l S\n\nendstream");
+    p.object(
+        4,
+        "<< /Length 21 >>\nstream\n0 0 m 150 150 l S\n\nendstream",
+    );
     let second = p.classic_end(5);
     let end2 = p.data.len();
-    p.object(5, "<< /Producer (hand) >>")
-        .object(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Contents 4 0 R >>");
+    p.object(5, "<< /Producer (hand) >>").object(
+        3,
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Contents 4 0 R >>",
+    );
     p.classic_end(6);
     let end3 = p.data.len();
     assert_eq!(summary(run(&p.data)), verified(end3));
@@ -232,7 +245,11 @@ fn incremental_updates_follow_the_prev_chain() {
     // the last update cut short (its `%%EOF` missing): the revision before
     // it is complete, and not verified - the file went on
     for cut in [end2 + 10, end3 - 40, end3 - 7] {
-        assert_eq!(summary(run(&p.data[..cut])), unverified(end2), "cut at {cut}");
+        assert_eq!(
+            summary(run(&p.data[..cut])),
+            unverified(end2),
+            "cut at {cut}"
+        );
     }
     // cut before the first `%%EOF`: nothing
     assert_eq!(run(&p.data[..end1 - 7]), None);
@@ -282,10 +299,14 @@ fn a_foreign_trailer_does_not_end_the_file() {
     // taken as the end.
     let mut p = Pdf::basic();
     let inner_target = find(&p.data, b"3 0 obj");
-    let inner = format!("%PDF-1.3\n% inner\ntrailer\n<< >>\nstartxref\n{inner_target}\n%%EOF\nq Q\n");
+    let inner =
+        format!("%PDF-1.3\n% inner\ntrailer\n<< >>\nstartxref\n{inner_target}\n%%EOF\nq Q\n");
     p.object(
         5,
-        &format!("<< /Length {} >>\nstream\n{inner}\nendstream", inner.len() + 1),
+        &format!(
+            "<< /Length {} >>\nstream\n{inner}\nendstream",
+            inner.len() + 1
+        ),
     );
     p.classic_end(6);
     let inner_end = find(&p.data, b"%%EOF\nq Q") + 6;
@@ -326,4 +347,61 @@ fn linearized_length_is_checked_against_the_chain() {
         (m.len, m.confidence, m.end_verified),
         (bad.len() as u64, Confidence::Exact, false)
     );
+}
+
+#[test]
+fn many_revisions_are_verified_one_section_at_a_time() {
+    // 40 incremental updates: longer than the chain walked from one
+    // `startxref`, but each revision's chain was verified at its own
+    // `%%EOF`, and the next one stops there
+    let mut p = Pdf::basic();
+    p.classic_end(5);
+    for i in 0..40 {
+        p.object(
+            4,
+            &format!(
+                "<< /Length 21 >>\nstream\n0 0 m {:03} 100 l S\n\nendstream",
+                i
+            ),
+        );
+        p.classic_end(5);
+    }
+    assert_eq!(summary(run(&p.data)), verified(p.data.len()));
+}
+
+/// An update that lists many changed objects has a long `/Index` array in
+/// its cross-reference stream: the dictionary is longer than 1 KiB (pypdf's
+/// incremental writer and qpdf make such files). The update must not be
+/// dropped, nor a single revision lose its end.
+#[test]
+fn long_cross_reference_stream_dictionaries() {
+    // `/Index` pairs for 600 changed objects, every other number: ~4 KiB
+    let index: String = (0..600).map(|i| format!("{} 1 ", 10 + 2 * i)).collect();
+    let long = format!("/Extra [{index}] ");
+    assert!(long.len() > 3000);
+
+    // one revision
+    let mut p = Pdf::new();
+    p.data = b"%PDF-1.5\n".to_vec();
+    p.object(1, "<< /Type /Catalog /Pages 2 0 R >>")
+        .object(2, "<< /Type /Pages /Kids [] /Count 0 >>");
+    p.stream_end_with(3, 4, &long);
+    let end1 = p.data.len();
+    assert_eq!(summary(run(&p.data)), verified(end1));
+
+    // an update whose stream has the long dictionary
+    p.object(2, "<< /Type /Pages /Kids [] /Count 0 /Rotate 90 >>");
+    p.stream_end_with(4, 5, &long);
+    assert_eq!(summary(run(&p.data)), verified(p.data.len()));
+
+    // a dictionary longer than the 64 KiB read: the end is taken, unverified
+    let huge: String = (0..12000).map(|i| format!("{} 1 ", 10 + i)).collect();
+    let huge = format!("/Extra [{huge}] ");
+    assert!(huge.len() > 64 * 1024);
+    let mut q = Pdf::new();
+    q.data = b"%PDF-1.5\n".to_vec();
+    q.object(1, "<< /Type /Catalog /Pages 2 0 R >>")
+        .object(2, "<< /Type /Pages /Kids [] /Count 0 >>");
+    q.stream_end_with(3, 4, &huge);
+    assert_eq!(summary(run(&q.data)), unverified(q.data.len()));
 }

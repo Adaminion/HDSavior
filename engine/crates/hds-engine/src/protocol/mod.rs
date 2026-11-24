@@ -27,7 +27,8 @@ pub use commands::*;
 pub use events::*;
 pub use objects::*;
 pub use wire::{
-    parse_request, ErrorCode, EventData, EventLine, OutputLine, ProtocolError, Request, Response,
+    parse_request, peek_command, ErrorCode, EventData, EventLine, OutputLine, ProtocolError,
+    Request, Response,
 };
 
 pub use hds_io::{

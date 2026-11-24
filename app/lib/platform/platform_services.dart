@@ -17,6 +17,11 @@ abstract interface class PlatformServices {
   /// The path separator of this system (`\` on Windows).
   String get pathSeparator;
 
+  /// The folder the app's own program runs from, `null` if unknown. The app
+  /// asks the destination guard about it to warn when it runs from the disk
+  /// being rescued (warning `app_on_source`).
+  String? get programDirectory;
+
   /// Creates [path] and its missing parents. Call it only for a directory
   /// the destination guard has approved.
   Future<void> createDirectory(String path);
@@ -51,6 +56,15 @@ final class IoPlatformServices implements PlatformServices {
 
   @override
   String get pathSeparator => _isWindows ? r'\' : '/';
+
+  @override
+  String? get programDirectory {
+    try {
+      return File(Platform.resolvedExecutable).parent.path;
+    } on Object {
+      return null;
+    }
+  }
 
   String? _variable(String name) {
     final value = _environment[name];

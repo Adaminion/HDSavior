@@ -19,6 +19,7 @@ final Map<String, void Function(JsonObject result)> resultParsers = {
   'list_disks': (json) => json.objects('disks', Disk.fromJson),
   'open_source': OpenSourceResult.fromJson,
   'close_source': (_) {},
+  'close_session': (_) {},
   'scan_start': ScanStartResult.fromJson,
   'job_cancel': (_) {},
   'session_save': SessionSaveResult.fromJson,

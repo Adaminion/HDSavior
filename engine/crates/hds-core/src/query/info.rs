@@ -12,6 +12,13 @@ use crate::session::Session;
 
 use super::filetime_to_unix_ms;
 
+/// Warning code: the catalog comes from a scan that has not read the whole
+/// session range (`scan_complete` is false).
+pub const WARN_SCAN_INCOMPLETE: &str = "scan_incomplete";
+/// Warning code: some files have data outside the session range
+/// (`out_of_range_files` > 0).
+pub const WARN_OUT_OF_RANGE_FILES: &str = "out_of_range_files";
+
 /// What `post_format_records` means, for the UI (PROTOCOL `CatalogInfo`).
 pub const POST_FORMAT_TEXT: &str = "Files that were created and deleted again on the current \
 file system after the format. They are not shown, but what they occupied counts as overwritten.";
@@ -126,8 +133,12 @@ fn message(code: &str) -> &'static str {
             "The range holds a file system that is not NTFS (or one that could not be read): \
              writes since the format cannot be detected."
         }
-        "out_of_range_files" => {
+        WARN_OUT_OF_RANGE_FILES => {
             "Some files have data outside the scanned range. Scan the whole disk to reach them."
+        }
+        WARN_SCAN_INCOMPLETE => {
+            "The scan did not read the whole range. Files in the unread part are missing; \
+             continue the scan to find them."
         }
         _ => "",
     }
@@ -135,8 +146,17 @@ fn message(code: &str) -> &'static str {
 
 impl Catalog {
     /// Per catalog instance: (files, dirs, deleted files, lost dirs,
-    /// bytes).
+    /// bytes); counted once per catalog value (they never change in it).
     fn instance_counts(&self, ci: usize) -> [u64; 5] {
+        let all = self.cache.counts.get_or_init(|| {
+            (0..self.instances.len())
+                .map(|k| self.count_instance(k))
+                .collect()
+        });
+        all.get(ci).copied().unwrap_or_default()
+    }
+
+    fn count_instance(&self, ci: usize) -> [u64; 5] {
         let mut c = [0u64; 5];
         let Some(inst) = self.instances.get(ci) else {
             return c;
@@ -213,7 +233,11 @@ impl Catalog {
         }
         let (oor_files, oor_bytes) = self.health.out_of_range;
         if oor_files > 0 {
-            add("out_of_range_files");
+            add(WARN_OUT_OF_RANGE_FILES);
+        }
+        let scan_complete = session.is_complete();
+        if !scan_complete {
+            add(WARN_SCAN_INCOMPLETE);
         }
         let snapshot = layout.snapshot_time().and_then(filetime_to_unix_ms);
         let mut protected: Vec<Protected> = layout.protected().to_vec();
@@ -238,7 +262,7 @@ impl Catalog {
             range: layout.range().clone(),
             protected,
             scanned_bytes: store.done().total_len(),
-            scan_complete: session.is_complete(),
+            scan_complete,
             bad_bytes: store.bad_ranges().total_len(),
             out_of_range_files: oor_files,
             out_of_range_bytes: oor_bytes,

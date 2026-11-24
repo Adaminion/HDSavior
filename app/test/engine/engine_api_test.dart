@@ -47,11 +47,12 @@ void main() {
   }
 
   group('each method sends the documented command and exactly the documented arguments', () {
-    test('hello, list_disks, close_source, catalog_info, job_cancel, shutdown take none', () async {
+    test('hello, list_disks, close_source, close_session, catalog_info, job_cancel, shutdown take none', () async {
       final calls = <String, Future<Object?> Function()>{
         'hello': api.hello,
         'list_disks': api.listDisks,
         'close_source': api.closeSource,
+        'close_session': api.closeSession,
         'catalog_info': api.catalogInfo,
         'job_cancel': api.jobCancel,
         'shutdown': api.shutdown,
@@ -421,6 +422,7 @@ void main() {
         ['E:'],
       );
       await answered(api.closeSource, examples.json('close_source.result'));
+      await answered(api.closeSession, examples.json('close_session.result'));
       expect((await answered(api.scanStart, examples.json('scan_start.result'))).bytesTotal, 4000785104896);
       await answered(api.jobCancel, examples.json('job_cancel.result'));
       expect((await answered(() => api.sessionSave(path: 'p'), examples.json('session_save.result'))).bytes, 12345678);

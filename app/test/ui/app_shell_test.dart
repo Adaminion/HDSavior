@@ -227,7 +227,10 @@ void main() {
     expect(await response, AppExitResponse.exit);
     expect(fake.transport.world.savedSessions[r'C:\sessions\interrupted.hdsc']!.bytesDone, greaterThan(0));
     expect(fake.app.scan.phase, JobPhase.done);
-    expect(fake.app.scan.failure!.message, contains('shut down'));
+    // The engine ends the scan `stopped`, without a catalog, before it exits.
+    expect(fake.app.scan.status, JobStatus.stopped);
+    expect(fake.app.scan.failure, isNull);
+    expect(fake.app.catalog.hasCatalog, isFalse);
     await close(tester);
   });
 }

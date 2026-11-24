@@ -9,7 +9,7 @@ mod common;
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -477,7 +477,7 @@ fn read_file_on_a_slow_bad_disk_neither_holds_the_lock_nor_reads_for_long() {
     let read = std::thread::spawn(move || {
         let args: ReadFileArgs =
             serde_json::from_value(json!({"epoch": 0, "node": node, "length": 8388608})).unwrap();
-        let result = reader.read_file(&args);
+        let result = reader.read_file(&args, &Arc::new(AtomicBool::new(false)));
         (started.elapsed(), result.map(|f| f.data.len()))
     });
     std::thread::sleep(Duration::from_millis(300));
@@ -495,6 +495,41 @@ fn read_file_on_a_slow_bad_disk_neither_holds_the_lock_nor_reads_for_long() {
     );
     let e = result.expect_err("the read was stopped");
     assert_eq!(e.code, ErrorCode::IoError, "{e}");
+}
+
+#[test]
+fn read_file_on_a_slow_bad_disk_stops_soon_when_the_server_asks() {
+    let Some(dir) = fixtures_dir() else { return };
+    let (backend, faulty) = faulty_backend(&dir, "fragmented");
+    let search: SearchArgs = serde_json::from_value(
+        json!({"epoch": 0, "sort": "size", "desc": true, "limit": 1, "filter": null}),
+    )
+    .unwrap();
+    let node = backend.search(&search).unwrap().rows[0].row.id;
+    faulty.bad_sectors(0..u64::MAX / 2);
+    faulty.set_delay(Duration::from_millis(5));
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader = backend.clone();
+    let read_stop = stop.clone();
+    let read = std::thread::spawn(move || {
+        let args: ReadFileArgs =
+            serde_json::from_value(json!({"epoch": 0, "node": node, "length": 8388608})).unwrap();
+        reader.read_file(&args, &read_stop).map(|f| f.data.len())
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    // What the server does for `shutdown`, the end of input or `job_cancel`.
+    let asked = Instant::now();
+    stop.store(true, Ordering::SeqCst);
+    let result = read.join().unwrap();
+    let took = asked.elapsed();
+    eprintln!("the read ended {took:?} after the stop flag was set");
+    assert!(
+        took < Duration::from_secs(1),
+        "the read went on for {took:?}"
+    );
+    let e = result.expect_err("the read was stopped");
+    assert_eq!(e.code, ErrorCode::IoError, "{e}");
+    assert!(e.message.contains("later request"), "{e}");
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -644,6 +679,10 @@ fn shutdown_during_the_analysis_does_not_wait_for_the_catalog() {
     );
     let done = (job.run)(&ctx);
     assert!(done.catalog.is_none());
+    // The read phases had finished, but the job was interrupted: `stopped`
+    // (PROTOCOL scan_done), never `completed` without a catalog.
+    assert_eq!(done.status, hds_engine::protocol::ScanStatus::Stopped);
+    assert!(done.error.is_none());
     // The catalog was not built behind the scenes either.
     assert_eq!(
         backend.catalog_info().unwrap_err().code,

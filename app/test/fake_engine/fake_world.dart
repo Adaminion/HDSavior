@@ -346,7 +346,7 @@ final class FakeWorld {
       if (disk['is_system'] == true) ...[
         _warning('system_disk', 'This disk holds Windows itself. Windows keeps writing to it.'),
         _warning('page_file_on_source', 'A page file is on this disk. It is being overwritten constantly.'),
-        _warning('app_on_source', 'HDSavior itself runs from this disk.'),
+        // (`app_on_source` is the app's own warning, not the engine's.)
       ],
     ];
   }

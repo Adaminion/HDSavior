@@ -108,7 +108,10 @@ Hard requirements. A reviewer must be able to verify each by reading the code.
 
 The UI adds: a permanent notice to stop using the rescued disk, and
 read-only-computed `source_warnings` (the range is a mounted volume, a page
-file lives on it, the disk carries the system volume, TRIM is supported).
+file lives on it, the disk carries the system volume, TRIM is supported;
+the engine computes these), plus `app_on_source`, which the app raises
+itself when the folder of its own program lies on the disk being rescued
+(§6).
 
 ## 3. Background: what a quick format leaves behind
 
@@ -314,7 +317,7 @@ EOI, PNG IEND with CRCs, a box or chunk chain landing exactly, ZIP end
 record, archive end headers) as opposed to a length taken from a header
 alone. An end concluded because no more data could be read is never
 verified, and JPEG and GIF ends are verified by decoding the scan or LZW data
-to exactly the frame's size. `matches_extension` is the lenient check used for S5. The crate's
+to exactly the frame's size. `matches_extension` is the lenient check used for S5 (H9); for JPEG, ZIP and MP3 it checks the first segments, the local header or the first frames, not only the magic number. The crate's
 documentation lists every format with its confidence and known gaps.
 
 ### 5.4 `hds-recover`
@@ -332,7 +335,16 @@ The extraction engine. It knows nothing about catalogs: it executes *plans*.
   list of items (`FileSource`, relative output path as name components,
   times, extension, pre-read flags, node id) plus the folders to create;
   writes through `hds_io::out`, verifies signatures, appends the report,
-  reports progress, honours cancel.
+  reports progress, honours cancel. A plan can also be *lazy*
+  (`Recovery::prepare_lazy`): the folders in full, the files through a
+  `PlanFiles` source that describes a file only when the job needs it. The
+  job then keeps some 60 bytes per file (the source's 12, and folder
+  index, place in the H5 order, collision suffix and claimed-name hash;
+  62 measured on a million files) instead of about 450 for whole entries:
+  it orders the files by their first data byte, assigns names one output
+  directory at a time (H4; a name is rebuilt from the stored name and its
+  suffix when the file is written) and asks for the full entry right
+  before writing.
 - `image(source, range, dest, options, observer)` — ALGORITHMS J.
 
 ### 5.5 `hds-core`
@@ -342,7 +354,13 @@ Modules: `scan`, `session`, `live`, `instances`, `catalog`, `geometry`,
 Rules: [ALGORITHMS.md](ALGORITHMS.md). Scale targets: ten million records on a
 16 TB disk — no per-record heap allocation in the scan state, one name arena
 for search, sorted listings cached per (node or search arguments, sort,
-filters) so further pages cost O(limit).
+filters) so further pages cost O(limit) (what reads find, G1, empties
+only the lists that filter or sort by rating). `recover_start` holds the
+engine's lock only while it selects (O(selected files), 12 bytes per file:
+node, flags, rating context); the recovery job reads the store through a
+shared handle (`Session::shared_store`), so queries are answered while it
+runs. The per-instance counts of `catalog_info` are counted once per
+catalog.
 
 ### 5.6 `hds-engine`
 
@@ -352,7 +370,22 @@ request handler or a job is caught and answered with `internal`; this needs
 crate refuses to compile with `panic = "abort"`). Every other
 subcommand is a thin wrapper around the same protocol commands and prints
 their results and events as JSON, one object per line, on stdout; logs go to
-stderr. Exit code 0 = ok, 1 = the job failed, 2 = usage error.
+stderr. Exit code 0 = ok, 1 = the job failed, 2 = usage error, 130 = the
+job was stopped with Ctrl-C.
+
+Ctrl-C while a job of `scan`, `recover`, `carve` or `image` runs ends the
+job the clean way instead of the process: `scan` sends `shutdown` (the
+scan stops reading and writes its session checkpoint; no catalog is
+built, and `--resume` continues it), the others send `job_cancel` (a
+recovery removes its current part file), and
+`recover` and `carve` then save the session back as after any job. The
+`*_done` event is printed, then the program exits with 130 (0 if the job
+had completed before the cancel took effect; a scan stopped while it builds
+its catalog ends `stopped`, so 130). For `recover` and `carve` the first
+Ctrl-C is also caught while the session is saved back after the job: the
+save finishes, then the program exits with 130. A second Ctrl-C ends the
+program at once. Outside a job Ctrl-C has its usual effect. (Windows:
+console control handler for Ctrl-C and Ctrl-Break; Unix: `SIGINT`.)
 
 ```
 hdsavior-engine serve
@@ -415,7 +448,17 @@ Dart fake engine replays it, so both sides stay in step.
 The UI holds no file data: it pages through the engine. It never writes into
 the protected ranges either (S2): it asks `check_destination` with purpose
 `app_data` for its own directories when a source is opened and again
-whenever a catalog arrives or a geometry changes.
+whenever a catalog arrives or a geometry changes. When a disk is opened it
+also asks about the folder of its own program: a verdict of
+`overlaps_source` or `same_disk` adds the warning `app_on_source` to the
+disk's warnings ("HDSavior itself may run from this disk"). Any other
+verdict except `ok` (`unknown_disk`; `not_writable`, which the guard can
+give before it determines the disk), or no answer, adds it as well, with a
+message that says the disk could not be determined.
+
+"Choose another source" closes the results: the app sends `close_source`
+and then `close_session`, so the engine keeps no session the app no longer
+shows (PROTOCOL `close_session`).
 
 ## 7. Testing
 

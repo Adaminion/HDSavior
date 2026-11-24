@@ -79,6 +79,7 @@ const Set<String> argumentExamples = {
 /// Examples of the empty result `{}`.
 const Set<String> emptyResults = {
   'close_source.result',
+  'close_session.result',
   'job_cancel.result',
   'job_cancel.result.no_job',
   'shutdown.result',

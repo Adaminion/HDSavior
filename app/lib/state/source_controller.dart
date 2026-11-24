@@ -28,8 +28,9 @@ final class OpenedSource {
   final PartitionTableKind? table;
   final List<Partition> partitions;
 
-  /// The engine's warnings about the source: TRIM, mounted volume, page
-  /// file, system disk, the app itself on the source.
+  /// The warnings about the source: the engine's (TRIM, mounted volume,
+  /// page file, system disk) and the app's own `app_on_source` (see
+  /// [SourceController.openDisk]).
   final List<Warning> warnings;
 
   /// `false`: the recorded source of a session that could not be attached.
@@ -158,7 +159,50 @@ class SourceController extends ChangeNotifier {
     _appDataCheck = null;
   }
 
-  /// Opens the physical disk [disk] for reading (`open_source`).
+  /// The warnings the app adds itself for the opened source [info]:
+  /// `app_on_source` when the folder of the app's own program may lie on
+  /// that disk (docs/PROTOCOL.md, Warning). `check_destination` (purpose
+  /// `app_data`) is asked about the folder: `overlaps_source` or `same_disk`
+  /// say that it does; any other verdict but `ok` (`unknown_disk`, or
+  /// `not_writable`, which the guard can give before it looks at the disk)
+  /// and a failed request leave it open, and the warning says so. Images
+  /// get none.
+  Future<List<Warning>> _ownWarnings(SourceInfo info) async {
+    final program = _platform.programDirectory;
+    if (info.kind != SourceKind.disk || program == null || program.isEmpty) return const [];
+    final unknown = 'HDSavior runs from $program. Whether that folder is on this disk could not be determined';
+    final DestinationCheck check;
+    try {
+      check = await _api.checkDestination(path: program, purpose: DestinationPurpose.appData);
+    } on Object {
+      return [Warning(code: WarningCode.appOnSource.wire, message: '$unknown.')];
+    }
+    final message = switch (check.verdict) {
+      DestinationVerdict.ok => '',
+      DestinationVerdict.overlapsSource ||
+      DestinationVerdict.sameDisk => 'HDSavior runs from $program, which is on this disk.',
+      _ => '$unknown${_detail(check.message)}.',
+    };
+    if (message.isEmpty) return const [];
+    return [Warning(code: WarningCode.appOnSource.wire, message: message)];
+  }
+
+  /// `: [message]` without its final full stop, or nothing.
+  static String _detail(String message) {
+    final text = message.trim();
+    if (text.isEmpty) return '';
+    return ': ${text.endsWith('.') ? text.substring(0, text.length - 1) : text}';
+  }
+
+  /// [engine]'s warnings plus [own], without an earlier `app_on_source`.
+  static List<Warning> _withOwn(List<Warning> engine, List<Warning> own) => [
+    ...engine.where((w) => w.kind != WarningCode.appOnSource),
+    ...own,
+  ];
+
+  /// Opens the physical disk [disk] for reading (`open_source`). The
+  /// source's [OpenedSource.warnings] are complete when this returns: the
+  /// engine's, and `app_on_source` if the app runs from that disk.
   Future<OpenSourceResult> openDisk(Disk disk) =>
       _open(SourceKind.disk, disk.path, null);
 
@@ -177,23 +221,27 @@ class SourceController extends ChangeNotifier {
         // "Closes any previously open source and drops its session and
         // catalog."
         _catalog.clear();
+        final own = await _ownWarnings(result.source);
         _opened(
           OpenedSource(
             info: result.source,
             table: result.table,
             partitions: result.partitions,
-            warnings: result.warnings,
+            warnings: _withOwn(result.warnings, own),
           ),
           sessionPath: null,
         );
         return result;
       });
 
-  /// Closes the source (`close_source`) and forgets its session and catalog.
-  /// The engine keeps a session browsable after `close_source`; the app does
-  /// not use it, and the next `open_source` or `session_load` replaces it.
+  /// Closes the source and its session ("Choose another source": the
+  /// results are closed). `close_source` alone would leave the session
+  /// browsable in the engine (state B), which the app would no longer show,
+  /// so `close_session` drops it too: afterwards neither side has a source
+  /// or a session (state N).
   Future<void> close() => _exclusive(() async {
     await _api.closeSource();
+    await _api.closeSession();
     _catalog.clear();
     _sourceGeneration++;
     _current = null;
@@ -209,9 +257,11 @@ class SourceController extends ChangeNotifier {
       _exclusive(() async {
         try {
           final result = await _api.sessionLoad(path: path, source: source);
+          final own = result.sourceAttached ? await _ownWarnings(result.source) : const <Warning>[];
           _opened(
             OpenedSource(
               info: result.source,
+              warnings: own,
               attached: result.sourceAttached,
               attachError: result.sourceError,
             ),
@@ -241,12 +291,13 @@ class SourceController extends ChangeNotifier {
     // another path the engine has reported no partitions.
     final previous = _current;
     final same = previous != null && previous.info.path == result.source.path;
+    final own = await _ownWarnings(result.source);
     _opened(
       OpenedSource(
         info: result.source,
         table: same ? previous.table : null,
         partitions: same ? previous.partitions : const [],
-        warnings: same ? previous.warnings : const [],
+        warnings: _withOwn(same ? previous.warnings : const [], own),
       ),
       sessionPath: _sessionPath,
     );

@@ -655,6 +655,10 @@ fn summary_reports_instances_and_ranges() {
         .any(|p| p.reason == hds_io::ProtectedReason::LostVolume));
     assert_eq!(s.nodes, cat.node_count());
     assert!(s.scan_complete);
+    assert_eq!(s.out_of_range_files, 0);
+    assert!(!s.warnings.iter().any(|w| {
+        w.code == super::WARN_SCAN_INCOMPLETE || w.code == super::WARN_OUT_OF_RANGE_FILES
+    }));
     assert_eq!(filetime_to_unix_ms(116_444_736_000_000_000), Some(0));
     assert_eq!(filetime_to_unix_ms(0), None);
     assert_eq!(filetime_to_unix_ms(u64::MAX), None);
@@ -1037,17 +1041,37 @@ fn hostile_index_entries_and_lost_folder_chains() {
             assert_eq!(cat.flags(id), cat3.flags(id), "resume flags");
         }
         // Plan paths (built from the parent's path) equal the walked ones.
-        let plan = cat
-            .plan(
-                store,
-                &Selection {
-                    include: cat.instances().iter().map(|i| i.root.wire()).collect(),
-                    include_deleted: true,
-                    ..Default::default()
-                },
-                None,
-            )
-            .unwrap();
+        let sel = Selection {
+            include: cat.instances().iter().map(|i| i.root.wire()).collect(),
+            include_deleted: true,
+            ..Default::default()
+        };
+        let plan = cat.plan(store, &sel, None).unwrap();
+        // The lazy plan describes every file as the full plan does, in any
+        // order of questions.
+        let lazy_sel = cat.plan_selection(store, &sel, None).unwrap();
+        assert_eq!(lazy_sel.file_count(), plan.files.len());
+        let mut lazy = lazy_sel.into_lazy(std::sync::Arc::new(store.clone()));
+        assert_eq!(lazy.folders, plan.folders);
+        assert_eq!(lazy.files.count(), plan.files.len());
+        for (i, f) in plan.files.iter().enumerate().rev() {
+            let facts = lazy.files.facts(i).unwrap();
+            assert_eq!(
+                (facts.node, facts.size, facts.flags, facts.context),
+                (f.node, f.size, f.flags, f.context)
+            );
+            let place = lazy.files.place(i).unwrap();
+            assert_eq!(
+                (place.folder, place.first_data_offset),
+                (f.folder, f.first_data_offset)
+            );
+            let name = lazy.files.name(i).unwrap();
+            assert_eq!(
+                (&name.name, name.in_use, name.record_number),
+                (&f.name, f.in_use, f.record_number)
+            );
+            assert_eq!(&lazy.files.file(i).unwrap(), f, "round {round}");
+        }
         assert_eq!(
             plan.files.len() as u64,
             cat.node_ids()

@@ -13,6 +13,7 @@
 //! * [`server`] - `serve` over stdin / stdout, and [`InProcess`](server::InProcess)
 //!   for the command-line interface.
 //! * [`cli`] - the subcommands of ARCHITECTURE.md section 5.6.
+//! * [`interrupt`] - Ctrl-C while a command-line job runs.
 //! * [`testing`] - a test double of the backend.
 //! * [`transcript`] - the recorded conversation `docs/protocol-examples.jsonl`.
 //!
@@ -39,6 +40,7 @@ pub mod backend;
 pub mod base64;
 pub mod cli;
 pub mod engine;
+pub mod interrupt;
 pub mod output;
 pub mod platform;
 pub mod protocol;

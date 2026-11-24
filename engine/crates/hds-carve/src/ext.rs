@@ -7,6 +7,34 @@
 //! the file is known to exist and the only question is whether its content
 //! can be what its name says. Any start that a valid file of the family can
 //! have counts as a match.
+//!
+//! Where a format's magic number is short, more than the magic number is
+//! required, because foreign data under a wrong geometry or in an
+//! overwritten first cluster starts with it by chance often enough to
+//! matter (ALGORITHMS F3, H9):
+//!
+//! * JPEG: `FF D8`, then the marker segments as far as the head shows them:
+//!   each a marker that can come before the first scan (APPn, COM, DQT,
+//!   DHT, SOFn, DAC, DRI; fill bytes allowed) whose length fits its content
+//!   (DQT: 1-4 tables of 65 or 129 bytes; DHT: the symbol count; SOFn:
+//!   8 + 3 per component, 1-4 components, precision 2-16, non-zero width;
+//!   DRI: 4; DAC: 2 per table, at most 8), the next marker right behind it.
+//!   APPn and COM start with an identifier: four printable characters, or
+//!   two or three ended by a NUL. A scan header before any frame header is
+//!   a mismatch. Random bytes behind `FF D8 FF` pass about 0.15 % of the
+//!   time.
+//! * ZIP: a local header with version needed up to 6.3, no reserved flag
+//!   bits, a method from the specification, a name of 1-4096 bytes without
+//!   control characters (the check of [`sniff`](crate::sniff)); an empty
+//!   archive's end record with all counts, sizes and offsets zero; or the
+//!   spanned-archive marker followed by such a local header.
+//! * MP3: an ID3v2 header with version 2-4, revision 0, defined flags,
+//!   7-bit size bytes and a first frame ID of capitals and digits (or zero
+//!   padding, or an extended header); a layer III frame with a `Xing`,
+//!   `Info` or `VBRI` header; or two frame headers that agree (version,
+//!   layer, sampling rate), the second where the first one's length puts
+//!   it. A single frame header is no opinion (`None`): the second frame of
+//!   a file without a tag lies beyond the first 64 bytes.
 
 use crate::{mp3, sniff, FileKind};
 
@@ -227,7 +255,9 @@ fn is_jpeg(head: &[u8]) -> bool {
         };
         let len = len as usize;
         let body = head.get(p + 4..).unwrap_or(&[]);
-        let body = body.get(..len.saturating_sub(2).min(body.len())).unwrap_or(body);
+        let body = body
+            .get(..len.saturating_sub(2).min(body.len()))
+            .unwrap_or(body);
         if len < 2 || !segment_ok(marker, len, body) {
             return false;
         }
@@ -242,9 +272,11 @@ fn segment_ok(marker: u8, len: usize, body: &[u8]) -> bool {
     let payload = len - 2;
     match marker {
         // APPn: an identifier in ASCII first (`JFIF`, `Exif`, `http://`,
-        // `ICC_PROFILE`, `MPF`, `Ducky`, `Photoshop 3.0`, `Adobe`, ...);
-        // COM: text (FFmpeg, gd and other libraries put their name there)
-        0xE0..=0xEF | 0xFE => identifier(body, payload),
+        // `ICC_PROFILE`, `MPF`, `Ducky`, `Photoshop 3.0`, `Adobe`, ...)
+        0xE0..=0xEF => identifier(body, payload, false),
+        // COM: text (FFmpeg, gd and other libraries put their name there;
+        // a user's comment may be UTF-8, Latin-1 or another code page)
+        0xFE => identifier(body, payload, true),
         // DQT: tables of 65 (8-bit) or 129 (16-bit) bytes
         0xDB => {
             let id_ok = body.first().is_none_or(|&b| b >> 4 <= 1 && b & 15 <= 3);
@@ -288,9 +320,14 @@ fn segment_ok(marker: u8, len: usize, body: &[u8]) -> bool {
 /// The start of an APPn or COM segment's `payload` bytes, of which `body`
 /// is the visible part: at least two printable characters, and four
 /// unless a NUL ends the identifier earlier (`MPF\0`, `JP\0` of JPEG XT).
-/// A segment too short for that only needs printable content.
-fn identifier(body: &[u8], payload: usize) -> bool {
-    let text = |c: u8| crate::util::is_printable(c) || matches!(c, b'\t' | b'\r' | b'\n');
+/// A segment too short for that only needs printable content. With
+/// `any_8bit` (a comment) every byte from 0x80 up counts as printable too.
+fn identifier(body: &[u8], payload: usize, any_8bit: bool) -> bool {
+    let text = |c: u8| {
+        crate::util::is_printable(c)
+            || matches!(c, b'\t' | b'\r' | b'\n')
+            || (any_8bit && c >= 0x80)
+    };
     let run = body.iter().take_while(|&&c| text(c)).count();
     let want = payload.min(4);
     if run >= want {
@@ -323,7 +360,11 @@ fn is_tiff(head: &[u8]) -> bool {
 fn is_zip(head: &[u8]) -> bool {
     match head.get(..4) {
         Some(b"PK\x03\x04") => crate::zip::local_header_plausible(head),
-        Some(b"PK\x05\x06") => head.get(4..20).unwrap_or(&head[4..]).iter().all(|&b| b == 0),
+        Some(b"PK\x05\x06") => head
+            .get(4..20)
+            .unwrap_or(&head[4..])
+            .iter()
+            .all(|&b| b == 0),
         Some(b"PK\x07\x08") => crate::zip::local_header_plausible(head.get(4..).unwrap_or(&[])),
         _ => false,
     }

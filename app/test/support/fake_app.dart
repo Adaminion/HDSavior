@@ -40,13 +40,17 @@ final class FakeApp {
     int maxCachedPages = 64,
     Duration? tick,
     String? sessionDirectory,
+    String? pathSeparator,
+    String? programDirectory = r'C:\Program Files\HDSavior',
     Future<void> Function()? settle,
   }) : transport = FakeEngineTransport(
          options: FakeEngineOptions(mainNodes: mainNodes, tick: tick, elevated: elevated, os: os, protocol: protocol),
        ),
-       platform = sessionDirectory == null
-           ? InertPlatformServices()
-           : InertPlatformServices(defaultSessionDirectory: sessionDirectory),
+       platform = InertPlatformServices(
+         defaultSessionDirectory: sessionDirectory ?? InertPlatformServices.windowsSessionDirectory,
+         pathSeparator: pathSeparator ?? r'\',
+         programDirectory: programDirectory,
+       ),
        _settle = settle ?? pumpEventQueue {
     app = AppController(
       transport: transport,

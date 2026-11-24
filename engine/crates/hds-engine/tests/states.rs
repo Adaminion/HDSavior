@@ -74,6 +74,7 @@ fn requests(s: &Setup) -> Vec<(&'static str, Value)> {
         ("job_cancel", json!({})),
         ("open_source", json!({"kind": "image", "path": s.image})),
         ("close_source", json!({})),
+        ("close_session", json!({})),
         ("session_load", json!({"path": s.dir.join("loaded.hds")})),
         (
             "session_attach_source",
@@ -118,7 +119,9 @@ fn expected(cmd: &str) -> [Option<ErrorCode>; 6] {
     let ok = None;
     match cmd {
         "hello" | "list_disks" | "job_cancel" | "shutdown" => [ok; 6],
-        "open_source" | "close_source" | "session_load" => [ok, ok, Some(Busy), ok, ok, Some(Busy)],
+        "open_source" | "close_source" | "close_session" | "session_load" => {
+            [ok, ok, Some(Busy), ok, ok, Some(Busy)]
+        }
         "session_attach_source" | "session_save" => [
             Some(NoSession),
             Some(NoSession),
@@ -184,7 +187,7 @@ fn expected(cmd: &str) -> [Option<ErrorCode>; 6] {
 fn error_by_state_table_cell_by_cell() {
     let states = [N, O, S, C, B, J];
     let commands: Vec<&str> = requests(&setup(N)).into_iter().map(|(c, _)| c).collect();
-    assert_eq!(commands.len(), 22, "every command of PROTOCOL.md");
+    assert_eq!(commands.len(), 23, "every command of PROTOCOL.md");
     let mut cells = 0;
     for (column, state) in states.into_iter().enumerate() {
         for cmd in &commands {
@@ -203,7 +206,54 @@ fn error_by_state_table_cell_by_cell() {
             cells += 1;
         }
     }
-    assert_eq!(cells, 22 * 6);
+    assert_eq!(cells, 23 * 6);
+}
+
+#[test]
+fn close_session_drops_the_session_and_keeps_the_source() {
+    // C → O: the catalog is gone, the source stays open.
+    let mut s = setup(C);
+    s.h.ok("close_session", json!({}));
+    assert!(s.h.fake.calls().contains(&"close_session".to_string()));
+    assert_eq!(s.h.code("catalog_info", json!({})), NoCatalog);
+    assert_eq!(
+        s.h.code("list_children", json!({"epoch": s.epoch, "node": 0})),
+        NoCatalog
+    );
+    assert_eq!(
+        s.h.code("session_save", json!({"path": s.dir.join("x.hds")})),
+        NoSession
+    );
+    assert_eq!(s.h.code("scan_start", json!({"resume": true})), NoSession);
+    s.h.ok(
+        "check_destination",
+        json!({"path": s.dir.join("dest"), "purpose": "recover"}),
+    );
+    // Again: nothing to drop, still answered.
+    s.h.ok("close_session", json!({}));
+
+    // B → N: no session and no source any more.
+    let mut s = setup(B);
+    s.h.ok("close_session", json!({}));
+    assert_eq!(s.h.code("catalog_info", json!({})), NoCatalog);
+    assert_eq!(
+        s.h.code("session_save", json!({"path": s.dir.join("x.hds")})),
+        NoSession
+    );
+    assert_eq!(
+        s.h.code(
+            "session_attach_source",
+            json!({"kind": "image", "path": s.image})
+        ),
+        NoSession
+    );
+    assert_eq!(
+        s.h.code(
+            "check_destination",
+            json!({"path": s.dir.join("dest"), "purpose": "recover"})
+        ),
+        NoSource
+    );
 }
 
 #[test]

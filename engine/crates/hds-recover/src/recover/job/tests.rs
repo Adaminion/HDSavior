@@ -10,7 +10,7 @@ use std::sync::Arc;
 use hds_io::testing::MemSource;
 
 use super::*;
-use crate::plan::PlanFile;
+use crate::plan::{Plan, PlanFile};
 use crate::source::{FileSource, Run};
 use crate::testutil::{pattern, utf16, TempDir};
 
@@ -55,21 +55,26 @@ fn a_name_this_run_produced_is_never_overwritten_or_skipped() {
         let job = Recovery::prepare(source, plan, &tmp.join("out"), options).unwrap();
         let Recovery {
             source,
-            plan,
+            folders,
+            mut files,
             options,
             root,
             limit,
-            mut tree,
+            tree,
             mut report,
             bytes_total,
             ..
         } = job;
+        let mut tree = tree.expect("an eager plan is named when it is prepared");
         let claimed = std::mem::take(&mut tree.claimed);
+        let first = files.file(0).unwrap();
+        let second = files.file(1).unwrap();
         let mut observer = ();
         let cancel = AtomicBool::new(false);
         let mut runner = Runner {
             source: &source,
-            plan: &plan,
+            plan_folders: &folders,
+            files: &mut *files,
             tree: &tree,
             options: &options,
             root: &root,
@@ -83,7 +88,7 @@ fn a_name_this_run_produced_is_never_overwritten_or_skipped() {
             produced: HashSet::new(),
             outputs: Vec::new(),
             root_outputs: 0,
-            folders: Vec::new(),
+            folders_state: Vec::new(),
             cache: Vec::new(),
             tick: 0,
             buffer: Vec::new(),
@@ -94,7 +99,7 @@ fn a_name_this_run_produced_is_never_overwritten_or_skipped() {
             files_total: 2,
         };
         // The first file, normally.
-        let done = runner.process_file(0).unwrap();
+        let done = runner.process_file(0, &first).unwrap();
         assert_eq!(done.status, FileStatus::OkUnverified);
         assert_eq!(done.output_path, "a.txt");
         // The second file's part, committed under the first file's name, as if the
@@ -105,7 +110,6 @@ fn a_name_this_run_produced_is_never_overwritten_or_skipped() {
             name: "a.txt".into(),
             suffix: 1,
         };
-        let second = plan.files[1].clone();
         let outcome = runner
             .commit(&mut part, None, runner.root_len, &second, &alias)
             .unwrap();

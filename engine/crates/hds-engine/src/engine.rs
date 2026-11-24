@@ -7,11 +7,26 @@
 //! one queue is what gives the ordering rules:
 //!
 //! * requests are answered one at a time, in arrival order;
+//! * `read_file` reads on a worker thread (see "Reads" below); until its
+//!   response is written, every later input waits in a queue of held
+//!   inputs, so responses stay in request order;
 //! * the response to `X_start` is written before the job's thread is allowed
 //!   to run, so before any event of the job;
 //! * the job's `X_done` event is the value its run function returns; the
 //!   engine writes it when it takes the completion from the queue, after
 //!   freeing the job slot and putting the resulting state in place.
+//!
+//! # Reads
+//!
+//! A `read_file` that passed its checks reads on its own thread, with the
+//! backend's time limit (about 5 s, `READ_FILE_DEADLINE`). Meanwhile the
+//! engine thread keeps taking inputs from the channel but holds them: it
+//! answers nothing else and handles no job completion before the read's
+//! response is written. Three inputs stop the read at once when they
+//! arrive (it then answers `io_error`): `shutdown`, the end of input, and
+//! `job_cancel` while a job runs. They are then handled in their turn,
+//! right after the read's response, so they are answered within moments
+//! and still in order.
 //!
 //! # States
 //!
@@ -31,7 +46,7 @@
 //! | command | check, in this order |
 //! |---|---|
 //! | `hello`, `list_disks`, `job_cancel`, `shutdown` | always answered |
-//! | `open_source`, `close_source`, `session_load` | S, J `busy` |
+//! | `open_source`, `close_source`, `close_session`, `session_load` | S, J `busy` |
 //! | `session_save` | S, J `busy` · no session `no_session` · guard `destination_refused` |
 //! | `session_attach_source` | S, J `busy` · no session `no_session` · open errors · `source_mismatch` (backend) |
 //! | `geometry_set`, `instance_set` | S, J `busy` · no catalog `no_catalog` · wrong epoch `stale_catalog` · unknown instance `not_found` · bad values / `strays` `bad_request` |
@@ -55,6 +70,7 @@
 //! `CatalogInfo.protected`.
 
 use std::any::Any;
+use std::collections::VecDeque;
 use std::io;
 use std::ops::Range;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -115,6 +131,23 @@ pub enum Input {
     Eof,
     /// The engine's job ended (sent by the job's thread).
     JobFinished(Box<JobFinished>),
+    /// A `read_file` ended (sent by its thread).
+    ReadFinished(Box<ReadFinished>),
+}
+
+/// The end of a `read_file`, as its thread reports it.
+pub struct ReadFinished {
+    /// The request id.
+    id: i64,
+    /// The response's result or error.
+    result: Result<Value, ProtocolError>,
+}
+
+/// The `read_file` being read.
+struct RunningRead {
+    /// Stops the read (the backend answers `io_error`).
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
 }
 
 /// The end of a job, as its thread reports it.
@@ -218,6 +251,8 @@ struct PendingJob {
 enum Reply {
     Value(Value),
     Job(Value, PendingJob),
+    /// A `read_file` that passed its checks: read on a worker.
+    Read(ReadFileArgs),
     Shutdown,
 }
 
@@ -319,6 +354,10 @@ pub struct Engine {
     last_epoch: u64,
     job: Option<RunningJob>,
     last_job_id: u64,
+    /// The `read_file` being read, if any.
+    read: Option<RunningRead>,
+    /// Inputs held while a read runs, oldest first.
+    held: VecDeque<Input>,
 }
 
 impl Engine {
@@ -336,6 +375,8 @@ impl Engine {
             last_epoch: 0,
             job: None,
             last_job_id: 0,
+            read: None,
+            held: VecDeque::new(),
         }
     }
 
@@ -352,8 +393,11 @@ impl Engine {
     /// `*_done` event and returns. Requests that arrive while the job ends
     /// are not answered.
     pub fn run(mut self) {
-        while let Ok(input) = self.inbox_rx.recv() {
+        while let Some(input) = self.next_input() {
             match input {
+                Input::ReadFinished(finished) => self.finish_read(*finished),
+                // Everything else waits for the read's response (see "Reads").
+                input if self.read.is_some() => self.hold(input),
                 Input::Line(line) => {
                     if self.handle_line(line) == Flow::Exit {
                         break;
@@ -366,8 +410,47 @@ impl Engine {
                 Input::JobFinished(finished) => self.finish_job(*finished),
             }
         }
+        // No read runs here: the loop ends only on an input handled after
+        // the read's response.
         self.stop_job_and_wait();
         log_info("exiting");
+    }
+
+    /// The next input: a held one once no read runs, else the channel's.
+    fn next_input(&mut self) -> Option<Input> {
+        if self.read.is_none() {
+            if let Some(input) = self.held.pop_front() {
+                return Some(input);
+            }
+        }
+        self.inbox_rx.recv().ok()
+    }
+
+    /// Whether `input` stops a running read when it arrives: `shutdown`,
+    /// the end of input, `job_cancel` while a job runs.
+    fn preempts(&self, input: &Input) -> bool {
+        match input {
+            Input::Eof => true,
+            Input::Line(Ok(text)) => match crate::protocol::peek_command(text).as_deref() {
+                Some("shutdown") => true,
+                Some("job_cancel") => self.job.is_some(),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Holds `input` until the read's response is written; stops the read
+    /// first if `input` asks for that.
+    fn hold(&mut self, input: Input) {
+        if self.preempts(&input) {
+            if let Some(read) = &self.read {
+                if !read.stop.swap(true, Ordering::SeqCst) {
+                    log_info("read_file stopped: a later request needs the engine");
+                }
+            }
+        }
+        self.held.push_back(input);
     }
 
     /// Ends the running job for shutdown or end of input: sets its shutdown
@@ -382,11 +465,18 @@ impl Engine {
         job.shutdown.store(true, Ordering::SeqCst);
         job.cancel.store(true, Ordering::SeqCst);
         while self.job.is_some() {
-            match self.inbox_rx.recv() {
-                Ok(Input::JobFinished(finished)) => self.finish_job(*finished),
-                Ok(Input::Line(_)) => log_warn("a request after shutdown was ignored"),
-                Ok(Input::Eof) => {}
-                Err(_) => break,
+            // The completion may already wait among the held inputs.
+            let input = match self.held.pop_front() {
+                Some(input) => input,
+                None => match self.inbox_rx.recv() {
+                    Ok(input) => input,
+                    Err(_) => break,
+                },
+            };
+            match input {
+                Input::JobFinished(finished) => self.finish_job(*finished),
+                Input::Line(_) => log_warn("a request after shutdown was ignored"),
+                Input::Eof | Input::ReadFinished(_) => {}
             }
         }
     }
@@ -454,6 +544,10 @@ impl Engine {
                 self.start_job(id, value, pending);
                 Flow::Continue
             }
+            Ok(Reply::Read(args)) => {
+                self.start_read(id, args);
+                Flow::Continue
+            }
             Ok(Reply::Shutdown) => {
                 self.out.respond(Some(id), Ok(&Empty {}));
                 Flow::Exit
@@ -479,6 +573,10 @@ impl Engine {
             Command::CloseSource => {
                 parse_args::<Empty>(args)?;
                 self.close_source()
+            }
+            Command::CloseSession => {
+                parse_args::<Empty>(args)?;
+                self.close_session()
             }
             Command::ScanStart => self.scan_start(parse_args(args)?),
             Command::JobCancel => {
@@ -782,6 +880,17 @@ impl Engine {
         reply(&Empty {})
     }
 
+    /// Drops the session and its catalog; a source stays open (C → O,
+    /// B → N). Changes not yet written to the session file are lost, as
+    /// with `open_source`.
+    fn close_session(&mut self) -> Handled {
+        self.not_busy()?;
+        if self.session.take().is_some() {
+            self.backend.close_session();
+        }
+        reply(&Empty {})
+    }
+
     fn check_destination(&self, args: CheckDestinationArgs) -> Handled {
         self.source()?;
         reply(&self.check(&args.path, args.purpose, &self.protected(), args.need_bytes))
@@ -1078,25 +1187,61 @@ impl Engine {
         self.source()?;
         self.require_epoch(args.epoch)?;
         validate::read_length(args.length)?;
-        let mut bytes = self.backend.read_file(&args)?;
-        let length = usize::try_from(args.length).unwrap_or(usize::MAX);
-        if bytes.data.len() > length {
-            log_warn("read_file: the backend returned more bytes than requested");
-            bytes.data.truncate(length);
-            bytes.eof = false;
+        Ok(Reply::Read(args))
+    }
+
+    /// Starts the read of a checked `read_file` on a worker thread; its
+    /// response is written when [`Input::ReadFinished`] arrives.
+    fn start_read(&mut self, id: i64, args: ReadFileArgs) {
+        let stop = Arc::new(AtomicBool::new(false));
+        // A held `shutdown` or `job_cancel` stops this read at once too.
+        if self.held.iter().any(|input| self.preempts(input)) {
+            stop.store(true, Ordering::SeqCst);
         }
-        let kind = if args.offset == 0 {
-            hds_carve::sniff(&bytes.data[..bytes.data.len().min(hds_carve::SNIFF_LEN)])
-                .map(|k| k.name().to_string())
-        } else {
-            None
-        };
-        reply(&ReadFileResult {
-            data_b64: crate::base64::encode(&bytes.data),
-            size: bytes.size,
-            eof: bytes.eof,
-            kind,
-        })
+        let backend = self.backend.clone();
+        let inbox = self.inbox_tx.clone();
+        let thread_stop = stop.clone();
+        let spawned = thread::Builder::new()
+            .name("hds-read".into())
+            .spawn(move || {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    read_file_result(&*backend, &args, &thread_stop)
+                }))
+                .unwrap_or_else(|payload| {
+                    let text = panic_text(&*payload);
+                    log_error(&format!("the handler of read_file panicked: {text}"));
+                    Err(ProtocolError::internal(format!(
+                        "the engine failed while handling read_file: {text}"
+                    )))
+                });
+                // The engine waits for this completion before it ends.
+                let _ = inbox.send(Input::ReadFinished(Box::new(ReadFinished { id, result })));
+            });
+        match spawned {
+            Ok(thread) => self.read = Some(RunningRead { stop, thread }),
+            Err(e) => {
+                log_error(&format!("cannot start a read thread: {e}"));
+                self.out.respond::<Value>(
+                    Some(id),
+                    Err(&ProtocolError::internal(format!(
+                        "cannot start the read: {e}"
+                    ))),
+                );
+            }
+        }
+    }
+
+    /// Writes the response of the finished read.
+    fn finish_read(&mut self, finished: ReadFinished) {
+        if let Some(read) = self.read.take() {
+            if read.thread.join().is_err() {
+                log_error("a read thread ended abnormally");
+            }
+        }
+        match &finished.result {
+            Ok(value) => self.out.respond(Some(finished.id), Ok(value)),
+            Err(error) => self.out.respond::<Value>(Some(finished.id), Err(error)),
+        }
     }
 
     // --------------------------------------------------------------------------------------
@@ -1256,6 +1401,7 @@ impl Engine {
             log_error("a job thread ended abnormally");
         }
         let cancelled = job.cancel.load(Ordering::SeqCst);
+        let shut_down = job.shutdown.load(Ordering::SeqCst);
         let outcome = finished
             .outcome
             .unwrap_or_else(|error| failed_outcome(job.kind, error, job.label.clone()));
@@ -1267,6 +1413,14 @@ impl Engine {
                     }
                 }
                 if done.status == ScanStatus::Failed {
+                    done.catalog = None;
+                }
+                // After shutdown or the end of input a scan is `stopped`
+                // without a catalog (PROTOCOL scan_done), also when the job
+                // had built one before it saw the flag: the shutdown
+                // response may already be out.
+                if shut_down && done.status != ScanStatus::Failed {
+                    done.status = ScanStatus::Stopped;
                     done.catalog = None;
                 }
                 match &mut done.catalog {
@@ -1295,6 +1449,34 @@ impl Engine {
             log_info("the cancelled job has ended");
         }
     }
+}
+
+/// The result of `read_file` (on the read's thread): the backend's bytes,
+/// encoded and sniffed.
+fn read_file_result(
+    backend: &dyn Backend,
+    args: &ReadFileArgs,
+    stop: &Arc<AtomicBool>,
+) -> Result<Value, ProtocolError> {
+    let mut bytes = backend.read_file(args, stop)?;
+    let length = usize::try_from(args.length).unwrap_or(usize::MAX);
+    if bytes.data.len() > length {
+        log_warn("read_file: the backend returned more bytes than requested");
+        bytes.data.truncate(length);
+        bytes.eof = false;
+    }
+    let kind = if args.offset == 0 {
+        hds_carve::sniff(&bytes.data[..bytes.data.len().min(hds_carve::SNIFF_LEN)])
+            .map(|k| k.name().to_string())
+    } else {
+        None
+    };
+    serialize(&ReadFileResult {
+        data_b64: crate::base64::encode(&bytes.data),
+        size: bytes.size,
+        eof: bytes.eof,
+        kind,
+    })
 }
 
 fn serialize<T: Serialize>(value: &T) -> Result<Value, ProtocolError> {

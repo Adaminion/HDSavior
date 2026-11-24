@@ -163,7 +163,7 @@ pub use health::{
 pub use image::{
     image, ImageJob, ImageObserver, ImageOptions, ImageProgress, ImageStartError, ImageSummary,
 };
-pub use plan::{Plan, PlanFile, PlanFolder};
+pub use plan::{FileFacts, FileName, FilePlace, LazyPlan, Plan, PlanFile, PlanFiles, PlanFolder};
 pub use reader::{
     read_preview, signature_flag, CarveFailure, CarveReader, ContentReader, Preview, PreviewError,
     ReadError, ReadReport, HEAD_LEN, MAX_LISTED_RANGES, MAX_PREVIEW_LEN, READ_CHUNK,

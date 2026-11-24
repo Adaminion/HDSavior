@@ -1586,3 +1586,174 @@ fn random_plans_finish_and_account_for_every_file() {
         }
     }
 }
+
+// ------------------------------------------------------------------------------------------
+// Lazy plans (`Recovery::prepare_lazy`)
+// ------------------------------------------------------------------------------------------
+
+/// A [`PlanFiles`] over full entries that answers every question
+/// separately, as a catalog does, and can fail one file.
+struct Pieces {
+    files: Vec<PlanFile>,
+    fail_node: Option<u64>,
+    described: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl PlanFiles for Pieces {
+    fn count(&self) -> usize {
+        self.files.len()
+    }
+    fn facts(&self, index: usize) -> Option<crate::plan::FileFacts> {
+        self.files.facts(index)
+    }
+    fn place(&mut self, index: usize) -> Result<crate::plan::FilePlace, String> {
+        self.files.place(index)
+    }
+    fn name(&mut self, index: usize) -> Result<crate::plan::FileName, String> {
+        self.files.name(index)
+    }
+    fn file(&mut self, index: usize) -> Result<PlanFile, String> {
+        self.described.fetch_add(1, Ordering::SeqCst);
+        let file = self.files.file(index)?;
+        if Some(file.node) == self.fail_node {
+            return Err(format!("node {} vanished", file.node));
+        }
+        Ok(file)
+    }
+}
+
+fn lazy(plan: Plan, fail_node: Option<u64>) -> (LazyPlan, Arc<std::sync::atomic::AtomicUsize>) {
+    let described = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    (
+        LazyPlan {
+            folders: plan.folders,
+            files: Box::new(Pieces {
+                files: plan.files,
+                fail_node,
+                described: described.clone(),
+            }),
+        },
+        described,
+    )
+}
+
+/// A plan with colliding names in several folders and files in an order
+/// that differs from their disk order.
+fn colliding_plan(disk: &mut Disk) -> Plan {
+    let mut plan = Plan {
+        folders: vec![
+            folder(1, None, "Photos"),
+            folder(2, Some(1), "photos"),
+            folder(3, None, "PHOTOS"),
+            folder(4, Some(1), "Empty"),
+        ],
+        files: Vec::new(),
+    };
+    let names = [
+        "a.txt", "A.TXT", "a.txt", "photos", "b?.txt", "CON.txt", "c.txt",
+    ];
+    let mut sources: Vec<FileSource> = (0..21)
+        .map(|i| disk.put(format!("content {i}").as_bytes()))
+        .collect();
+    sources.reverse();
+    for (i, source) in sources.into_iter().enumerate() {
+        let folder = [None, Some(1), Some(2), Some(3)][i % 4];
+        let mut f = file(i as u64 + 1, folder, names[i % names.len()], source);
+        f.in_use = i % 3 != 0;
+        f.record_number = Some(100 - i as u64);
+        plan.files.push(f);
+    }
+    plan
+}
+
+#[test]
+fn a_lazy_plan_writes_what_the_full_plan_writes() {
+    let tmp = TempDir::new("lazy-same");
+    let mut disk = Disk::new(1 << 20);
+    let plan = colliding_plan(&mut disk);
+    let files = plan.files.len();
+    let eager_dest = tmp.join("eager");
+    let (eager, eager_rec) = run(disk.source(), plan.clone(), &eager_dest, options());
+    let lazy_dest = tmp.join("lazy");
+    let (lazy_plan, described) = lazy(plan, None);
+    let job = Recovery::prepare_lazy(disk.source(), lazy_plan, &lazy_dest, options()).unwrap();
+    // Preparing describes no file in full.
+    assert_eq!(described.load(Ordering::SeqCst), 0);
+    assert_eq!(job.files_total(), eager.files_total);
+    let mut lazy_rec = Recorder::default();
+    let summary = job.run(&mut lazy_rec, &AtomicBool::new(false));
+    assert_eq!(summary.status, JobStatus::Completed);
+    // Each file is described once, when it is written.
+    assert_eq!(described.load(Ordering::SeqCst), files);
+    assert_eq!(tree(&eager_dest).len(), tree(&lazy_dest).len());
+    let strip = |mut rows: Vec<String>| {
+        rows.retain(|p| !p.contains("HDSavior-report-"));
+        rows
+    };
+    assert_eq!(strip(tree(&eager_dest)), strip(tree(&lazy_dest)));
+    assert_eq!(report_rows(&eager), report_rows(&summary));
+    let outcomes = |rec: &Recorder| {
+        rec.outcomes
+            .iter()
+            .map(|o| (o.node, o.output_path.clone(), o.status.to_string()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(outcomes(&eager_rec), outcomes(&lazy_rec));
+    // Collisions were resolved (H4 rule 5), and folders were created.
+    assert!(eager_rec
+        .outcomes
+        .iter()
+        .any(|o| o.output_path.ends_with("a (2).txt")));
+    assert!(lazy_dest.join("Photos").join("Empty").is_dir());
+}
+
+#[test]
+fn a_lazy_file_that_cannot_be_described_fails_alone() {
+    let tmp = TempDir::new("lazy-fail");
+    let mut disk = Disk::new(1 << 20);
+    let plan = colliding_plan(&mut disk);
+    let total = plan.files.len() as u64;
+    let (lazy_plan, _) = lazy(plan, Some(5));
+    let dest = tmp.join("out");
+    let job = Recovery::prepare_lazy(disk.source(), lazy_plan, &dest, options()).unwrap();
+    let mut rec = Recorder::default();
+    let summary = job.run(&mut rec, &AtomicBool::new(false));
+    assert_eq!(summary.status, JobStatus::Completed);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.files_total, total);
+    assert_eq!(rec.status(5), "failed:io_error");
+    assert!(rec.outcome(5).detail.contains("vanished"));
+    assert_eq!(report_rows(&summary).len() as u64, total);
+    assert!(part_files(&dest).is_empty());
+}
+
+#[test]
+fn a_contradictory_lazy_plan_fails_the_job_and_a_cancel_before_naming_stops_it() {
+    let tmp = TempDir::new("lazy-invalid");
+    let mut disk = Disk::new(1 << 20);
+    let src = disk.put(b"x");
+    let plan = Plan {
+        folders: Vec::new(),
+        files: vec![file(1, Some(5), "a.txt", src)],
+    };
+    let (lazy_plan, _) = lazy(plan.clone(), None);
+    // Only the destination is checked when the job is prepared.
+    let job = Recovery::prepare_lazy(disk.source(), lazy_plan, &tmp.join("a"), options()).unwrap();
+    let summary = job.run(&mut (), &AtomicBool::new(false));
+    assert_eq!(summary.status, JobStatus::Failed);
+    assert_eq!(summary.error, Some(JobError::Internal));
+    assert!(summary
+        .message
+        .clone()
+        .unwrap_or_default()
+        .contains("not in the plan"));
+    assert!(report_rows(&summary).is_empty());
+    // A cancel that comes before the names are assigned.
+    let plan = colliding_plan(&mut disk);
+    let (lazy_plan, described) = lazy(plan, None);
+    let job = Recovery::prepare_lazy(disk.source(), lazy_plan, &tmp.join("b"), options()).unwrap();
+    let summary = job.run(&mut (), &AtomicBool::new(true));
+    assert_eq!(summary.status, JobStatus::Cancelled);
+    assert_eq!(described.load(Ordering::SeqCst), 0);
+    assert!(report_rows(&summary).is_empty());
+}

@@ -9,10 +9,17 @@ import 'package:hdsavior/platform/platform_services.dart';
 /// A [PlatformServices] that touches nothing and records what it was asked
 /// to do.
 final class InertPlatformServices implements PlatformServices {
+  /// The default [defaultSessionDirectory].
+  static const String windowsSessionDirectory = r'C:\Users\Rescuer\AppData\Local\HDSavior\Sessions';
+
   InertPlatformServices({
-    this.defaultSessionDirectory = r'C:\Users\Rescuer\AppData\Local\HDSavior\Sessions',
+    this.defaultSessionDirectory = windowsSessionDirectory,
     this.pathSeparator = r'\',
+    this.programDirectory = r'C:\Program Files\HDSavior',
   });
+
+  @override
+  final String? programDirectory;
 
   @override
   final String defaultSessionDirectory;

@@ -29,11 +29,22 @@ event     {"event": "scan_progress", "data": { ... }}
 - At most one job (scan, carve, recover, image) runs at a time; starting
   another answers `busy`. Queries are answered while a job runs, except that
   no catalog exists during a scan.
+- `read_file` reads without blocking the engine, but its response keeps
+  its place in the order: requests that arrive while it reads are answered
+  after it, and a job that ends meanwhile writes its `*_done` after it
+  (progress events of a running job are not held). Three inputs stop the
+  read (it then answers `io_error`), so that they are answered within
+  moments: `shutdown`, the end of input, and `job_cancel` while a job runs.
+  The stop takes effect when the single read call to the source that is
+  under way returns; on a failing disk that call can itself block for a
+  long time, and these inputs wait for it.
 - `session_load` and `geometry_set` can take long on very large sessions.
   They stay plain requests; while they work the engine emits `task_progress`
   events and later requests wait.
-- **End of input.** On `shutdown`, or when `stdin` reaches EOF: a running scan
-  stops reading and saves its session (no catalog is built); other jobs are
+- **End of input.** On `shutdown`, or when `stdin` reaches EOF: a running
+  `read_file` is stopped (it answers `io_error`); a running scan
+  stops reading and saves its session (no catalog is built; `scan_done`
+  says `stopped`); other jobs are
   cancelled (the current part file is removed); then the engine exits.
 
 ### Conventions
@@ -51,7 +62,11 @@ event     {"event": "scan_progress", "data": { ... }}
   read with U+FFFD in its place.
 - Paths inside the rescued tree use `/` and are for display only.
   File-system paths (`dest`, `path`) are native absolute paths.
-- Extensions (`ext`, `exts`) are lower-case without the dot; `""` if none.
+- Extensions (`ext`, `exts`) are lower-case without the dot. A name's `ext`
+  is the part after its last dot; a dot that is the first character does
+  not start one, so `.gitignore` and `.leading dot` have `""`, as has a
+  name without a dot. Output names put ` (n)` before the extension by the
+  same rule (ALGORITHMS H4).
 - In filters `null` means "any" (also for a whole `filter`); an empty list
   is `bad_request`.
 
@@ -97,7 +112,7 @@ without source (browse only) · **J** carve, recover or image running.
 | command | errors by state |
 |---|---|
 | `hello`, `list_disks`, `job_cancel`, `shutdown` | always answered |
-| `open_source`, `close_source`, `session_load`, `session_attach_source`, `geometry_set`, `instance_set`, `session_save` | `busy` in S and J |
+| `open_source`, `close_source`, `close_session`, `session_load`, `session_attach_source`, `geometry_set`, `instance_set`, `session_save` | `busy` in S and J |
 | `open_source` | open errors (`not_found`, `access_denied`, `io_error`, `bad_request` for a disk path that is not `\\.\PhysicalDrive<N>`) |
 | `scan_start` | N, B `no_source` · resume without session `no_session` · S, J `busy` · bad range `bad_request` · refused session path `destination_refused` · `exists` (the path holds a file that is not a session of this source and range) · `not_found` (its folder is missing) |
 | `session_load` | `not_found` · `io_error` (not a session file, damaged) · `bad_request` (a `source` disk path that is not `\\.\PhysicalDrive<N>`); a source that cannot be opened or does not match is reported in `source_error`, not as an error |
@@ -166,9 +181,12 @@ the disk itself, is the result of `open_source`.
 ### Warning
 
 `{"code": "source_reads_zero", "message": "..."}`. Codes: `trim_supported`,
-`mounted_volume`, `page_file_on_source`, `system_disk`, `app_on_source`,
+`mounted_volume`, `page_file_on_source`, `system_disk`,
 `source_reads_zero`, `carve_hits_capped`, `live_volume_incomplete`,
-`writes_not_detectable`, `scan_incomplete`, `out_of_range_files`,
+`writes_not_detectable`, `scan_incomplete` (`CatalogInfo`: the catalog
+comes from a scan that has not read the whole session range,
+`scan_complete` is false; resume the scan), `out_of_range_files`
+(`CatalogInfo`: `out_of_range_files` is not 0),
 `identity_differs`, `mixed_generations` (records of an older file system
 could not be separated cleanly), `session_file_at_risk` (the session file
 lies inside the lost volume; save the session elsewhere), `old_session_format`
@@ -181,6 +199,12 @@ session as it is; save it elsewhere; cleared by the next successful write or
 `session_save`), `session_incomplete` (`session_load`: the file ends early —
 bytes after its last complete checkpoint were ignored — or holds no scanned
 data).
+
+The engine sends no other code. The app adds one of its own to the
+warnings it shows for an opened disk: `app_on_source` (HDSavior itself runs
+from the disk being rescued, or that could not be ruled out), when
+`check_destination` with purpose `app_data` on the folder of the app's
+program answers anything but `ok`, or fails (ARCHITECTURE §6).
 
 ### Geometry
 
@@ -318,7 +342,18 @@ the connected disk that reports the recorded serial number (S2: a disk that
 is still connected must not be written to). Only when it cannot be found is
 a location `unknown_disk`, and the message says why.
 Without a session the engine is back in state **N**. Only `open_source` of
-a source (or `session_load`) drops a session.
+a source, `session_load` and `close_session` drop a session.
+
+### close_session
+
+→ `{}`
+
+Drops the session and its catalog: catalog queries answer `no_catalog`,
+`session_save` and a resumed `scan_start` answer `no_session`. An open
+source stays open (state **C** becomes **O**, **B** becomes **N**). Changes
+that are not in the session file (a session that is kept in memory until
+`session_save`, see `session_load`) are lost, as with `open_source`.
+Without a session it does nothing.
 
 ### scan_start
 
@@ -365,14 +400,19 @@ the logical sector size.
 {"status": "completed", "error": null, "session_path": "...", "catalog": CatalogInfo}
 ```
 
-`status`: `"completed"`; `"stopped"` (cancelled by the user: the catalog holds
-what was read, `scan_complete` is false, carving works on the scanned part);
-`"failed"` (`error` set; `source_lost` keeps the session resumable; `catalog`
-is `null`). `session_path` is `null` without a session file, and also when
-the last write to it failed (warning `session_file_not_saved` in the
-catalog): the file then does not hold the session. After `shutdown` the
-catalog is not built (`catalog` is `null`), also when the shutdown comes in
-phase `analyzing`.
+`status`: `"completed"`; `"stopped"` (the job was interrupted: by
+`job_cancel`, then the catalog holds what was read, `scan_complete` is
+false, carving works on the scanned part; or by `shutdown` or the end of
+input, see below); `"failed"` (`error` set; `source_lost` keeps the session
+resumable; `catalog` is `null`). `session_path` is `null` without a session
+file, and also when the last write to it failed (warning
+`session_file_not_saved` in the catalog): the file then does not hold the
+session. After `shutdown` or the end of input the status is `"stopped"` and
+the catalog is not built (`catalog` is `null`), also when the shutdown comes
+in phase `analyzing`, after the whole range was read. The session file
+holds what was read either way: `session_load` builds the catalog from it
+(`scan_complete` is true when the read had finished), and resuming a
+complete session just emits `scan_done`.
 
 The last `scan_progress` of the read phases (`mft_probe`, `sweep`) is sent
 when reading ends and carries the final counters; the `analyzing` events
@@ -380,7 +420,8 @@ carry them on.
 
 ### job_cancel
 
-→ `{}` immediately; the job then ends with its `*_done` event (`"stopped"`
+→ `{}` immediately (while a `read_file` reads, right after its response:
+the read is stopped); the job then ends with its `*_done` event (`"stopped"`
 for a scan, `"cancelled"` for the others). No job → `{}`.
 
 ### session_save
@@ -623,6 +664,13 @@ can make them smaller) or `destination_refused`. H1 and what the reads find
 (ALGORITHMS G1) change rows within the epoch: list again after
 `recover_done`. `recover_progress.current` is `null` between files.
 
+The answer needs only the selection: the job then puts the files in order
+and assigns their names (ALGORITHMS H4, H5) before it writes the first
+one, which on millions of files takes seconds; no `recover_progress` comes
+meanwhile, and `job_cancel` is honoured. A plan the job cannot make (an
+internal error) ends with `recover_done` `failed` / `internal`; a file the
+job cannot describe is reported `failed:io_error`.
+
 Events
 
 `recover_progress`
@@ -687,9 +735,12 @@ args `{"epoch": 3, "node": 4711, "offset": 0, "length": 65536}`
 
 Reads through the same code path as recovery. `kind` is the sniffed file kind
 of the returned bytes when `offset == 0` (else `null`). Nothing else is
-answered while it reads, so a read that has not finished after about 5 s
-(bad sectors on a failing disk) stops with `io_error`; recovery reads such
-files completely.
+answered while it reads (section 1, "Ordering"), so a read that has not
+finished after about 5 s (bad sectors on a failing disk) stops with
+`io_error`; recovery reads such files completely. `shutdown`, the end of
+input and `job_cancel` while a job runs stop it, also with `io_error`. The
+time limit and these stops are checked between read calls to the source,
+so a single call that blocks delays them until it returns (section 1).
 
 ### shutdown
 

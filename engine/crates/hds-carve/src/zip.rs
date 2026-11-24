@@ -22,7 +22,16 @@
 //! descriptor, which is accepted only if the compressed size it states
 //! equals the distance scanned and a header signature follows it - a ZIP
 //! stored inside the entry brings its own descriptors, and they fail that
-//! test.
+//! test. For a stored entry that is not encrypted the descriptor must also
+//! carry the CRC-32 of the bytes in front of it and an uncompressed size
+//! equal to the compressed one; its data can be anything of any length, so
+//! the scan goes on to the work limit. For any other streamed entry
+//! (another method, or encrypted) the search gives up once
+//! [`OPAQUE_WINDOW`] (32 MiB) of its data have been searched (the read
+//! block under way, at most 1 MiB, is still looked at): nothing in it can
+//! be checked on the way, and a false candidate would otherwise cost the
+//! whole work limit. An archive with such an entry
+//! is measured as before, but its end is not verified.
 //!
 //! Then the central directory is walked, and the end record must follow it
 //! directly. The record states where the directory starts, counted from the
@@ -34,8 +43,9 @@
 //! ZIP64 record when the 32-bit fields are saturated), `Probable` when
 //! those two disagree.
 //!
-//! Compressed data is never inflated and CRCs are not checked: that would
-//! mean reading every byte of archives that can be skipped in a handful of
+//! Compressed data is never inflated, and CRCs are checked only for stored
+//! streamed entries, whose bytes are read anyway: checking more would mean
+//! reading every byte of archives that can be skipped in a handful of
 //! reads.
 //!
 //! The extension is refined from what is inside: a first entry `mimetype`
@@ -69,13 +79,9 @@ pub(crate) fn known_method(m: u16) -> bool {
 /// specification, a name of 1 to 4096 bytes whose visible part holds no
 /// control characters.
 pub(crate) fn local_header_plausible(h: &[u8]) -> bool {
-    let (Some(SIG_LOCAL), Some(version), Some(flags), Some(method), Some(name_len)) = (
-        le32(h, 0),
-        le16(h, 4),
-        le16(h, 6),
-        le16(h, 8),
-        le16(h, 26),
-    ) else {
+    let (Some(SIG_LOCAL), Some(version), Some(flags), Some(method), Some(name_len)) =
+        (le32(h, 0), le16(h, 4), le16(h, 6), le16(h, 8), le16(h, 26))
+    else {
         return false;
     };
     let name_len = name_len as usize;
@@ -295,9 +301,11 @@ fn find_descriptor(src: &mut Src, data: u64, zip64: bool, stored: bool) -> Optio
                 if sig == SIG_DESCRIPTOR {
                     points.push(at);
                 } else {
-                    points.extend([20u64, 12].iter().filter_map(|&n| {
-                        at.checked_sub(n).filter(|&d| d >= data && d >= pos)
-                    }));
+                    points.extend(
+                        [20u64, 12]
+                            .iter()
+                            .filter_map(|&n| at.checked_sub(n).filter(|&d| d >= data && d >= pos)),
+                    );
                 }
             }
             points.push(next);

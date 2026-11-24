@@ -16,7 +16,8 @@
 //! * Calls come from the server thread one at a time, except that the
 //!   query methods (`catalog_info`, `list_children`, `node_info`, `search`,
 //!   `selection_summary`, `read_file`, `files_in_extents`) may run while a
-//!   job's run function runs on the worker thread. A backend must therefore
+//!   job's run function runs on the worker thread, and `read_file` runs on
+//!   a thread of its own (while it runs the server calls nothing else). A backend must therefore
 //!   be `Sync` and synchronize its own state.
 //! * Node commands reach the backend only when a catalog exists and the
 //!   request's `epoch` is the current one; the backend need not look at
@@ -327,8 +328,16 @@ pub trait Backend: Send + Sync {
     fn image_start(&self, request: ImageRequest) -> Result<ImageJob, ProtocolError>;
 
     /// `read_file`: `not_found`, `bad_request` for a folder, `unsupported`
-    /// for a file whose content is not stored as plain clusters.
-    fn read_file(&self, args: &ReadFileArgs) -> Result<FileBytes, ProtocolError>;
+    /// for a file whose content is not stored as plain clusters. Runs on a
+    /// thread of its own while the server holds every later input; the
+    /// server sets `stop` for `shutdown`, the end of input and a
+    /// `job_cancel` of a running job, and the read then ends soon with
+    /// `io_error` (as when its own time limit passes).
+    fn read_file(
+        &self,
+        args: &ReadFileArgs,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<FileBytes, ProtocolError>;
 
     /// The logical sector size the session's source was scanned with, if
     /// there is a session: `session_attach_source` opens an image file
@@ -429,7 +438,7 @@ impl Backend for UnavailableBackend {
     fn image_start(&self, _: ImageRequest) -> Result<ImageJob, ProtocolError> {
         Self::refuse("image disks")
     }
-    fn read_file(&self, _: &ReadFileArgs) -> Result<FileBytes, ProtocolError> {
+    fn read_file(&self, _: &ReadFileArgs, _: &Arc<AtomicBool>) -> Result<FileBytes, ProtocolError> {
         Self::refuse("read files")
     }
 }

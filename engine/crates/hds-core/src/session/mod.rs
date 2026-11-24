@@ -62,6 +62,7 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use hds_io::out::{self, EntryKind, OutDir, OutFile};
 use hds_io::{
@@ -437,7 +438,9 @@ the disk again gives the best result.";
 /// A session: store, facts and (optionally) its file.
 pub struct Session {
     meta: SessionMeta,
-    store: ScanStore,
+    /// Shared with a running recovery (`shared_store`); changed only while
+    /// nobody else holds it (a scan), so `Arc::make_mut` never copies.
+    store: Arc<ScanStore>,
     opaque: [OpaqueList; 4],
     writer: Option<Writer>,
     persisted: Persisted,
@@ -493,7 +496,7 @@ impl Session {
     pub fn new(meta: SessionMeta) -> Session {
         Session {
             meta,
-            store: ScanStore::new(),
+            store: Arc::new(ScanStore::new()),
             opaque: Default::default(),
             writer: None,
             persisted: Persisted::default(),
@@ -539,7 +542,7 @@ impl Session {
             Session {
                 persisted: Persisted::all(&store),
                 meta: loaded.meta,
-                store,
+                store: Arc::new(store),
                 opaque,
                 writer: None,
                 origin: Some((path, loaded.origin)),
@@ -576,8 +579,18 @@ impl Session {
         &self.store
     }
 
+    /// The scan store as a shared handle: a recovery job reads it on its
+    /// own thread without holding the engine's lock. While a handle is
+    /// held the store must not change (the engine refuses every command
+    /// that would change it while a job runs); a change then would copy
+    /// the whole store.
+    #[must_use]
+    pub fn shared_store(&self) -> Arc<ScanStore> {
+        Arc::clone(&self.store)
+    }
+
     pub(crate) fn store_mut(&mut self) -> &mut ScanStore {
-        &mut self.store
+        Arc::make_mut(&mut self.store)
     }
 
     /// Whether the whole session range has been scanned.
@@ -1133,14 +1146,15 @@ impl Session {
              the file in the earlier format was kept as {backup}."
         );
         if let Some(w) = self
-            .store
+            .store_mut()
             .warnings
             .iter_mut()
             .find(|w| w.code == WARN_OLD_SESSION_FORMAT)
         {
             w.message = message;
         } else {
-            self.store.raise_warning(WARN_OLD_SESSION_FORMAT, &message);
+            self.store_mut()
+                .raise_warning(WARN_OLD_SESSION_FORMAT, &message);
         }
         rewrite_fault(RewriteStep::Reopen)?;
         let file = dir.open_existing(name)?;

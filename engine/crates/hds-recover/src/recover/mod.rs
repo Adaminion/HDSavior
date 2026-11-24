@@ -32,7 +32,7 @@ use hds_io::{
 use serde::Serialize;
 
 use crate::health::{rating_reasons, Flag, FlagSet, Rating, RatingContext};
-use crate::plan::Plan;
+use crate::plan::{LazyPlan, Plan, PlanFiles, PlanFolder};
 use crate::report::ReportFile;
 
 mod job;
@@ -41,7 +41,7 @@ mod tree;
 #[cfg(test)]
 mod tests;
 
-use tree::Tree;
+use tree::{Tree, TreeError};
 
 /// How a recovery job writes and what it may write to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,10 +404,10 @@ fn unsupported_reason(flags: FlagSet) -> Option<SkipReason> {
     .find_map(|(flag, reason)| flags.contains(flag).then_some(reason))
 }
 
-/// Whether the job will try to write the file: the files `bytes_total`
-/// counts.
-fn will_attempt(file: &crate::plan::PlanFile, skip_damaged: bool) -> bool {
-    match crate::health::rate(file.flags, file.context) {
+/// Whether the job will try to write a file with these flags: the files
+/// `bytes_total` counts.
+fn will_attempt(flags: FlagSet, context: RatingContext, skip_damaged: bool) -> bool {
+    match crate::health::rate(flags, context) {
         Rating::Unsupported => false,
         Rating::Damaged => !skip_damaged,
         Rating::Good | Rating::Uncertain => true,
@@ -443,34 +443,51 @@ struct Overrides {
 /// protocol's `recover_start` can answer before any event of the job is
 /// sent:
 ///
-/// 1. [`Recovery::prepare`] checks the plan, runs the destination guard on
-///    the path, creates the destination directory, runs the guard again on
-///    the created directory, removes leftover part files below it, reads the
-///    limits of its file system, assigns every output name (H4) and creates
-///    the report (H10). A refusal is a [`StartError`]; nothing is read from
-///    the source.
-/// 2. [`Recovery::run`] creates the folders, writes the files in ascending
-///    order of their first data byte (H5) through part files (H6), reading
-///    them by the rules of H7, sets file times on the writing handle and
-///    folder times bottom-up at the end (H8), checks the first bytes (H9),
-///    appends one report row per file (H10), and ends early once on a full
-///    destination, a lost source or a cancel (H12).
+/// 1. [`Recovery::prepare`] (or [`Recovery::prepare_lazy`]) checks the
+///    destination: runs the destination guard on the path, creates the
+///    destination directory, runs the guard again on the created directory,
+///    removes leftover part files below it, reads the limits of its file
+///    system and creates the report (H10). [`Recovery::prepare`] also checks
+///    the plan and assigns every output name (H4) at this point. A refusal
+///    is a [`StartError`]; nothing is read from the source.
+/// 2. [`Recovery::run`] (for a lazy plan: first checks the plan, orders the
+///    files and assigns the names, one output directory at a time; a plan
+///    that contradicts itself then ends the job as failed with `internal`)
+///    creates the folders, writes the files in ascending order of their
+///    first data byte (H5) through part files (H6), reading them by the
+///    rules of H7, sets file times on the writing handle and folder times
+///    bottom-up at the end (H8), checks the first bytes (H9), appends one
+///    report row per file (H10), and ends early once on a full destination,
+///    a lost source or a cancel (H12).
 ///
 /// A prepared job owns everything it needs, so it can be moved to a worker
 /// thread. [`recover`] does both steps.
-#[derive(Debug)]
 pub struct Recovery {
     source: RangedSource,
-    plan: Plan,
+    folders: Vec<PlanFolder>,
+    files: Box<dyn PlanFiles>,
     options: RecoverOptions,
     dest_display: String,
     root: OutDir,
     limits: FsLimits,
     limit: ComponentLimit,
     check: DestinationCheck,
-    tree: Tree,
+    /// `None` until the names are assigned (a lazy plan: in `run`).
+    tree: Option<Tree>,
     report: ReportFile,
     bytes_total: u64,
+    files_total: u64,
+}
+
+impl fmt::Debug for Recovery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Recovery")
+            .field("dest", &self.dest_display)
+            .field("folders", &self.folders.len())
+            .field("files", &self.files_total)
+            .field("bytes", &self.bytes_total)
+            .finish()
+    }
 }
 
 impl Recovery {
@@ -486,6 +503,20 @@ impl Recovery {
         Self::prepare_with(source, plan, dest, options, Overrides::default())
     }
 
+    /// Checks the destination and prepares the job for a plan whose files
+    /// are described when they are needed: the plan is checked, the files
+    /// ordered and the names assigned when [`run`](Self::run) starts, so
+    /// that this step costs O(files) only for the totals
+    /// ([`PlanFiles::facts`]).
+    pub fn prepare_lazy(
+        source: RangedSource,
+        plan: LazyPlan,
+        dest: &Path,
+        options: RecoverOptions,
+    ) -> Result<Recovery, StartError> {
+        Self::prepare_parts(source, plan, false, dest, options, Overrides::default())
+    }
+
     /// [`prepare`](Self::prepare) with limits of the destination replaced:
     /// tests reach the fallback name and the size limit this way.
     fn prepare_with(
@@ -495,11 +526,33 @@ impl Recovery {
         options: RecoverOptions,
         overrides: Overrides,
     ) -> Result<Recovery, StartError> {
-        let mut tree = Tree::build(&plan).map_err(StartError::InvalidPlan)?;
-        let bytes_total = plan
-            .files
-            .iter()
-            .filter(|f| will_attempt(f, options.skip_damaged))
+        Self::prepare_parts(source, plan.into(), true, dest, options, overrides)
+    }
+
+    fn prepare_parts(
+        source: RangedSource,
+        plan: LazyPlan,
+        eager: bool,
+        dest: &Path,
+        options: RecoverOptions,
+        overrides: Overrides,
+    ) -> Result<Recovery, StartError> {
+        let LazyPlan { folders, mut files } = plan;
+        let never = AtomicBool::new(false);
+        let mut tree = if eager {
+            Some(
+                Tree::build(&folders, &mut *files, &never).map_err(|e| match e {
+                    TreeError::Invalid(why) => StartError::InvalidPlan(why),
+                    TreeError::Cancelled => StartError::InvalidPlan("cancelled".into()),
+                })?,
+            )
+        } else {
+            None
+        };
+        let count = files.count();
+        let bytes_total = (0..count)
+            .filter_map(|i| files.facts(i))
+            .filter(|f| will_attempt(f.flags, f.context, options.skip_damaged))
             .fold(0u64, |sum, f| sum.saturating_add(f.size));
         let allowed = |check: &DestinationCheck| {
             check.is_allowed(options.allow_same_disk, options.allow_unknown_disk)
@@ -542,11 +595,15 @@ impl Recovery {
             limits.max_file_bytes = overrides.max_file_bytes;
         }
         let limit = overrides.component.unwrap_or(limits.max_component);
-        tree.assign_names(&plan, limit);
+        if let Some(tree) = &mut tree {
+            // Names come from the plan alone: nothing to cancel here.
+            let _ = tree.assign_names(&folders, &mut *files, limit, &never);
+        }
         let report = ReportFile::create(&root, SystemTime::now()).map_err(start_io_error)?;
         Ok(Recovery {
             source,
-            plan,
+            folders,
+            files,
             options,
             dest_display: dest.display().to_string(),
             root,
@@ -556,12 +613,13 @@ impl Recovery {
             tree,
             report,
             bytes_total,
+            files_total: u64::try_from(count).unwrap_or(u64::MAX),
         })
     }
 
     /// Files in the plan (`recover_start.files`).
     pub fn files_total(&self) -> u64 {
-        u64::try_from(self.plan.files.len()).unwrap_or(u64::MAX)
+        self.files_total
     }
 
     /// Bytes of the files that will be attempted (`recover_start.bytes`).
@@ -585,8 +643,9 @@ impl Recovery {
         &self.check
     }
 
-    /// Runs the job to its end. `cancel` is polled between files, between
-    /// chunks of a file and between retries of a failing read.
+    /// Runs the job to its end. `cancel` is polled while a lazy plan is
+    /// ordered and named, between files, between chunks of a file and
+    /// between retries of a failing read.
     pub fn run(self, observer: &mut dyn RecoverObserver, cancel: &AtomicBool) -> RecoverSummary {
         job::run(self, observer, cancel)
     }

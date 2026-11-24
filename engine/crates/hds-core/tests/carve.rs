@@ -770,8 +770,36 @@ struct StreamedNoise {
 impl StreamedNoise {
     fn header(&self) -> Vec<u8> {
         let mut h = vec![
-            0x50, 0x4B, 0x03, 0x04, 46, 0, 0x08, 0, self.method, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 5, 0, 0, 0,
+            0x50,
+            0x4B,
+            0x03,
+            0x04,
+            46,
+            0,
+            0x08,
+            0,
+            self.method,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            0,
+            0,
+            0,
         ];
         h.extend_from_slice(b"a.bin");
         h

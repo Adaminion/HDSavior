@@ -127,9 +127,13 @@ final class EngineApi {
 
   /// `close_source`: closes the source only. A session and its catalog stay
   /// in the engine (browse only, like a session loaded without its source)
-  /// until `open_source` or `session_load` replaces them; the epoch does not
-  /// change.
+  /// until `open_source`, `session_load` or `close_session` drops them; the
+  /// epoch does not change.
   Future<void> closeSource() => _call('close_source', _nothing);
+
+  /// `close_session`: drops the session and its catalog; an open source
+  /// stays open. Changes that are not in the session file are lost.
+  Future<void> closeSession() => _call('close_session', _nothing);
 
   /// `scan_start`: starts (or with [resume] continues) the scan of the byte
   /// range [start]..[end] of the open source (default: all of it).

@@ -184,3 +184,42 @@ fn shutdown_answers_then_ends_the_job_and_ignores_later_requests() {
         .next_line(std::time::Duration::from_millis(200))
         .is_none());
 }
+
+/// A scan that had built its catalog when the shutdown came: the engine
+/// still reports `stopped` with catalog `null` (PROTOCOL scan_done), never
+/// `stopped` (or `completed`) with a catalog after the shutdown response.
+#[test]
+fn a_scan_done_after_shutdown_is_stopped_without_a_catalog() {
+    let dir = TempDir::new("ordering");
+    let image = zero_image(&dir, "src.img", 1 << 20);
+    let mut h = Harness::new(FakeJobs::Finish);
+    h.ok("open_source", json!({"kind": "image", "path": image}));
+    // The fake's scan with this session path decides `completed` and
+    // builds its catalog only once the shutdown flag is up.
+    h.ok(
+        "scan_start",
+        json!({"session_path": dir.join("late-shutdown.hds"),
+               "allow_unknown_disk": true, "allow_same_disk": true}),
+    );
+    let id = h.engine.send("shutdown", &json!({}));
+    let mut answered = false;
+    loop {
+        let line = h
+            .engine
+            .next_line(common::LINE_TIMEOUT)
+            .expect("scan_done in time");
+        match OutputLine::parse(&line).unwrap() {
+            OutputLine::Response(r) => {
+                assert_eq!(r.id, Some(id));
+                answered = true;
+            }
+            OutputLine::Event(e) if e.event == "scan_done" => {
+                assert!(answered, "the shutdown response comes first");
+                assert_eq!(e.data["status"], "stopped", "{}", e.data);
+                assert!(e.data["catalog"].is_null(), "{}", e.data);
+                break;
+            }
+            OutputLine::Event(_) => {}
+        }
+    }
+}

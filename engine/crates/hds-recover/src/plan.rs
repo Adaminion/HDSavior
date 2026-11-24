@@ -4,6 +4,14 @@
 //! H4): the folders to create, with their place in the output tree, and the
 //! files with everything needed to write them and to report on them. This
 //! crate knows nothing about catalogs; it executes plans.
+//!
+//! A plan comes in two forms. [`Plan`] holds every file in full; it suits
+//! tests and small selections. [`LazyPlan`] holds the folders in full and
+//! reaches the files through [`PlanFiles`], which describes a file in full
+//! only when it is written: a recovery of millions of files then keeps a
+//! few bytes per file instead of its runlist, name and path (ALGORITHMS
+//! H5 needs only the first data byte of each file before anything is read,
+//! H4 the names of one output directory at a time).
 
 use hds_io::out::Timestamps;
 
@@ -89,4 +97,133 @@ pub struct Plan {
     /// Files to recover, in any order (they are processed in ascending order
     /// of their first data byte, ALGORITHMS H5).
     pub files: Vec<PlanFile>,
+}
+
+/// What a recovery job needs to know about a file before anything is
+/// read: its totals (`recover_start.bytes`, H11's `skipped:damaged`) and
+/// its report identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileFacts {
+    /// Catalog node id ([`PlanFile::node`]).
+    pub node: u64,
+    /// Real size as the catalog shows it ([`PlanFile::size`]).
+    pub size: u64,
+    /// The flags known before anything is read ([`PlanFile::flags`]).
+    pub flags: FlagSet,
+    /// The two rating inputs that are not flags ([`PlanFile::context`]).
+    pub context: RatingContext,
+}
+
+/// Where a file goes and when it is written (ALGORITHMS H4, H5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilePlace {
+    /// The folder the file goes into ([`PlanFile::folder`]).
+    pub folder: Option<u64>,
+    /// Absolute offset of the first data byte: the first non-empty data
+    /// run, else the record of resident data (H5's order key).
+    pub first_data_offset: Option<u64>,
+}
+
+/// What decides a file's output name (ALGORITHMS H4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileName {
+    /// The name as NTFS stored it ([`PlanFile::name`]).
+    pub name: Vec<u16>,
+    /// The file was in use ([`PlanFile::in_use`]).
+    pub in_use: bool,
+    /// MFT record number ([`PlanFile::record_number`]).
+    pub record_number: Option<u64>,
+}
+
+/// The files of a [`LazyPlan`], described piece by piece when the job
+/// needs them. The answers for one index must agree with each other:
+/// [`file`](Self::file) returns the entry whose `node`, `size`, `flags`,
+/// `context`, `folder`, `name`, `in_use` and `record_number` are those of
+/// [`facts`](Self::facts), [`place`](Self::place) and [`name`](Self::name),
+/// and whose source's first data byte is `place`'s.
+///
+/// An error is a contradiction of the caller (a node that vanished from
+/// its catalog): from `place` or `name` it ends the job as failed with
+/// `internal`; from `file` it fails that one file (`failed:io_error`).
+pub trait PlanFiles: Send {
+    /// Number of files.
+    fn count(&self) -> usize;
+    /// The facts of file `index` (`None` only for an index out of range).
+    /// Called for every file when the job is prepared: it should be cheap.
+    fn facts(&self, index: usize) -> Option<FileFacts>;
+    /// The folder and first data byte of file `index`; called once per
+    /// file when the job starts running.
+    fn place(&mut self, index: usize) -> Result<FilePlace, String>;
+    /// The name of file `index`; called once per file when the names of
+    /// its output directory are assigned.
+    fn name(&mut self, index: usize) -> Result<FileName, String>;
+    /// The whole entry of file `index`; called once, when it is written.
+    fn file(&mut self, index: usize) -> Result<PlanFile, String>;
+}
+
+fn out_of_range(index: usize) -> String {
+    format!("file {index} is not in the plan")
+}
+
+impl PlanFiles for Vec<PlanFile> {
+    fn count(&self) -> usize {
+        self.len()
+    }
+
+    fn facts(&self, index: usize) -> Option<FileFacts> {
+        self.get(index).map(|f| FileFacts {
+            node: f.node,
+            size: f.size,
+            flags: f.flags,
+            context: f.context,
+        })
+    }
+
+    fn place(&mut self, index: usize) -> Result<FilePlace, String> {
+        let f = self.get(index).ok_or_else(|| out_of_range(index))?;
+        Ok(FilePlace {
+            folder: f.folder,
+            first_data_offset: f.source.first_offset().or(f.first_data_offset),
+        })
+    }
+
+    fn name(&mut self, index: usize) -> Result<FileName, String> {
+        let f = self.get(index).ok_or_else(|| out_of_range(index))?;
+        Ok(FileName {
+            name: f.name.clone(),
+            in_use: f.in_use,
+            record_number: f.record_number,
+        })
+    }
+
+    fn file(&mut self, index: usize) -> Result<PlanFile, String> {
+        self.get(index).cloned().ok_or_else(|| out_of_range(index))
+    }
+}
+
+/// A plan whose files are described when they are needed (see the
+/// [module documentation](self)).
+pub struct LazyPlan {
+    /// Folders to create, in any order: parents need not come first.
+    pub folders: Vec<PlanFolder>,
+    /// The files, in any order (processed by ALGORITHMS H5).
+    pub files: Box<dyn PlanFiles>,
+}
+
+impl std::fmt::Debug for LazyPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LazyPlan")
+            .field("folders", &self.folders.len())
+            .field("files", &self.files.count())
+            .finish()
+    }
+}
+
+impl From<Plan> for LazyPlan {
+    fn from(plan: Plan) -> LazyPlan {
+        LazyPlan {
+            folders: plan.folders,
+            files: Box::new(plan.files),
+        }
+    }
 }

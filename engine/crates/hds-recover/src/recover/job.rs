@@ -13,7 +13,7 @@ use hds_io::out::{
 };
 use hds_io::{fallback_component, sanitize_name, AlignedBuf, ComponentLimit, RangedSource};
 
-use super::tree::{dir_key, Tree};
+use super::tree::{dir_key, output_name, Tree, TreeError};
 use super::{
     display_path, unsupported_reason, will_attempt, FailReason, FileOutcome, FileStatus, JobError,
     JobStatus, RecoverObserver, RecoverOptions, RecoverProgress, RecoverSummary, Recovery,
@@ -21,7 +21,7 @@ use super::{
 };
 use crate::health::{rate, Flag, FlagSet, Rating};
 use crate::naming::{self, claim_from, exact_key, folded_key, next_suffix, units, Assigned};
-use crate::plan::{Plan, PlanFile};
+use crate::plan::{FileFacts, PlanFile, PlanFiles, PlanFolder};
 use crate::progress::{eta_seconds, Meter};
 use crate::reader::{signature_flag, ContentReader, ReadError, ReadReport, HEAD_LEN, READ_CHUNK};
 use crate::report::{ReportFile, Row};
@@ -59,6 +59,8 @@ enum End {
     SourceLost(String),
     NoSpace(String),
     Report(io::Error),
+    /// A lazy plan contradicted itself (`internal`).
+    InvalidPlan(String),
 }
 
 /// What a commit achieved.
@@ -163,27 +165,10 @@ fn read_notes(report: &ReadReport, notes: &mut Vec<String>) {
     }
 }
 
-/// Files in ascending order of their first data byte (ALGORITHMS H5);
-/// files that store no byte come last.
-fn file_order(plan: &Plan) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..plan.files.len()).collect();
-    order.sort_by_key(|&i| {
-        plan.files.get(i).map_or((u64::MAX, i), |f| {
-            (
-                f.source
-                    .first_offset()
-                    .or(f.first_data_offset)
-                    .unwrap_or(u64::MAX),
-                i,
-            )
-        })
-    });
-    order
-}
-
 struct Runner<'a> {
     source: &'a RangedSource,
-    plan: &'a Plan,
+    plan_folders: &'a [PlanFolder],
+    files: &'a mut dyn PlanFiles,
     tree: &'a Tree,
     options: &'a RecoverOptions,
     root: &'a OutDir,
@@ -201,7 +186,7 @@ struct Runner<'a> {
     /// in it.
     outputs: Vec<u32>,
     root_outputs: u32,
-    folders: Vec<FolderState>,
+    folders_state: Vec<FolderState>,
     cache: Vec<(usize, OutDir, u64)>,
     tick: u64,
     buffer: Vec<u8>,
@@ -269,7 +254,7 @@ impl Runner<'_> {
     }
 
     fn folder_name(&self, folder: usize) -> &str {
-        match self.folders.get(folder) {
+        match self.folders_state.get(folder) {
             Some(FolderState::Ready { name, .. }) => name,
             _ => self.tree.folder_names.get(folder).map_or("_", |a| &a.name),
         }
@@ -300,7 +285,7 @@ impl Runner<'_> {
             }
         };
         while let Some(level) = chain.pop() {
-            let name = match self.folders.get(level) {
+            let name = match self.folders_state.get(level) {
                 Some(FolderState::Ready { name, .. }) => name.clone(),
                 _ => return Err(io::Error::other("the folder was not created")),
             };
@@ -366,7 +351,7 @@ impl Runner<'_> {
                 return Err(End::Cancelled);
             }
             let state = self.create_folder(folder)?;
-            if let Some(slot) = self.folders.get_mut(folder) {
+            if let Some(slot) = self.folders_state.get_mut(folder) {
                 *slot = state;
             }
             self.progress("");
@@ -375,9 +360,8 @@ impl Runner<'_> {
     }
 
     fn create_folder(&mut self, folder: usize) -> Result<FolderState, End> {
-        let (plan, tree) = (self.plan, self.tree);
-        let (Some(spec), Some(assigned)) =
-            (plan.folders.get(folder), tree.folder_names.get(folder))
+        let (folders, tree) = (self.plan_folders, self.tree);
+        let (Some(spec), Some(assigned)) = (folders.get(folder), tree.folder_names.get(folder))
         else {
             return Ok(FolderState::Failed {
                 why: "internal error: unknown folder".into(),
@@ -386,7 +370,7 @@ impl Runner<'_> {
         let parent = tree.parent.get(folder).copied().flatten();
         let parent_len = match parent {
             None => self.root_len,
-            Some(p) => match self.folders.get(p) {
+            Some(p) => match self.folders_state.get(p) {
                 Some(FolderState::Ready { len, .. }) => *len,
                 Some(FolderState::TooLong { len }) => {
                     return Ok(FolderState::TooLong {
@@ -468,9 +452,9 @@ impl Runner<'_> {
     /// everything inside them is written (ALGORITHMS H8). Best effort: a
     /// time that cannot be set changes nothing else.
     fn set_folder_times(&mut self) {
-        let (plan, tree) = (self.plan, self.tree);
+        let (folders, tree) = (self.plan_folders, self.tree);
         let mut created: Vec<usize> = self
-            .folders
+            .folders_state
             .iter()
             .enumerate()
             .filter_map(|(i, state)| {
@@ -479,7 +463,7 @@ impl Runner<'_> {
             .collect();
         created.sort_by_key(|&i| Reverse(tree.depth.get(i).copied().unwrap_or(0)));
         for folder in created {
-            let Some(times) = plan.folders.get(folder).map(|f| f.times) else {
+            let Some(times) = folders.get(folder).map(|f| f.times) else {
                 continue;
             };
             if times == Timestamps::default() {
@@ -494,25 +478,40 @@ impl Runner<'_> {
     // -- files ------------------------------------------------------------------------------
 
     fn process_files(&mut self) -> Result<(), End> {
-        for index in file_order(self.plan) {
+        let tree = self.tree;
+        for &index in &tree.file_order {
             if self.cancelled() {
                 return Err(End::Cancelled);
             }
+            let index = index as usize;
             let start = self.counts.bytes_done;
-            let done = self.process_file(index)?;
-            self.finish_file(index, start, done)?;
+            // The file is described in full only now (a lazy plan).
+            let (file, done) = match self.files.file(index) {
+                Ok(file) => {
+                    let done = self.process_file(index, &file)?;
+                    (file, done)
+                }
+                Err(why) => {
+                    let facts = self.files.facts(index);
+                    let file = stub_file(facts);
+                    let done = Done::new(file.flags, String::new())
+                        .failed(FailReason::IoError, format!("internal error: {why}"));
+                    (file, done)
+                }
+            };
+            self.finish_file(&file, start, done)?;
         }
         Ok(())
     }
 
-    fn process_file(&mut self, index: usize) -> Result<Done, End> {
-        let (plan, tree) = (self.plan, self.tree);
-        let (Some(file), Some(assigned)) = (plan.files.get(index), tree.file_names.get(index))
-        else {
+    fn process_file(&mut self, index: usize, file: &PlanFile) -> Result<Done, End> {
+        let tree = self.tree;
+        let Some(&suffix) = tree.file_suffix.get(index) else {
             return Ok(Done::new(FlagSet::new(), String::new())
                 .failed(FailReason::IoError, "internal error: unknown file"));
         };
-        let folder = tree.file_folder.get(index).copied().flatten();
+        let assigned = &output_name(&file.name, suffix, self.limit);
+        let folder = tree.folder_of(index);
         let done = Done::new(file.flags, self.output_path(folder, &assigned.name));
         if let Some(reason) = unsupported_reason(file.flags) {
             return Ok(done.skipped(
@@ -528,7 +527,7 @@ impl Runner<'_> {
         }
         let parent_len = match folder {
             None => self.root_len,
-            Some(f) => match self.folders.get(f) {
+            Some(f) => match self.folders_state.get(f) {
                 Some(FolderState::Ready { len, .. }) => *len,
                 Some(FolderState::TooLong { len }) => {
                     return Ok(done.skipped(
@@ -824,10 +823,7 @@ impl Runner<'_> {
     }
 
     /// Appends the report row, counts the file and tells the observer.
-    fn finish_file(&mut self, index: usize, start: u64, done: Done) -> Result<(), End> {
-        let Some(file) = self.plan.files.get(index) else {
-            return Ok(());
-        };
+    fn finish_file(&mut self, file: &PlanFile, start: u64, done: Done) -> Result<(), End> {
         let status = done.status.to_string();
         let flags = done.flags.to_string();
         let detail = done.notes.join("; ");
@@ -852,7 +848,7 @@ impl Runner<'_> {
             FileStatus::Skipped(_) => counts.skipped = counts.skipped.saturating_add(1),
             FileStatus::Failed(_) => counts.failed = counts.failed.saturating_add(1),
         }
-        if will_attempt(file, self.options.skip_damaged) {
+        if will_attempt(file.flags, file.context, self.options.skip_damaged) {
             counts.bytes_done = start.saturating_add(file.size);
         }
         self.observer.file_done(&FileOutcome {
@@ -872,6 +868,36 @@ impl Runner<'_> {
     }
 }
 
+/// A report entry for a file the plan could not describe (`file` failed).
+fn stub_file(facts: Option<FileFacts>) -> PlanFile {
+    let facts = facts.unwrap_or(FileFacts {
+        node: 0,
+        size: 0,
+        flags: FlagSet::new(),
+        context: crate::health::RatingContext::default(),
+    });
+    PlanFile {
+        node: facts.node,
+        folder: None,
+        name: Vec::new(),
+        ext: String::new(),
+        source: crate::source::FileSource::Extents {
+            runs: Vec::new(),
+            real_size: 0,
+            initialized_size: 0,
+        },
+        size: facts.size,
+        times: Timestamps::default(),
+        flags: facts.flags,
+        context: facts.context,
+        in_use: true,
+        record_number: None,
+        record_offset: None,
+        first_data_offset: None,
+        original_path: String::new(),
+    }
+}
+
 /// Runs `job` (see [`Recovery::run`]).
 pub(super) fn run(
     job: Recovery,
@@ -880,53 +906,68 @@ pub(super) fn run(
 ) -> RecoverSummary {
     let Recovery {
         source,
-        plan,
+        folders,
+        mut files,
         options,
         dest_display,
         root,
         limits,
         limit,
         check: _,
-        mut tree,
+        tree,
         mut report,
         bytes_total,
+        files_total,
     } = job;
-    let claimed = std::mem::take(&mut tree.claimed);
     let report_path = display_path(&root.path().join(report.name()));
-    let folder_count = plan.folders.len();
-    let mut runner = Runner {
-        source: &source,
-        plan: &plan,
-        tree: &tree,
-        options: &options,
-        root: &root,
-        root_len: root.path_len_units(),
-        max_file_bytes: limits.max_file_bytes,
-        limit,
-        report: &mut report,
-        observer,
-        cancel,
-        claimed,
-        produced: HashSet::new(),
-        outputs: vec![0; folder_count],
-        root_outputs: 0,
-        folders: vec![FolderState::Pending; folder_count],
-        cache: Vec::with_capacity(DIR_CACHE),
-        tick: 0,
-        buffer: Vec::new(),
-        scratch: None,
-        counts: Counts::default(),
-        meter: Meter::new(Instant::now()),
-        bytes_total,
-        files_total: u64::try_from(plan.files.len()).unwrap_or(u64::MAX),
+    // A lazy plan is checked, ordered and named now (H4, H5).
+    let tree = match tree {
+        Some(tree) => Ok(tree),
+        None => Tree::build(&folders, &mut *files, cancel).and_then(|mut tree| {
+            tree.assign_names(&folders, &mut *files, limit, cancel)?;
+            Ok(tree)
+        }),
     };
-    let end = runner
-        .create_folders()
-        .and_then(|()| runner.process_files());
-    runner.set_folder_times();
-    let counts = runner.counts;
-    let files_total = runner.files_total;
-    drop(runner);
+    let (end, counts) = match tree {
+        Ok(mut tree) => {
+            let claimed = std::mem::take(&mut tree.claimed);
+            let folder_count = folders.len();
+            let mut runner = Runner {
+                source: &source,
+                plan_folders: &folders,
+                files: &mut *files,
+                tree: &tree,
+                options: &options,
+                root: &root,
+                root_len: root.path_len_units(),
+                max_file_bytes: limits.max_file_bytes,
+                limit,
+                report: &mut report,
+                observer,
+                cancel,
+                claimed,
+                produced: HashSet::new(),
+                outputs: vec![0; folder_count],
+                root_outputs: 0,
+                folders_state: vec![FolderState::Pending; folder_count],
+                cache: Vec::with_capacity(DIR_CACHE),
+                tick: 0,
+                buffer: Vec::new(),
+                scratch: None,
+                counts: Counts::default(),
+                meter: Meter::new(Instant::now()),
+                bytes_total,
+                files_total,
+            };
+            let end = runner
+                .create_folders()
+                .and_then(|()| runner.process_files());
+            runner.set_folder_times();
+            (end, runner.counts)
+        }
+        Err(TreeError::Cancelled) => (Err(End::Cancelled), Counts::default()),
+        Err(TreeError::Invalid(why)) => (Err(End::InvalidPlan(why)), Counts::default()),
+    };
     let _ = report.sync();
     let (status, error, message) = match end {
         Ok(()) => (JobStatus::Completed, None, None),
@@ -937,6 +978,11 @@ pub(super) fn run(
             JobStatus::Failed,
             Some(JobError::IoError),
             Some(format!("the report cannot be written: {e}")),
+        ),
+        Err(End::InvalidPlan(why)) => (
+            JobStatus::Failed,
+            Some(JobError::Internal),
+            Some(format!("invalid recovery plan: {why}")),
         ),
     };
     RecoverSummary {

@@ -32,6 +32,8 @@ pub enum Command {
     OpenSource,
     /// `close_source`
     CloseSource,
+    /// `close_session`
+    CloseSession,
     /// `scan_start`
     ScanStart,
     /// `job_cancel`
@@ -72,11 +74,12 @@ pub enum Command {
 
 impl Command {
     /// Every command, in the order of PROTOCOL.md.
-    pub const ALL: [Command; 22] = [
+    pub const ALL: [Command; 23] = [
         Command::Hello,
         Command::ListDisks,
         Command::OpenSource,
         Command::CloseSource,
+        Command::CloseSession,
         Command::ScanStart,
         Command::JobCancel,
         Command::SessionSave,
@@ -104,6 +107,7 @@ impl Command {
             Command::ListDisks => "list_disks",
             Command::OpenSource => "open_source",
             Command::CloseSource => "close_source",
+            Command::CloseSession => "close_session",
             Command::ScanStart => "scan_start",
             Command::JobCancel => "job_cancel",
             Command::SessionSave => "session_save",
@@ -131,8 +135,8 @@ impl Command {
     }
 }
 
-/// The empty object `{}`: the result of `close_source`, `job_cancel` and
-/// `shutdown`, and the arguments of commands that take none.
+/// The empty object `{}`: the result of `close_source`, `close_session`,
+/// `job_cancel` and `shutdown`, and the arguments of commands that take none.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Empty {}
 

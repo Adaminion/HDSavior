@@ -580,7 +580,7 @@ fn recover_start_breakdown(saved: &Path, image: &Path, dest: &Path) -> Vec<Strin
 
     let base = heap_peak_reset();
     let t = Instant::now();
-    let mut protected = vec![Protected::session(range)];
+    let mut protected = vec![Protected::session(range.clone())];
     protected.extend(layout.protected().iter().cloned());
     let mut options = RecoverOptions::new(protected);
     options.allow_same_disk = true;
@@ -595,6 +595,73 @@ fn recover_start_breakdown(saved: &Path, image: &Path, dest: &Path) -> Vec<Strin
         heap_peak().saturating_sub(base) >> 20
     ));
     drop(job);
+    let _ = std::fs::remove_dir_all(dest);
+
+    // What the engine does now: the selection with 12 bytes per file under
+    // the lock, the destination prepared, and the plan ordered and named
+    // by the job itself (measured up to its first written file).
+    let base = heap_peak_reset();
+    let t = Instant::now();
+    let planned = catalog
+        .plan_selection(store, &sel, Some(&fresh))
+        .expect("plan_selection");
+    let files = planned.file_count().max(1);
+    let folders = planned.folders().len();
+    out.push(format!(
+        "Catalog::plan_selection: {:.1} ms; holds {} MiB = {:.0} B per file, peak +{} MiB",
+        ms(t.elapsed()),
+        heap_live().saturating_sub(base) >> 20,
+        heap_live().saturating_sub(base) as f64 / files as f64,
+        heap_peak().saturating_sub(base) >> 20
+    ));
+    let t = Instant::now();
+    let mut protected = vec![Protected::session(range.clone())];
+    protected.extend(layout.protected().iter().cloned());
+    let mut options = RecoverOptions::new(protected);
+    options.allow_same_disk = true;
+    options.allow_unknown_disk = true;
+    let ranged = RangedSource::new(
+        open_source(SourceKind::Image, image, None).expect("open the image"),
+        range,
+    )
+    .expect("ranged");
+    let job = Recovery::prepare_lazy(
+        ranged,
+        planned.into_lazy(session.shared_store()),
+        dest,
+        options,
+    )
+    .expect("prepare_lazy");
+    out.push(format!(
+        "Recovery::prepare_lazy (destination, report file): {:.1} ms; recover_start answers \
+         after this",
+        ms(t.elapsed())
+    ));
+    // The first progress event comes after the first folder is created,
+    // that is right after the order and the names.
+    struct FirstFile<'a>(&'a AtomicBool, Option<Instant>);
+    impl hds_recover::RecoverObserver for FirstFile<'_> {
+        fn progress(&mut self, _: &hds_recover::RecoverProgress) {
+            self.1.get_or_insert_with(Instant::now);
+        }
+        fn file_done(&mut self, _: &hds_recover::FileOutcome) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let cancel = AtomicBool::new(false);
+    let t = Instant::now();
+    let mut observer = FirstFile(&cancel, None);
+    let summary = job.run(&mut observer, &cancel);
+    out.push(format!(
+        "job: order + names {:.1} ms; + {} folders created + first file: {:.1} ms ({:?}), \
+         peak +{} MiB = {:.0} B per file above the selection's base",
+        observer.1.map_or(0.0, |at| ms(at.duration_since(t))),
+        folders,
+        ms(t.elapsed()),
+        summary.status,
+        heap_peak().saturating_sub(base) >> 20,
+        heap_peak().saturating_sub(base) as f64 / files as f64
+    ));
     let _ = std::fs::remove_dir_all(dest);
     out
 }
@@ -1017,9 +1084,28 @@ fn scale_through_the_protocol() {
                "allow_unknown_disk": consent}),
     );
     let plan_time = t.elapsed();
+    let answer_held = heap_live().saturating_sub(base);
+    let plan_files = u(&started["files"]);
+    // The job orders and names the files before it writes the first one:
+    // its memory is measured once it has written some.
+    let mut running_files = 0;
+    while running_files < 1000 {
+        let line = engine
+            .next_line(Duration::from_secs(600))
+            .expect("recover_progress");
+        if line.contains("\"recover_done\"") {
+            seen.push(line);
+            break;
+        }
+        if line.contains("\"recover_progress\"") {
+            let v: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+            running_files = u(&v["data"]["files_done"]);
+        }
+    }
     let held = heap_live().saturating_sub(base);
     let plan_peak = heap_peak().saturating_sub(base);
-    let plan_files = u(&started["files"]);
+    let mut call =
+        |engine: &mut InProcess, cmd: &str, args: Value| inproc_call(engine, &mut seen, cmd, &args);
     call(&mut engine, "job_cancel", json!({}));
     let mut done = seen.iter().any(|l| l.contains("\"recover_done\""));
     while !done {
@@ -1097,9 +1183,11 @@ fn scale_through_the_protocol() {
         after_load.saturating_sub(before) as f64 / nodes.max(1) as f64
     );
     eprintln!(
-        "in process: recover_start of the root answered after {:.1} s; {} files; the job \
-         holds {} MiB of heap ({:.0} B per file), peak {} MiB above the base ({:.0} B per file)",
+        "in process: recover_start of the root answered after {:.2} s ({} MiB held then); {} \
+         files; after {running_files} files written the job holds {} MiB of heap ({:.0} B per \
+         file), peak {} MiB above the base ({:.0} B per file)",
         plan_time.as_secs_f64(),
+        answer_held >> 20,
         plan_files,
         held >> 20,
         held as f64 / plan_files.max(1) as f64,

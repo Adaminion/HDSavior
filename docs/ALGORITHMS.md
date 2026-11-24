@@ -637,6 +637,11 @@ nearest ancestor-or-self that appears in either list is in `include`. The
 optional `filter` (query, extensions, sizes, ratings), `include_deleted` and
 `skip_damaged` apply to every selected file, explicit or inherited. The walk
 passes through deleted folders. Files rated `unsupported` are never written.
+The selection is made when `recover_start` answers, after H1: which files,
+and each file's flags and rating context, are fixed then (`files`, `bytes`
+and the `no_space` estimate come from them; a later read that adds a flag,
+G1, changes neither). The job describes each file (runs, name, path,
+times) from the catalog only when it writes it.
 
 **H3. Destination.** The destination guard runs at job start, with the
 protected ranges of that moment (session range and lost-volume ranges, S2),
@@ -655,7 +660,9 @@ spaces ignored, ASCII case-insensitive: `CON PRN AUX NUL CONIN$ CONOUT$
 COM0`–`COM9 COM¹ COM² COM³ LPT0`–`LPT9 LPT¹ LPT² LPT³`) → prefix `_`; names
 beginning with `HDSavior-report-` or matching `~hds-*.part` → prefix `_`;
 (5) case-insensitive collisions inside a folder get ` (2)`, ` (3)`… before the
-extension; (6) shorten the stem to the destination volume's component limit
+extension (from the last dot to the end, when that dot is not the first
+character and the part is at most 16 units long with the dot: `.gitignore`
+becomes `.gitignore (2)`; PROTOCOL `ext` uses the same dot rule); (6) shorten the stem to the destination volume's component limit
 without cutting a surrogate pair. A path longer than 32,767 units is
 `skipped:path_too_long`. If the file system still rejects a name, retry once
 with `<shortened stem>~<record number>.<ext>`.
@@ -695,7 +702,16 @@ bottom-up at the end. A time that cannot be set is a note in the report and
 never changes a status.
 
 **H9. Verification.** The first bytes, still in memory, are checked with
-`matches_extension` → `signature_ok` / `signature_mismatch`.
+`matches_extension` → `signature_ok` / `signature_mismatch`. For JPEG, ZIP
+and MP3 a magic number alone is not a match: JPEG needs `FF D8` and a chain
+of marker segments whose lengths fit their content as far as the bytes
+reach (an APPn segment starts with an ASCII identifier; a COM segment with
+text, where every byte from 0x80 up counts as text, so UTF-8 and code-page
+comments match); ZIP a local header with a plausible version, flags, method and a
+name without control characters (or an empty archive's end record, all
+fields zero); MP3 a sane ID3v2 header, a frame with a VBR header, or two
+consistent frame headers at the distance the first states (a single frame
+header gives no opinion).
 
 **H10. Report.** `HDSavior-report-<UTC yyyymmdd-hhmmss>.csv` in `dest`, created
 when the job starts; one row appended per file and flushed. UTF-8 with BOM,
@@ -736,7 +752,12 @@ already carved in this run.
 live-allocated range, and the range end. A ZIP candidate that hits the read
 limit is retried once with the limit raised to that bound; the retries of one
 run share a budget of one pass over the part of the range already done, and
-none is made once 1 GiB or less of that budget is left. Valid results
+none is made once 1 GiB or less of that budget is left. Streamed ZIP entries
+(sizes in a data descriptor) are read as far as needed when they are DEFLATE
+(walked to the end of the stream) or stored and not encrypted (the
+descriptor must carry the CRC-32 of the data); the search for the
+descriptor of any other streamed entry gives up once 32 MiB of its data have
+been searched, and such an entry leaves the archive's end not verified. Valid results
 become nodes `[Carved files]/<ext>/f<sector number, 10 digits>.<ext>`.
 Rating: `good` when the end was verified by structure (`Measured.end_verified`),
 else `uncertain`, and at most `uncertain` without a validated geometry (F6).

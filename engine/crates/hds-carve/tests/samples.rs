@@ -329,9 +329,10 @@ fn extensions_match_their_content() {
     let all = samples();
     // the head geometry validation and the catalog keep (`SNIFF_LEN`
     // bytes), and the one recovery checks (the first kilobyte)
-    for (s, h) in all.iter().flat_map(|s| {
-        [SNIFF_LEN, 1024].map(|n| (s, &s.data[..s.data.len().min(n)]))
-    }) {
+    for (s, h) in all
+        .iter()
+        .flat_map(|s| [SNIFF_LEN, 1024].map(|n| (s, &s.data[..s.data.len().min(n)])))
+    {
         assert_eq!(
             matches_extension(h, &s.ext),
             Some(true),

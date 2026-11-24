@@ -58,7 +58,7 @@ void main() {
     expect(find.text(S.scanWhole(true)), findsOneWidget);
 
     await tapVisible(tester, find.text(S.chooseOtherSource));
-    expect(fake.commands.last, 'close_source');
+    expect(fake.commands.sublist(fake.commands.length - 2), ['close_source', 'close_session']);
     expect(find.byType(DiskCard), findsNWidgets(7));
     await closeApp(tester, fake);
   });

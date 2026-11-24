@@ -18,18 +18,38 @@
 //! * a PDF embedded uncompressed in another PDF brings its own `%%EOF`.
 //!
 //! The walker therefore accepts a `%%EOF` only if the `startxref` offset in
-//! front of it leads - relative to *this* file's first byte - to a
-//! cross-reference table (`xref`) or a cross-reference stream (`n g obj`),
-//! which neither an embedded nor a neighbouring PDF satisfies. After an
-//! accepted `%%EOF` it looks at what follows: the start of an update section
-//! (an object, `xref`, or a comment line) means keep going; anything else
-//! (zeros, another file, noise) means this was the end.
+//! front of it leads - relative to *this* file's first byte, and before the
+//! `%%EOF` - to a cross-reference table (`xref`) or a cross-reference stream
+//! (an object `n g obj` whose dictionary, before its `stream` keyword, has
+//! the name `/XRef`; the first 64 KiB of the object are read for it, and a
+//! dictionary still open there that has `/XRef` counts as a stream whose
+//! end cannot be verified), which neither an embedded nor a neighbouring
+//! PDF satisfies. After an accepted `%%EOF` it looks at what follows: the start
+//! of an update section (an object, `xref`, or a comment line) means keep
+//! going; anything else (zeros, another file, noise) means this was the
+//! end.
+//!
+//! An accepted `%%EOF` ends the file *verified* only when its
+//! cross-reference chain checks out: the section `startxref` names, and
+//! every older section its `/Prev` entries lead to (no loops; at most 16,
+//! not counting a section whose chain was already verified for an earlier
+//! `%%EOF`, where the walk stops), is a table or a stream as above, inside
+//! the file; each table's subsections (at most 256) are well-formed
+//! (`first count` lines, entries of 20 bytes - or 19, as a few writers make
+//! them - ending inside the file) and are followed by `trailer <<`; and of
+//! each subsection the first, the last and up to two evenly spaced entries
+//! in between (at most 16 per section) that are in use point at
+//! `num gen obj` with their own object number and generation (white space
+//! before it allowed), inside the file. At least one table entry or stream
+//! must have been checked. Otherwise the end is still taken, unverified.
+//! The entries of a cross-reference stream are compressed and not checked.
 //!
 //! A linearized file states its total length in the first object (`/L`).
-//! When a `%%EOF` ends exactly there and nothing was appended, the result is
-//! `Exact` and no scan is needed. Everything else is `Probable`: one end-of-line
-//! after the final `%%EOF` is included if present, and nothing in the format
-//! proves that no further update followed.
+//! When a `%%EOF` whose `startxref` leads to a cross-reference section ends
+//! exactly there and nothing was appended, the result is `Exact`, verified
+//! by the same rule, and no scan is needed. Everything else is `Probable`:
+//! one end-of-line after the final `%%EOF` is included if present, and
+//! nothing in the format proves that no further update followed.
 //!
 //! When an update was announced (an object, `xref` or a comment right after
 //! a `%%EOF`) but no later `%%EOF` completes it before the data ends or goes
@@ -250,9 +270,13 @@ fn classic_section(src: &mut Src, at: u64, end: u64) -> Section {
         if head.starts_with(b"trailer") {
             let start = pos + lead + 7;
             let (buf, got) = src.side_peek::<1024>(start);
-            let t = buf.get(..got.min(end.saturating_sub(start) as usize)).unwrap_or(&[]);
+            let t = buf
+                .get(..got.min(end.saturating_sub(start) as usize))
+                .unwrap_or(&[]);
             // the dictionary ends before `startxref` (if it is in view)
-            let t = t.get(..find_sub(t, b"startxref").unwrap_or(t.len())).unwrap_or(t);
+            let t = t
+                .get(..find_sub(t, b"startxref").unwrap_or(t.len()))
+                .unwrap_or(t);
             return Section {
                 ok: skip_space(t).starts_with(b"<<"),
                 checked,
@@ -262,10 +286,7 @@ fn classic_section(src: &mut Src, at: u64, end: u64) -> Section {
         let Some((first, rest)) = digits(head) else {
             return bad;
         };
-        let after = rest
-            .iter()
-            .take_while(|&&c| c == b' ')
-            .count();
+        let after = rest.iter().take_while(|&&c| c == b' ').count();
         let Some((count, rest)) = rest.get(after..).filter(|_| after > 0).and_then(digits) else {
             return bad;
         };
@@ -282,9 +303,13 @@ fn classic_section(src: &mut Src, at: u64, end: u64) -> Section {
             20
         } else {
             match e.get(..got) {
-                Some(e) if e.len() == 20 && e.get(18..20).is_some_and(|eol| {
-                    matches!(eol, b" \n" | b" \r" | b"\r\n")
-                }) => 20,
+                Some(e)
+                    if e.len() == 20
+                        && e.get(18..20)
+                            .is_some_and(|eol| matches!(eol, b" \n" | b" \r" | b"\r\n")) =>
+                {
+                    20
+                }
                 Some(e) if e.len() >= 19 && matches!(e.get(18), Some(b'\n' | b'\r')) => 19,
                 _ => return bad,
             }
@@ -299,7 +324,11 @@ fn classic_section(src: &mut Src, at: u64, end: u64) -> Section {
         let picks = count.min(SAMPLES_PER_SUBSECTION);
         let mut last = None;
         for k in 0..picks {
-            let i = if picks <= 1 { 0 } else { k * (count - 1) / (picks - 1) };
+            let i = if picks <= 1 {
+                0
+            } else {
+                k * (count - 1) / (picks - 1)
+            };
             if last == Some(i) || checked >= SAMPLES_PER_SECTION {
                 continue;
             }
@@ -313,15 +342,14 @@ fn classic_section(src: &mut Src, at: u64, end: u64) -> Section {
             };
             let well_formed = e.len() - r1.len() == 10
                 && r1.first() == Some(&b' ')
-                && r1.get(1..6).is_some_and(|g| g.iter().all(u8::is_ascii_digit))
+                && r1
+                    .get(1..6)
+                    .is_some_and(|g| g.iter().all(u8::is_ascii_digit))
                 && r1.get(6) == Some(&b' ');
             if !well_formed {
                 return bad;
             }
-            let gen = r1
-                .get(1..6)
-                .and_then(digits)
-                .map_or(u64::MAX, |(g, _)| g);
+            let gen = r1.get(1..6).and_then(digits).map_or(u64::MAX, |(g, _)| g);
             match r1.get(7) {
                 Some(b'n') => {
                     checked += 1;
@@ -339,15 +367,52 @@ fn classic_section(src: &mut Src, at: u64, end: u64) -> Section {
     bad
 }
 
+/// Bytes of a cross-reference stream's object header and dictionary read
+/// at most. An update that lists many changed objects has a long `/Index`
+/// array, so the dictionary can be well over 1 KiB.
+const STREAM_DICT_MAX: usize = 64 * 1024;
+
 /// A cross-reference stream: an object at `at` whose dictionary says
-/// `/Type /XRef`. Its entries are compressed and not sampled.
+/// `/Type /XRef`. Its entries are compressed and not sampled. The object is
+/// read in steps until its `stream` or `endobj` keyword is in view, up to
+/// [`STREAM_DICT_MAX`] bytes; a dictionary that names `/XRef` but is still
+/// open after that many bytes is a section that cannot be checked (`ok`
+/// false: the end is taken, unverified).
 fn stream_section(src: &mut Src, at: u64, end: u64) -> Option<Section> {
-    let (buf, got) = src.side_peek::<1024>(at);
-    let b = buf.get(..got.min(end.saturating_sub(at) as usize))?;
-    let (_, _, rest) = object_header(skip_space(b))?;
+    let limit = end.saturating_sub(at).min(STREAM_DICT_MAX as u64) as usize;
+    let mut b: Vec<u8> = Vec::new();
+    let found = loop {
+        let (buf, got) = src.side_peek::<1024>(at + b.len() as u64);
+        let take = got.min(limit - b.len());
+        b.extend_from_slice(buf.get(..take)?);
+        // a keyword may straddle two steps: look again a little earlier
+        let from = b.len().saturating_sub(take + 6);
+        let tail = b.get(from..).unwrap_or(&[]);
+        if find_sub(tail, b"stream").is_some() || find_sub(tail, b"endobj").is_some() {
+            break true;
+        }
+        if take < 1024 || b.len() >= limit {
+            break false;
+        }
+    };
+    let (_, _, rest) = object_header(skip_space(&b))?;
+    let Some(stream_at) = find_sub(rest, b"stream").filter(|_| found) else {
+        // nothing of the object's end in the first STREAM_DICT_MAX bytes:
+        // a section only if they start a cross-reference stream's
+        // dictionary (an object cut off by `end` is none)
+        let capped = b.len() >= STREAM_DICT_MAX;
+        if found || !capped || !skip_space(rest).starts_with(b"<<") || !has_xref_type(rest) {
+            return None;
+        }
+        return Some(Section {
+            ok: false,
+            checked: 0,
+            prev: None,
+        });
+    };
     // the dictionary ends where the stream data starts; an object that
     // ends without any is not a stream
-    let dict = rest.get(..find_sub(rest, b"stream")?)?;
+    let dict = rest.get(..stream_at)?;
     if find_sub(dict, b"endobj").is_some() {
         return None;
     }
@@ -363,7 +428,18 @@ fn stream_section(src: &mut Src, at: u64, end: u64) -> Option<Section> {
 
 /// Checks the cross-reference section at `off` and the chain of older
 /// sections its `/Prev` entries lead to, all inside the first `end` bytes.
-fn check_xref(src: &mut Src, off: u64, end: u64) -> Xref {
+/// `verified` holds the sections whose chains were verified for an earlier
+/// `%%EOF` (inside fewer bytes, so inside these as well): a chain that
+/// reaches one of them ends there, verified. A verified `off` is added.
+fn check_xref(src: &mut Src, off: u64, end: u64, verified: &mut Vec<u64>) -> Xref {
+    let result = walk_chain(src, off, end, verified);
+    if result == Xref::Verified && !verified.contains(&off) {
+        verified.push(off);
+    }
+    result
+}
+
+fn walk_chain(src: &mut Src, off: u64, end: u64, verified: &[u64]) -> Xref {
     let mut at = off;
     let mut seen: Vec<u64> = Vec::new();
     let mut checked = 0usize;
@@ -384,7 +460,11 @@ fn check_xref(src: &mut Src, off: u64, end: u64) -> Xref {
         let Some(section) = section else {
             // the section `startxref` names must be one; one that a
             // `/Prev` names may be damaged without making this one foreign
-            return if depth == 0 { Xref::None } else { Xref::Unverified };
+            return if depth == 0 {
+                Xref::None
+            } else {
+                Xref::Unverified
+            };
         };
         if !section.ok {
             return Xref::Unverified;
@@ -400,6 +480,7 @@ fn check_xref(src: &mut Src, off: u64, end: u64) -> Xref {
                 };
             }
             Some(p) if p >= end || seen.contains(&p) => return Xref::Unverified,
+            Some(p) if verified.contains(&p) => return Xref::Verified,
             Some(p) => at = p,
         }
     }
@@ -421,7 +502,7 @@ fn update_follows(src: &mut Src, end: u64) -> bool {
 
 /// Examines the `%%EOF` at `marker`: the end offset it implies, if it is a
 /// trailer of this file, and whether its cross-reference chain checked out.
-fn end_at_marker(src: &mut Src, marker: u64) -> Option<(u64, bool)> {
+fn end_at_marker(src: &mut Src, marker: u64, verified: &mut Vec<u64>) -> Option<(u64, bool)> {
     let xref = startxref_before(src, marker)?;
     // 0 is the dummy value in the first-page trailer of a linearized file
     if xref == 0 || xref >= marker {
@@ -441,7 +522,7 @@ fn end_at_marker(src: &mut Src, marker: u64) -> Option<(u64, bool)> {
         return None;
     }
     let end = after_marker + eol as u64;
-    match check_xref(src, xref, end) {
+    match check_xref(src, xref, end, verified) {
         Xref::None => None,
         Xref::Unverified => Some((end, false)),
         Xref::Verified => Some((end, true)),
@@ -479,13 +560,15 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
 
     let mut best: Option<(u64, bool)> = None;
     let mut pos = 0u64;
+    // cross-reference sections whose chains were verified
+    let mut chains: Vec<u64> = Vec::new();
     if let Some(l) = linearized_length(&head) {
         // the `%%EOF` that ends the stated length, with a cross-reference
         // chain of this file in front of it
         let at = (l >= 64 && l <= src.limit())
             .then(|| marker_before(src, l))
             .flatten();
-        if let Some((_, verified)) = at.and_then(|m| end_at_marker(src, m)) {
+        if let Some((_, verified)) = at.and_then(|m| end_at_marker(src, m, &mut chains)) {
             if !update_follows(src, l) {
                 return done(l, Confidence::Exact, verified);
             }
@@ -520,7 +603,7 @@ pub(crate) fn measure(src: &mut Src) -> Option<Measured> {
             if examined > MAX_MARKERS {
                 return None;
             }
-            if let Some((end, verified)) = end_at_marker(src, marker) {
+            if let Some((end, verified)) = end_at_marker(src, marker, &mut chains) {
                 if !update_follows(src, end) {
                     return done(end, Confidence::Probable, verified);
                 }

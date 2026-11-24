@@ -201,6 +201,7 @@ fn mapping() -> Vec<(&'static str, Vec<Check>)> {
             vec![exact::<OpenSourceArgs>(), exact::<OpenSourceResult>()],
         ),
         ("close_source", vec![exact::<Empty>()]),
+        ("close_session", vec![exact::<Empty>()]),
         (
             "scan_start",
             vec![

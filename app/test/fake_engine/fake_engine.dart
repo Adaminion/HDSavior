@@ -399,10 +399,14 @@ final class FakeEngine {
   void _shutdown() {
     // "A running scan stops reading and saves its session (no catalog is
     // built); other jobs are cancelled; then the engine exits."
+    // The scan ends `stopped` without a catalog, also when its read had
+    // finished.
     final job = _job;
     final session = _session;
-    if (job is _ScanJob && session != null && session.path != null) {
-      _saveSession(session.path!);
+    if (job is _ScanJob && session != null) {
+      final path = session.path;
+      if (path != null) _saveSession(path);
+      _event('scan_done', {'status': 'stopped', 'error': null, 'session_path': path, 'catalog': null});
     }
     _terminate(0);
   }
@@ -607,6 +611,17 @@ final class FakeEngine {
           _catalog = null;
         } else {
           _catalog?.sourceAttached = false;
+        }
+        return {};
+      case 'close_session':
+        // Drops the session and its catalog; an open source stays (C → O,
+        // B → N).
+        _notBusy();
+        _session = null;
+        _catalog = null;
+        if (!_sourceAttached) {
+          _source = null;
+          _sourceDisk = null;
         }
         return {};
       case 'scan_start':

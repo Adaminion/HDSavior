@@ -1,8 +1,10 @@
 //! A time limit for `read_file`.
 //!
-//! `read_file` is a plain request: it runs on the engine's request thread,
-//! and nothing else is answered while it reads (not even `job_cancel` or
-//! `shutdown`). On a failing disk every unreadable sector can take seconds,
+//! `read_file` reads on a thread of its own, but its response has to come
+//! before the responses of every later request (PROTOCOL section 1), so
+//! nothing else is answered while it reads; only `shutdown`, the end of
+//! input and `job_cancel` of a running job stop it early (they set the
+//! same flag). On a failing disk every unreadable sector can take seconds,
 //! and the content reader retries per physical sector, so one preview
 //! chunk could hold the engine for minutes. [`Deadline`] sets the read's
 //! cancel flag once the limit has passed; the reader polls it between

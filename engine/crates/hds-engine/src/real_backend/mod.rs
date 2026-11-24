@@ -19,7 +19,9 @@
 //! `LIVE` state, the stored heads, the overrides, the carved set, the
 //! warnings the engine adds, and the [`Built`] catalog with its layout).
 //! Queries lock it for their duration; the server calls them one at a
-//! time, and only jobs run beside them.
+//! time, and only jobs and a `read_file` (which reads without the lock)
+//! run beside them. A recovery holds handles on the store
+//! (`Session::shared_store`) and the catalog instead of the lock.
 //!
 //! A scan moves the [`Work`] into its job (the server asks no catalog
 //! question during a scan and refuses every command that changes the
@@ -60,9 +62,9 @@
 //! (ALGORITHMS H, I, J). Their run functions capture `Arc<Shared>`
 //! ([`RealBackend::shared`]) and lock it only briefly: queries run beside
 //! them. Recovery refreshes the overwritten set first (H1,
-//! [`Work::fresh_overwritten`]), builds its plan from the catalog and runs
-//! with the protected ranges of [`Work::protected`]; what its reads find
-//! joins the catalog (G1). Carving stores its run in the session, the
+//! [`Work::fresh_overwritten`]), selects its files under the lock and
+//! describes them in the job, and runs with the protected ranges of
+//! [`Work::protected`]; what its reads find joins the catalog (G1). Carving stores its run in the session, the
 //! carved set and the catalog (I5) and keeps the epoch.
 
 mod convert;
@@ -1204,11 +1206,16 @@ impl Backend for RealBackend {
         jobs::image_start(&self.shared, request)
     }
 
-    fn read_file(&self, args: &ReadFileArgs) -> Result<FileBytes, ProtocolError> {
+    fn read_file(
+        &self,
+        args: &ReadFileArgs,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<FileBytes, ProtocolError> {
         // What the read needs is taken under the lock; the read itself runs
-        // without it, so that a slow or failing disk does not hold up a
-        // running recovery (its G1 updates take the lock after every file).
-        let stop = Arc::new(AtomicBool::new(false));
+        // without it, so that a slow or failing disk holds up neither the
+        // queries nor a running job. `stop` is set by the server
+        // (`shutdown`, end of input, `job_cancel`) and by the time limit.
+        let started = std::time::Instant::now();
         let (catalog, id, file, ext, ranged) = {
             let st = self.lock();
             let source = st.source.clone().ok_or_else(no_source)?;
@@ -1248,12 +1255,20 @@ impl Backend for RealBackend {
             (built.catalog.clone(), id, file, ext, ranged)
         };
         let length = usize::try_from(args.length).unwrap_or(usize::MAX);
-        let preview = read_preview(&ranged, &file, &ext, args.offset, length, &stop).map_err(
+        let preview = read_preview(&ranged, &file, &ext, args.offset, length, stop).map_err(
             |e| match e {
                 PreviewError::TooLong { requested } => ProtocolError::bad_request(format!(
                     "length {requested} is more than read_file returns at once"
                 )),
                 PreviewError::Read(ReadError::SourceLost(e)) => source_lost(&e),
+                PreviewError::Read(ReadError::Cancelled)
+                    if started.elapsed() < READ_FILE_DEADLINE =>
+                {
+                    ProtocolError::new(
+                        ErrorCode::IoError,
+                        "reading stopped: a later request (shutdown or job_cancel) needed the engine",
+                    )
+                }
                 PreviewError::Read(ReadError::Cancelled) => ProtocolError::new(
                     ErrorCode::IoError,
                     format!(

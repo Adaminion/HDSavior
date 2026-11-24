@@ -14,15 +14,20 @@
 //!   panics;
 //! * a scan whose session path contains `lost` - ends `failed` with
 //!   `source_lost` and no catalog;
+//! * a scan whose session path contains `late-shutdown` - waits for the
+//!   shutdown flag, then ends `completed` with a catalog (a scan that saw
+//!   the shutdown too late);
 //! * a `session_load` path containing `missing` - `not_found`; containing
 //!   `nohits` - a session without signature hits;
 //! * a source path containing `mismatch` - `session_attach_source` answers
 //!   `source_mismatch`;
 //! * a `session_save` path containing `io-fail` - `io_error`;
+//! * a `session_save` path containing `slow-save` - takes 2 s;
 //! * an `image_start` destination containing `exists` - `exists`.
 
 use std::ops::Range;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -36,6 +41,10 @@ use crate::protocol::*;
 
 /// Node id that makes the fake panic.
 pub const PANIC_NODE: u64 = 666;
+
+/// Node id of a file whose `read_file` reads until it is stopped (or for
+/// the real backend's time limit, about 5 s).
+pub const SLOW_NODE: u64 = 777;
 
 /// Size of the fake file 2.
 pub const FILE_SIZE: u64 = 1000;
@@ -332,7 +341,29 @@ impl Backend for FakeBackend {
                         catalog: None,
                     };
                 }
-                let status = if ctx.is_cancelled() {
+                if session_path
+                    .as_deref()
+                    .is_some_and(|p| p.contains("late-shutdown"))
+                {
+                    // A scan that decided `completed` (and built its
+                    // catalog) just before a shutdown arrived.
+                    while !ctx.is_shutting_down() {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    let mut state = lock(&shared);
+                    let catalog = state.session.as_mut().map(|session| {
+                        session.catalog = true;
+                        FakeBackend::catalog_of(session)
+                    });
+                    return ScanDone {
+                        status: ScanStatus::Completed,
+                        error: None,
+                        session_path,
+                        catalog,
+                    };
+                }
+                // A shutdown also sets the cancel flag: `stopped`.
+                let status = if ctx.is_cancelled() || ctx.is_shutting_down() {
                     ScanStatus::Stopped
                 } else {
                     ScanStatus::Completed
@@ -362,6 +393,9 @@ impl Backend for FakeBackend {
 
     fn session_save(&self, dest: Destination) -> Result<SessionSaveResult, ProtocolError> {
         drop(self.record("session_save"));
+        if dest.path.contains("slow-save") {
+            std::thread::sleep(Duration::from_secs(2));
+        }
         if dest.path.contains("io-fail") {
             return Err(ProtocolError::new(ErrorCode::IoError, "fake: cannot write"));
         }
@@ -688,8 +722,27 @@ impl Backend for FakeBackend {
         })
     }
 
-    fn read_file(&self, args: &ReadFileArgs) -> Result<FileBytes, ProtocolError> {
+    fn read_file(
+        &self,
+        args: &ReadFileArgs,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<FileBytes, ProtocolError> {
         drop(self.record("read_file"));
+        if args.node == SLOW_NODE {
+            // A file on a failing disk: reads until stopped or until the
+            // time limit of the real backend.
+            let started = std::time::Instant::now();
+            while !stop.load(Ordering::SeqCst) {
+                if started.elapsed() >= crate::real_backend::READ_FILE_DEADLINE {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            return Err(ProtocolError::new(
+                ErrorCode::IoError,
+                "fake: reading stopped",
+            ));
+        }
         let row = check_node(args.node)?;
         if row.kind.is_folder() {
             return Err(ProtocolError::bad_request(format!(

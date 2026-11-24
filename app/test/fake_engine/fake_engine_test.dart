@@ -241,7 +241,10 @@ void main() {
       scanning.engine.advance(3);
       scanning.engine.endOfInput();
       expect(await scanning.engine.exitCode, 0);
-      expect(scanning.events('scan_done'), isEmpty, reason: 'no catalog is built');
+      final done = scanning.events('scan_done').single;
+      expect(done['status'], 'stopped', reason: 'an interrupted scan is stopped, never completed');
+      expect(done['catalog'], isNull, reason: 'no catalog is built');
+      expect(done['session_path'], r'C:\s\run.hdsc');
       expect(world.savedSessions[r'C:\s\run.hdsc']!.bytesDone, greaterThan(0));
       // The next engine process can load and resume it.
       final next = Harness(world: world);
@@ -284,10 +287,11 @@ void main() {
       }
     });
 
-    test('open_source, close_source, session_load, session_attach_source, geometry_set, instance_set, session_save: busy in S and J', () {
+    test('open_source, close_source, close_session, session_load, session_attach_source, geometry_set, instance_set, session_save: busy in S and J', () {
       expectByState('open_source', (_) => {'kind': 'disk', 'path': disk1},
           {'N': 'ok', 'O': 'ok', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
       expectByState('close_source', (_) => {}, {'N': 'ok', 'O': 'ok', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
+      expectByState('close_session', (_) => {}, {'N': 'ok', 'O': 'ok', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
       expectByState('session_load', (_) => {'path': r'C:\s\x.hdsc'},
           {'N': 'ok', 'O': 'ok', 'S': 'busy', 'C': 'ok', 'B': 'ok', 'J': 'busy'});
       expectByState('session_attach_source', (_) => {'kind': 'disk', 'path': disk1},
@@ -419,6 +423,22 @@ void main() {
       expect(opened.outcome('scan_start'), 'no_source');
     });
 
+    test('close_session drops the session and its catalog and keeps the source', () {
+      final c = Harness()..scan();
+      c.ok('close_session');
+      expect(c.outcome('catalog_info'), 'no_catalog');
+      expect(c.outcome('session_save', {'path': r'C:\s\copy.hdsc'}), 'no_session');
+      expect(c.outcome('scan_start', {'resume': true}), 'no_session');
+      expect(c.outcome('check_destination', {'path': r'D:\out', 'purpose': 'recover'}), 'ok', reason: 'the source is still open: O');
+
+      final b = Harness()..scan();
+      b.ok('close_source');
+      b.ok('close_session');
+      expect(b.outcome('catalog_info'), 'no_catalog');
+      expect(b.outcome('session_save', {'path': r'C:\s\copy.hdsc'}), 'no_session');
+      expect(b.outcome('check_destination', {'path': r'D:\out', 'purpose': 'recover'}), 'no_source', reason: 'N');
+    });
+
     test('session_save and session_attach_source', () {
       final h = Harness()..scan();
       final refused = h.error('session_save', {'path': r'E:\copy.hdsc'});
@@ -499,7 +519,7 @@ void main() {
       final h = Harness();
       final system = h.ok('open_source', {'kind': 'disk', 'path': r'\\.\PhysicalDrive0'});
       expect((system['warnings']! as List<Object?>).map((w) => (w! as Map)['code']).toSet(), {
-        'trim_supported', 'mounted_volume', 'system_disk', 'page_file_on_source', 'app_on_source', //
+        'trim_supported', 'mounted_volume', 'system_disk', 'page_file_on_source', // (app_on_source is the app's)
       });
       final victim = h.ok('open_source', {'kind': 'disk', 'path': r'\\.\physicaldrive1'});
       expect((victim['source']! as Map)['disk_number'], 1);

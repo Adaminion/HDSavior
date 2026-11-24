@@ -3,10 +3,14 @@
 
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use hds_io::out::Timestamps;
 use hds_io::RangeSet;
-use hds_recover::{FileSource, Plan, PlanFile, PlanFolder, Rating, Run};
+use hds_recover::{
+    FileFacts, FileName, FilePlace, FileSource, FlagSet, LazyPlan, Plan, PlanFile, PlanFiles,
+    PlanFolder, Rating, RatingContext, Run,
+};
 
 use crate::catalog::groups::{self, Merged};
 use crate::catalog::{Catalog, NodeId, NodeKind, NONE};
@@ -211,97 +215,143 @@ impl Catalog {
         Ok(out)
     }
 
-    /// H2: the recovery plan of a selection, in `hds_recover`'s types.
-    ///
-    /// `fresh` is the overwritten set of the snapshot taken at
+    /// H1, H2, H4: the plan of a selection before its files are
+    /// described. `fresh` is the overwritten set of the snapshot taken at
     /// `recover_start` (H1); files it touches are marked `overwritten`
-    /// first ([`Catalog::refresh_overwritten`]). Every selected file is in
-    /// the plan, also `unsupported` ones (recovery reports them
-    /// `skipped:*`) and damaged ones (`skip_damaged` is a recovery
-    /// option). Folders: the selected ones (created even when empty) and
-    /// the ancestors of everything selected, from the instance root:
-    /// files of other instances go below a folder named after the
-    /// instance label (H4); virtual and lost folders are real folders.
-    pub fn plan(
+    /// first ([`Catalog::refresh_overwritten`]). Every selected file is
+    /// kept, also `unsupported` ones (recovery reports them `skipped:*`)
+    /// and damaged ones (`skip_damaged` is a recovery option), with the
+    /// flags and rating context of this moment, so that the totals of the
+    /// answer and of the job agree whatever later reads find (G1).
+    /// Folders: the selected ones (created even when empty) and the
+    /// ancestors of everything selected, from the instance root: files of
+    /// other instances go below a folder named after the instance label
+    /// (H4); virtual and lost folders are real folders. The folders are
+    /// described in full; a file costs 12 bytes until
+    /// [`PlanSelection::into_lazy`] hands it to the job, which describes
+    /// it when it writes it.
+    pub fn plan_selection(
         &self,
         store: &ScanStore,
         sel: &Selection,
         fresh: Option<&RangeSet>,
-    ) -> Result<Plan, QueryError> {
+    ) -> Result<PlanSelection, QueryError> {
         if let Some(set) = fresh {
             self.refresh_overwritten(set);
         }
         let s = self.select(sel)?;
         let folder_ids = self.plan_folders(&s);
-        let parent_of = |id: u32| -> Option<u64> {
-            let p = self.rec(id).map_or(NONE, |n| n.parent);
-            (p != NONE && !self.is_main_root(p)).then_some(u64::from(p))
-        };
-        let mut plan = Plan::default();
+        let mut folders = Vec::with_capacity(folder_ids.len());
         for &d in &folder_ids {
             let Some(n) = self.rec(d) else { continue };
             let times = self.si_times(store, n);
-            plan.folders.push(PlanFolder {
+            folders.push(PlanFolder {
                 id: u64::from(d),
-                parent: parent_of(d),
+                parent: self.plan_parent(d),
                 name: self.name_units(store, d),
                 times: times.map_or_else(Timestamps::default, timestamps),
                 in_use: !n.deleted(),
                 record_number: self.record_number(store, n.rec),
             });
         }
+        drop(folder_ids);
+        let mut files = Vec::with_capacity(s.files.len());
+        for &f in &s.files {
+            let Some(n) = self.rec(f) else { continue };
+            let validated = self.health.validated(n.inst);
+            files.push(Picked {
+                node: f,
+                flags: self.flags(NodeId(f)),
+                context: crate::health::context(n.kind, validated, self.end_verified(f)),
+            });
+        }
+        Ok(PlanSelection {
+            catalog: self.clone(),
+            folders,
+            files,
+        })
+    }
+
+    /// H2: the recovery plan of a selection with every file described in
+    /// full, in `hds_recover`'s types ([`Catalog::plan_selection`] and
+    /// then every file as the job would describe it).
+    pub fn plan(
+        &self,
+        store: &ScanStore,
+        sel: &Selection,
+        fresh: Option<&RangeSet>,
+    ) -> Result<Plan, QueryError> {
+        let selection = self.plan_selection(store, sel, fresh)?;
+        let mut memo = PathMemo::default();
+        let mut plan = Plan {
+            folders: selection.folders,
+            files: Vec::with_capacity(selection.files.len()),
+        };
+        for &p in &selection.files {
+            plan.files.push(self.describe(store, p, &mut memo)?);
+        }
+        Ok(plan)
+    }
+
+    /// The folder a node goes into in a plan: its parent, `None` below the
+    /// main root (whose folder is the destination itself).
+    fn plan_parent(&self, id: u32) -> Option<u64> {
+        let p = self.rec(id).map_or(NONE, |n| n.parent);
+        (p != NONE && !self.is_main_root(p)).then_some(u64::from(p))
+    }
+
+    /// The whole plan entry of a selected file.
+    fn describe(
+        &self,
+        store: &ScanStore,
+        p: Picked,
+        memo: &mut PathMemo,
+    ) -> Result<PlanFile, QueryError> {
+        let f = p.node;
+        let n = self
+            .rec(f)
+            .copied()
+            .ok_or(QueryError::NotFound(u64::from(f)))?;
+        let id = NodeId(f);
         // The display path of the last parent seen, when a child's path is
         // that path plus the child's name (no elision involved): files of
         // one folder then cost O(1) each instead of a walk to the root.
-        let mut memo: (u32, Option<String>) = (NONE, None);
-        for &f in &s.files {
-            let Some(n) = self.rec(f).copied() else {
-                continue;
-            };
-            let id = NodeId(f);
-            if memo.0 != n.parent {
-                let (anc, elided) = self.ancestors(n.parent);
-                let composable = !elided && anc.len() < MAX_PATH_DEPTH;
-                memo = (
-                    n.parent,
-                    composable.then(|| self.path_from(store, NodeId(n.parent), &anc, elided)),
-                );
-            }
-            let original_path = match &memo.1 {
-                Some(parent) => {
-                    let name = self.name(store, id);
-                    match (parent.is_empty(), name.is_empty()) {
-                        (true, _) => name,
-                        (false, true) => parent.clone(),
-                        (false, false) => format!("{parent}/{name}"),
-                    }
-                }
-                None => self.path(store, id),
-            };
-            let flags = self.flags(id);
-            let validated = self.health.validated(n.inst);
-            let end_verified = self.end_verified(f);
-            let (source, record_offset) = self.file_source(store, f)?;
-            plan.files.push(PlanFile {
-                node: u64::from(f),
-                folder: parent_of(f),
-                name: self.name_units(store, f),
-                ext: ext_of(self.folded(f)).to_string(),
-                size: self.numbers(f).0,
-                times: self
-                    .si_times(store, &n)
-                    .map_or_else(Timestamps::default, timestamps),
-                flags,
-                context: crate::health::context(n.kind, validated, end_verified),
-                in_use: !n.deleted(),
-                record_number: self.record_number(store, n.rec),
-                record_offset,
-                first_data_offset: source.first_offset(),
-                original_path,
-                source,
-            });
+        if memo.parent != n.parent {
+            let (anc, elided) = self.ancestors(n.parent);
+            let composable = !elided && anc.len() < MAX_PATH_DEPTH;
+            memo.parent = n.parent;
+            memo.path = composable.then(|| self.path_from(store, NodeId(n.parent), &anc, elided));
         }
-        Ok(plan)
+        let original_path = match &memo.path {
+            Some(parent) => {
+                let name = self.name(store, id);
+                match (parent.is_empty(), name.is_empty()) {
+                    (true, _) => name,
+                    (false, true) => parent.clone(),
+                    (false, false) => format!("{parent}/{name}"),
+                }
+            }
+            None => self.path(store, id),
+        };
+        let (source, record_offset) = self.file_source(store, f)?;
+        Ok(PlanFile {
+            node: u64::from(f),
+            folder: self.plan_parent(f),
+            name: self.name_units(store, f),
+            ext: ext_of(self.folded(f)).to_string(),
+            size: self.numbers(f).0,
+            times: self
+                .si_times(store, &n)
+                .map_or_else(Timestamps::default, timestamps),
+            flags: p.flags,
+            context: p.context,
+            in_use: !n.deleted(),
+            record_number: self.record_number(store, n.rec),
+            record_offset,
+            first_data_offset: source.first_offset(),
+            original_path,
+            source,
+        })
     }
 
     fn record_number(&self, store: &ScanStore, rec: u32) -> Option<u64> {
@@ -479,5 +529,144 @@ pub(crate) fn source_of(store: &ScanStore, m: &Merged, cs: u64, vo: u64) -> File
         runs,
         real_size: m.size,
         initialized_size: m.initialized.min(m.size),
+    }
+}
+
+/// One selected file as a plan keeps it until it is written: 12 bytes.
+#[derive(Debug, Clone, Copy)]
+struct Picked {
+    node: u32,
+    flags: FlagSet,
+    context: RatingContext,
+}
+
+/// The display path of the parent of the file described last.
+#[derive(Debug)]
+struct PathMemo {
+    parent: u32,
+    path: Option<String>,
+}
+
+impl Default for PathMemo {
+    fn default() -> Self {
+        PathMemo {
+            parent: NONE,
+            path: None,
+        }
+    }
+}
+
+/// The plan of a selection whose files are not described yet
+/// ([`Catalog::plan_selection`]).
+#[derive(Debug)]
+pub struct PlanSelection {
+    catalog: Catalog,
+    folders: Vec<PlanFolder>,
+    files: Vec<Picked>,
+}
+
+impl PlanSelection {
+    /// The folders to create.
+    #[must_use]
+    pub fn folders(&self) -> &[PlanFolder] {
+        &self.folders
+    }
+
+    /// Number of files (`recover_start.files`).
+    #[must_use]
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// What the job knows of every file before reading anything: node,
+    /// size, flags and rating context.
+    pub fn facts(&self) -> impl Iterator<Item = FileFacts> + '_ {
+        self.files.iter().map(|p| facts(&self.catalog, *p))
+    }
+
+    /// The plan for [`Recovery::prepare_lazy`](hds_recover::Recovery::prepare_lazy):
+    /// the folders, and the files described from `store` (the session's
+    /// store, [`Session::shared_store`](crate::session::Session::shared_store))
+    /// one at a time when the job needs them.
+    #[must_use]
+    pub fn into_lazy(self, store: Arc<ScanStore>) -> LazyPlan {
+        LazyPlan {
+            folders: self.folders,
+            files: Box::new(CatalogFiles {
+                catalog: self.catalog,
+                store,
+                files: self.files,
+                memo: PathMemo::default(),
+            }),
+        }
+    }
+}
+
+fn facts(catalog: &Catalog, p: Picked) -> FileFacts {
+    FileFacts {
+        node: u64::from(p.node),
+        size: catalog.numbers(p.node).0,
+        flags: p.flags,
+        context: p.context,
+    }
+}
+
+/// The files of a [`PlanSelection`], described from the catalog and the
+/// store when the job asks.
+struct CatalogFiles {
+    catalog: Catalog,
+    store: Arc<ScanStore>,
+    files: Vec<Picked>,
+    memo: PathMemo,
+}
+
+impl CatalogFiles {
+    fn picked(&self, index: usize) -> Result<Picked, String> {
+        self.files
+            .get(index)
+            .copied()
+            .ok_or_else(|| format!("file {index} is not in the plan"))
+    }
+}
+
+impl PlanFiles for CatalogFiles {
+    fn count(&self) -> usize {
+        self.files.len()
+    }
+
+    fn facts(&self, index: usize) -> Option<FileFacts> {
+        self.files.get(index).map(|p| facts(&self.catalog, *p))
+    }
+
+    fn place(&mut self, index: usize) -> Result<FilePlace, String> {
+        let p = self.picked(index)?;
+        let (source, _) = self
+            .catalog
+            .file_source(&self.store, p.node)
+            .map_err(|e| e.to_string())?;
+        Ok(FilePlace {
+            folder: self.catalog.plan_parent(p.node),
+            first_data_offset: source.first_offset(),
+        })
+    }
+
+    fn name(&mut self, index: usize) -> Result<FileName, String> {
+        let p = self.picked(index)?;
+        let n = *self
+            .catalog
+            .rec(p.node)
+            .ok_or_else(|| format!("node {} does not exist", p.node))?;
+        Ok(FileName {
+            name: self.catalog.name_units(&self.store, p.node),
+            in_use: !n.deleted(),
+            record_number: self.catalog.record_number(&self.store, n.rec),
+        })
+    }
+
+    fn file(&mut self, index: usize) -> Result<PlanFile, String> {
+        let p = self.picked(index)?;
+        self.catalog
+            .describe(&self.store, p, &mut self.memo)
+            .map_err(|e| e.to_string())
     }
 }

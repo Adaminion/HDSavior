@@ -60,6 +60,7 @@ use crate::store::ScanStore;
 
 pub use info::{
     CatalogSummary, InstanceSummary, LiveVolumeSummary, ProtectedSummary, POST_FORMAT_TEXT,
+    WARN_OUT_OF_RANGE_FILES, WARN_SCAN_INCOMPLETE,
 };
 pub use select::{Selection, SelectionSummary};
 
@@ -313,6 +314,10 @@ pub(crate) struct QueryCache {
     /// [`FULL_SORT`] and [`MIN_CHUNK`] (smaller in tests that exercise the
     /// partial sorts).
     tuning: Mutex<(usize, usize)>,
+    /// Per catalog instance: files, dirs, deleted files, lost dirs, bytes
+    /// (`catalog_info`). They depend only on the tree and the health, which
+    /// a catalog value never changes (a new one gets a new cache).
+    pub(crate) counts: std::sync::OnceLock<Vec<[u64; 5]>>,
 }
 
 impl Default for QueryCache {
@@ -320,6 +325,7 @@ impl Default for QueryCache {
         QueryCache {
             entries: Mutex::new(Vec::new()),
             tuning: Mutex::new((FULL_SORT, MIN_CHUNK)),
+            counts: std::sync::OnceLock::new(),
         }
     }
 }
@@ -840,7 +846,13 @@ impl Catalog {
             show_deleted: args.show_deleted,
             exts: args.exts.clone(),
             ratings: args.ratings.clone(),
-            gen: self.observed_gen(),
+            // What reads find (G1) changes ratings only: a list that
+            // neither filters nor sorts by rating stays valid.
+            gen: if args.ratings.is_some() || args.sort == SortKey::Rating {
+                self.observed_gen()
+            } else {
+                0
+            },
         };
         let list = self.cache.get_or(key, || {
             let args = ListArgs {
@@ -1173,7 +1185,12 @@ impl Catalog {
             show_deleted: args.show_deleted,
             sort: args.sort,
             desc: args.desc,
-            gen: self.observed_gen(),
+            // As for lists: only ratings depend on what reads find.
+            gen: if args.filter.ratings.is_some() || args.sort == SortKey::Rating {
+                self.observed_gen()
+            } else {
+                0
+            },
         };
         let q = args.filter.query.as_deref().map(crate::catalog::tree::fold);
         let q = q.filter(|q| !q.is_empty());

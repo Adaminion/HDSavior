@@ -48,7 +48,10 @@ fn noise_behind_the_magic_bytes_rarely_passes() {
 fn near_misses_that_used_to_pass() {
     let m = matches_extension;
     // JPEG: SOI and an APP0 marker, then text
-    assert_eq!(m(b"\xFF\xD8\xFF\xE0\x00\x10\x00\x01\x02 garbage...", "jpg"), Some(false));
+    assert_eq!(
+        m(b"\xFF\xD8\xFF\xE0\x00\x10\x00\x01\x02 garbage...", "jpg"),
+        Some(false)
+    );
     // a JFIF segment whose length leads to something that is no marker
     let mut h = b"\xFF\xD8\xFF\xE0\x00\x10JFIF\0\x01\x01\0\0\x01\0\x01\0\0".to_vec();
     h.extend_from_slice(b"\x12\x34 not a marker");
@@ -60,9 +63,15 @@ fn near_misses_that_used_to_pass() {
     // a DQT of impossible length, an SOF with zero components, an
     // unknown marker, a scan before any frame header
     assert_eq!(m(b"\xFF\xD8\xFF\xDB\x00\x44\x00", "jpg"), Some(false));
-    assert_eq!(m(b"\xFF\xD8\xFF\xC0\x00\x08\x08\x00\x10\x00\x10\x00", "jpg"), Some(false));
+    assert_eq!(
+        m(b"\xFF\xD8\xFF\xC0\x00\x08\x08\x00\x10\x00\x10\x00", "jpg"),
+        Some(false)
+    );
     assert_eq!(m(b"\xFF\xD8\xFF\x02\x00\x10\x00\x00", "jpg"), Some(false));
-    assert_eq!(m(b"\xFF\xD8\xFF\xDA\x00\x08\x01\x01\x00\x00\x3F\x00", "jpg"), Some(false));
+    assert_eq!(
+        m(b"\xFF\xD8\xFF\xDA\x00\x08\x01\x01\x00\x00\x3F\x00", "jpg"),
+        Some(false)
+    );
     // ZIP: a local header signature, then noise
     assert_eq!(m(b"PK\x03\x04\xFF\xFF\x12\x34\x99\x00", "zip"), Some(false));
     // a plausible header with a name made of control bytes
@@ -75,8 +84,17 @@ fn near_misses_that_used_to_pass() {
     z.extend_from_slice(b"a.tx");
     assert_eq!(m(&z, "zip"), Some(true));
     // an end record with something in its fields is not an empty archive
-    assert_eq!(m(b"PK\x05\x06\0\0\0\0\x01\0\x01\0\x2e\0\0\0\x10\x20\0\0\0\0", "zip"), Some(false));
-    assert_eq!(m(b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", "zip"), Some(true));
+    assert_eq!(
+        m(
+            b"PK\x05\x06\0\0\0\0\x01\0\x01\0\x2e\0\0\0\x10\x20\0\0\0\0",
+            "zip"
+        ),
+        Some(false)
+    );
+    assert_eq!(
+        m(b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", "zip"),
+        Some(true)
+    );
     // MP3: one frame header and noise is no evidence either way
     let mut rng = Rng::new(5);
     let mut f = rng.bytes(1024);
@@ -88,6 +106,43 @@ fn near_misses_that_used_to_pass() {
     assert_eq!(m(b"ID3\x09\0\0\0\0\0\x10TIT2", "mp3"), None);
     assert_eq!(m(b"ID3\x03\0\0\0\0\0\x10\x01\x02\x03\x04", "mp3"), None);
     assert_eq!(m(b"ID3\x03\0\0\0\0\0\x10TIT2", "mp3"), Some(true));
+}
+
+/// A comment (COM) is free text: Pillow, exiftool and cameras write a
+/// user's comment in UTF-8 or a code page such as Latin-1. An intact photo
+/// whose comment starts with such a character is a JPEG.
+#[test]
+fn comments_in_8_bit_text_are_jpeg() {
+    let jfif = b"\xFF\xE0\x00\x10JFIF\0\x01\x01\0\0\x01\0\x01\0\0";
+    let comments: [&[u8]; 4] = [
+        "\u{a9} 2024 Name".as_bytes(),
+        "\u{a9} Studio M\u{fc}ller".as_bytes(),
+        "\u{6771}\u{4eac}\u{30bf}\u{30ef}\u{30fc}".as_bytes(),
+        b"\xA9 2024 Name",
+    ];
+    for text in comments {
+        let com = |h: &mut Vec<u8>| {
+            h.extend_from_slice(&[0xFF, 0xFE]);
+            h.extend_from_slice(&(text.len() as u16 + 2).to_be_bytes());
+            h.extend_from_slice(text);
+        };
+        // after JFIF (Pillow, exiftool) and right after SOI
+        let mut a = b"\xFF\xD8".to_vec();
+        a.extend_from_slice(jfif);
+        com(&mut a);
+        let mut b = b"\xFF\xD8".to_vec();
+        com(&mut b);
+        for mut h in [a, b] {
+            h.extend_from_slice(b"\xFF\xDB\x00\x43\x00");
+            h.resize(SNIFF_LEN.max(h.len()), 0x10);
+            assert_eq!(matches_extension(&h, "jpg"), Some(true), "{text:?}");
+        }
+    }
+    // an APPn identifier is still ASCII
+    assert_eq!(
+        matches_extension(b"\xFF\xD8\xFF\xE1\x00\x10\xA9\xA9\xA9\xA9", "jpg"),
+        Some(false)
+    );
 }
 
 /// Heads from inside real files - what a wrong volume offset shows instead

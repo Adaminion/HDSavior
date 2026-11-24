@@ -78,8 +78,7 @@ void main() {
     expect(app.source.current!.info.path, imagePath);
 
     // --- scan into a session file ---------------------------------------------
-    // (prepareSessionFile names one in the session directory with Windows
-    // separators; the app is built for Windows only.)
+    // (A name of our own: prepareSessionFile's names hold the local time.)
     final sessionPath = '${sessions.path}${Platform.pathSeparator}basic.hdsc';
     expect((await app.source.checkSessionFile(sessionPath)).verdict, DestinationVerdict.ok);
     final scanDone = app.client.on<ScanDone>().first;

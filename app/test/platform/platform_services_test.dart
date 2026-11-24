@@ -31,6 +31,11 @@ void main() {
     expect(IoPlatformServices(isWindows: false, environment: const {}).pathSeparator, '/');
     // The running process: whatever it is, the directory is an absolute path.
     expect(IoPlatformServices().defaultSessionDirectory, anyOf(startsWith('/'), matches(r'^[A-Za-z]:\\')));
+    // The folder of the running program (app_on_source is asked about it).
+    final program = IoPlatformServices().programDirectory;
+    expect(program, isNotNull);
+    expect(Directory(program!).existsSync(), isTrue);
+    expect(File(Platform.resolvedExecutable).parent.path, program);
   });
 
   test('createDirectory creates the directory with its parents', () async {

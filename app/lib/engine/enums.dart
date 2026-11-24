@@ -92,6 +92,8 @@ enum WarningCode implements WireEnum {
   mountedVolume('mounted_volume'),
   pageFileOnSource('page_file_on_source'),
   systemDisk('system_disk'),
+  /// HDSavior itself runs from the disk being rescued. Raised by the app,
+  /// never sent by the engine (docs/PROTOCOL.md, Warning).
   appOnSource('app_on_source'),
   sourceReadsZero('source_reads_zero'),
   carveHitsCapped('carve_hits_capped'),

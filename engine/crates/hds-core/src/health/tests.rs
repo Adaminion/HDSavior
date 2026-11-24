@@ -230,6 +230,19 @@ fn g1_out_of_bounds_and_out_of_range() {
     let far = at(&cat, run.store(), "far.bin");
     assert!(cat.flags(far).contains(Flag::OutOfBounds));
     assert_eq!(cat.health.out_of_range, (1, 4096));
+    // CatalogInfo reports them, with the warning (PROTOCOL Warning).
+    let s = cat.summary(&run.session, &run.layout);
+    assert_eq!((s.out_of_range_files, s.out_of_range_bytes), (1, 4096));
+    let codes: Vec<&str> = s.warnings.iter().map(|w| w.code.as_str()).collect();
+    assert!(
+        codes.contains(&crate::query::WARN_OUT_OF_RANGE_FILES),
+        "{codes:?}"
+    );
+    assert!(s.scan_complete);
+    assert!(
+        !codes.contains(&crate::query::WARN_SCAN_INCOMPLETE),
+        "{codes:?}"
+    );
 }
 
 #[test]
@@ -921,4 +934,30 @@ fn unnumbered_records_show_their_positional_number() {
     assert!(cat.flags(loose).contains(Flag::Stray));
     let info = cat.node_info(store, loose.wire()).unwrap();
     assert_eq!(info.record.unwrap().number, None);
+}
+
+/// PROTOCOL `ext` and the output names of ALGORITHMS H4 follow one dot rule:
+/// the part after the last dot, unless that dot is the first character.
+#[test]
+fn ext_follows_the_same_dot_rule_as_output_names() {
+    use crate::health::ext_of;
+    for (name, ext) in [
+        (".gitignore", ""),
+        (".leading dot", ""),
+        ("noext", ""),
+        ("a.jpg", "jpg"),
+        ("archive.tar.gz", "gz"),
+        ("..hidden.txt", "txt"),
+        ("a.", ""),
+        (".", ""),
+        ("", ""),
+    ] {
+        assert_eq!(ext_of(name), ext, "{name:?}");
+        // The extension hds_io keeps when it shortens or numbers a name
+        // (short extensions only: it has a length limit of its own).
+        let units: Vec<u16> = name.encode_utf16().collect();
+        let (_, dotted) = hds_io::split_extension(&units);
+        let kept = String::from_utf16(dotted).unwrap();
+        assert_eq!(kept.strip_prefix('.').unwrap_or(&kept), ext, "{name:?}");
+    }
 }

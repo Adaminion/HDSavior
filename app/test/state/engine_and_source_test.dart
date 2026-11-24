@@ -184,7 +184,10 @@ void main() {
       fake = FakeApp(elevated: false);
       await fake.start();
       expect(app().engine.hello!.elevated, isFalse);
-      await expectLater(app().source.openDisk(app().source.disks![1]), throwsA(engineError(EngineErrorCode.accessDenied)));
+      await expectLater(
+        app().source.openDisk(app().source.disks![1]),
+        throwsA(engineError(EngineErrorCode.accessDenied)),
+      );
       expect(app().source.current, isNull);
     });
 
@@ -228,7 +231,72 @@ void main() {
       expect(app().source.current, isNull);
       expect(app().catalog.hasCatalog, isFalse);
       expect(app().source.appDataCheck, isNull);
-      expect(fake.commands.last, 'close_source');
+      // The engine keeps no session the app no longer shows (state N).
+      expect(fake.commands.sublist(fake.commands.length - 2), ['close_source', 'close_session']);
+      expect(fake.engine.catalog, isNull);
+      await expectLater(app().api.catalogInfo(), throwsA(engineError(EngineErrorCode.noCatalog)));
+      await expectLater(
+        app().api.sessionSave(path: r'C:\s\after-close.hdsc'),
+        throwsA(engineError(EngineErrorCode.noSession)),
+      );
+      expect(app().source.sessionPath, isNull);
+    });
+
+    test('close after a session was loaded without its source drops that session too', () async {
+      await app().source.loadSession(r'C:\sessions\detached.hdsc');
+      expect(app().source.current!.attached, isFalse);
+      expect(app().catalog.hasCatalog, isTrue);
+      await app().source.close();
+      expect(app().source.current, isNull);
+      expect(app().catalog.hasCatalog, isFalse);
+      await expectLater(app().api.catalogInfo(), throwsA(engineError(EngineErrorCode.noCatalog)));
+    });
+
+    test('app_on_source is the app\'s own warning: only for the disk its program runs from', () async {
+      // The system disk holds C:, where the program is.
+      await app().source.openDisk(app().source.disks![0]);
+      expect(app().source.current!.warnings.map((w) => w.kind), contains(WarningCode.appOnSource));
+      expect(
+        fake.engine.requests.any(
+          (r) =>
+              r.command == 'check_destination' &&
+              r.args['purpose'] == 'app_data' &&
+              r.args['path'] == fake.platform.programDirectory,
+        ),
+        isTrue,
+      );
+      final warning = app().source.current!.warnings.firstWhere((w) => w.kind == WarningCode.appOnSource);
+      expect(warning.message, contains(fake.platform.programDirectory!));
+      // Another disk, and an image file, do not carry it.
+      await app().source.openDisk(app().source.disks![1]);
+      expect(app().source.current!.warnings.map((w) => w.kind), isNot(contains(WarningCode.appOnSource)));
+      await app().source.openImage(r'C:\images\disk.img');
+      expect(app().source.current!.warnings.map((w) => w.kind), isNot(contains(WarningCode.appOnSource)));
+    });
+
+    test('app_on_source also when the check cannot tell where the program is', () async {
+      // `unknown_disk` (U:) and `not_writable` (R:, which the guard can give
+      // before it looks at the disk) do not rule the disk out; `ok` does.
+      for (final (dir, warned) in [(r'U:\HDSavior', true), (r'R:\HDSavior', true), (r'D:\HDSavior', false)]) {
+        await fake.dispose();
+        fake = FakeApp(programDirectory: dir);
+        await fake.start();
+        await app().source.openDisk(app().source.disks![1]);
+        final own = app().source.current!.warnings.where((w) => w.kind == WarningCode.appOnSource).toList();
+        expect(own, hasLength(warned ? 1 : 0), reason: dir);
+        if (warned) {
+          expect(own.single.message, startsWith('HDSavior runs from $dir. Whether that folder is on this disk'));
+          expect(own.single.message, endsWith('.'));
+          expect(own.single.message, isNot(endsWith('..')));
+        }
+      }
+      // A failed check leaves it open too.
+      await fake.dispose();
+      fake = FakeApp(programDirectory: r'D:\HDSavior');
+      await fake.start();
+      fake.engine.failNext('check_destination', 'internal', message: 'no answer');
+      await app().source.openDisk(app().source.disks![1]);
+      expect(app().source.current!.warnings.map((w) => w.kind), contains(WarningCode.appOnSource));
     });
 
     test('refreshDisks reports a failure and recovers', () async {
@@ -273,7 +341,8 @@ void main() {
     });
 
     test('without a verdict nothing is created either', () async {
-      fake.engine.failNext('check_destination', 'internal');
+      // (Both checks of an open fail: the program folder's, then this one.)
+      fake.engine.failNext('check_destination', 'internal', times: 2);
       await fake.openDisk();
       expect(app().source.appDataCheck, isNull);
       expect(await app().source.ensureSessionDirectory(), isFalse);
@@ -291,8 +360,14 @@ void main() {
     });
 
     test('asked again whenever a catalog arrives, a geometry is set or a file system changes', () async {
+      // (Not counting the check of the program's folder when a disk opens.)
       int appDataChecks() => fake.engine.requests
-          .where((r) => r.command == 'check_destination' && r.args['purpose'] == 'app_data')
+          .where(
+            (r) =>
+                r.command == 'check_destination' &&
+                r.args['purpose'] == 'app_data' &&
+                r.args['path'] != fake.platform.programDirectory,
+          )
           .length;
       await fake.openDisk();
       expect(appDataChecks(), 1);
@@ -324,7 +399,11 @@ void main() {
       await inLostVolume.start();
       await inLostVolume.openDisk();
       final source = inLostVolume.app.source;
-      expect(source.appDataCheck!.verdict, DestinationVerdict.sameDisk, reason: 'nobody knows yet how far the lost volume reaches');
+      expect(
+        source.appDataCheck!.verdict,
+        DestinationVerdict.sameDisk,
+        reason: 'nobody knows yet how far the lost volume reaches',
+      );
       expect(source.canWriteAppData, isFalse, reason: 'only an "ok" lets the app write there');
       await inLostVolume.scan();
       expect(source.appDataCheck!.verdict, DestinationVerdict.overlapsSource);
@@ -351,6 +430,12 @@ void main() {
       final opening = scripted.source.openImage(r'D:\disk.img');
       await pumpEventQueue();
       transport.connection.respond(transport.connection.lastId, examples.object('open_source.result'));
+      await pumpEventQueue();
+      // A disk: the app asks whether its own program is on it (app_on_source).
+      final program = transport.connection.lastRequest;
+      expect(program['cmd'], 'check_destination');
+      expect(program['args'], {'path': InertPlatformServices().programDirectory, 'purpose': 'app_data'});
+      transport.connection.respond(program['id']! as int, examples.object('check_destination.result'));
       await opening;
       await pumpEventQueue();
       final first = transport.connection.lastRequest;
@@ -406,6 +491,19 @@ void main() {
       expect(plan.fileName, 'WDC WD40EZRZ-00GXCB0 WD-WCC7K0000000 at 0 2026-11-24 031500.hdsc');
       expect(fake.lastArgs('check_destination'), {'path': plan.path, 'purpose': 'session'});
       expect(fake.platform.createdDirectories, [fake.platform.defaultSessionDirectory]);
+    });
+
+    test('prepareSessionFile joins with the platform separator (not always a backslash)', () async {
+      await fake.dispose();
+      const directory = '/home/rescuer/.local/share/hdsavior/sessions';
+      fake = FakeApp(sessionDirectory: directory, pathSeparator: '/');
+      await fake.start();
+      await fake.openDisk();
+      final plan = await app().source.prepareSessionFile(now: DateTime(2026, 11, 24, 3, 15, 0));
+      expect(plan.path, '$directory/WDC WD40EZRZ-00GXCB0 WD-WCC7K0000000 at 0 2026-11-24 031500.hdsc');
+      expect(plan.path, isNot(contains(r'\')));
+      expect(plan.fileName, 'WDC WD40EZRZ-00GXCB0 WD-WCC7K0000000 at 0 2026-11-24 031500.hdsc');
+      expect(fake.lastArgs('check_destination'), {'path': plan.path, 'purpose': 'session'});
     });
 
     test('prepareSessionFile creates nothing when the guard refuses', () async {
@@ -513,7 +611,10 @@ void main() {
       expect(app().source.sessionPath, r'D:\backup\copy.hdsc');
       await expectLater(
         app().source.saveSession(r'E:\on-the-source.hdsc'),
-        throwsA(engineError(EngineErrorCode.destinationRefused).having((e) => e.destinationCheck!.verdict, 'verdict', DestinationVerdict.overlapsSource)),
+        throwsA(
+          engineError(EngineErrorCode.destinationRefused)
+              .having((e) => e.destinationCheck!.verdict, 'verdict', DestinationVerdict.overlapsSource),
+        ),
       );
       expect(app().source.sessionPath, r'D:\backup\copy.hdsc');
     });

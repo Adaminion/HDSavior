@@ -480,6 +480,13 @@ fn sessions_save_load_close_attach_and_identity() {
         json!({"epoch": epoch, "node": catalog["instances"][0]["root"]}),
     );
     assert_eq!(e.code, ErrorCode::StaleCatalog);
+    // close_source then close_session: back in state N, nothing is left.
+    h.ok("close_source", json!({}));
+    h.ok("close_session", json!({}));
+    let e = h.err("catalog_info", json!({}));
+    assert_eq!(e.code, ErrorCode::NoCatalog);
+    let e = h.err("session_save", json!({"path": scratch.join("gone.hds")}));
+    assert_eq!(e.code, ErrorCode::NoSession);
     h.ok("shutdown", json!({}));
 
     // session_load in a new engine finds the recorded source by its path.
@@ -556,8 +563,20 @@ fn stopped_and_shut_down_scans_resume_to_the_same_catalog() {
         "{done}"
     );
     assert!(done["catalog"].is_object(), "a stopped scan has a catalog");
+    let codes = |catalog: &Value| -> Vec<String> {
+        catalog["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["code"].as_str().unwrap().to_string())
+            .collect()
+    };
     if done["status"] == "stopped" {
         assert_eq!(done["catalog"]["scan_complete"], false);
+        assert!(
+            codes(&done["catalog"]).contains(&"scan_incomplete".to_string()),
+            "{done}"
+        );
     }
     // A resume keeps the range: another one is refused.
     let e = h.err("scan_start", json!({"resume": true, "start": start + 512}));
@@ -566,6 +585,7 @@ fn stopped_and_shut_down_scans_resume_to_the_same_catalog() {
     let done = h.wait_event_for("scan_done", JOB_TIMEOUT);
     assert_eq!(done["status"], "completed", "{done}");
     assert_eq!(done["session_path"], session);
+    assert!(!codes(&done["catalog"]).contains(&"scan_incomplete".to_string()));
     assert_eq!(without_epoch(done["catalog"].clone()), full);
     let (_, rows) = root_listing(&mut h);
     assert_eq!(rows, full_rows);
@@ -588,10 +608,8 @@ fn stopped_and_shut_down_scans_resume_to_the_same_catalog() {
     h.ok("shutdown", json!({}));
     let done = h.wait_event_for("scan_done", JOB_TIMEOUT);
     assert!(done["catalog"].is_null(), "{done}");
-    assert!(
-        done["status"] == "stopped" || done["status"] == "completed",
-        "{done}"
-    );
+    // Interrupted: `stopped`, also when the read had already finished.
+    assert_eq!(done["status"], "stopped", "{done}");
     let mut h = Harness::real();
     let loaded = h.ok("session_load", json!({"path": session}));
     if loaded["source_attached"] != true {

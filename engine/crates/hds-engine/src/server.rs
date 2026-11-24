@@ -161,6 +161,19 @@ impl InProcess {
         self.lines.recv_timeout(timeout).ok()
     }
 
+    /// The next output line, parsed, waiting at most `timeout`:
+    /// `Ok(None)` when nothing came in time, `Err(())` when the engine has
+    /// ended (or wrote something that is not a protocol line, which it
+    /// never does).
+    #[allow(clippy::result_unit_err)]
+    pub fn next_within(&self, timeout: Duration) -> Result<Option<OutputLine>, ()> {
+        match self.lines.recv_timeout(timeout) {
+            Ok(line) => OutputLine::parse(&line).map(Some).ok_or(()),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(()),
+        }
+    }
+
     /// The next output line, parsed; `None` when the engine has ended (or
     /// wrote something that is not a protocol line, which it never does).
     pub fn next(&self) -> Option<OutputLine> {
@@ -236,7 +249,7 @@ mod tests {
             match input {
                 Input::Line(line) => out.push(line),
                 Input::Eof => out.push(Ok("<eof>".into())),
-                Input::JobFinished(_) => unreachable!(),
+                Input::JobFinished(_) | Input::ReadFinished(_) => unreachable!(),
             }
         }
         out

@@ -183,6 +183,13 @@ Future<List<String>> transcriptConversation(EngineTransport transport, String im
     expect(attached.catalog.sourceAttached, isTrue);
     expect(attached.catalog.epoch, isNot(epoch), reason: 'the catalog is rebuilt');
     await api.sessionLoad(path: session, source: SourceRef(kind: SourceKind.image, path: imagePath));
+    // close_session drops the session and keeps the source (C → O).
+    await api.closeSession();
+    await expectLater(
+      api.catalogInfo(),
+      throwsA(isA<EngineException>().having((e) => e.kind, 'kind', EngineErrorCode.noCatalog)),
+    );
+    expect((await api.checkDestination(path: out, purpose: DestinationPurpose.recover)).verdict, isNotNull);
     await client.shutdown();
   } finally {
     await client.dispose();

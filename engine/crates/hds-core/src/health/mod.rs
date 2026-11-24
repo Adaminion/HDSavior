@@ -116,11 +116,16 @@ fn kind_win(k: InstanceKind) -> u8 {
     }
 }
 
-/// The lower-case extension of a folded name (`""` if none).
+/// The lower-case extension of a folded name (PROTOCOL `ext`): the part
+/// after the last dot, `""` if there is none. A dot that is the first
+/// character does not start an extension, so `.gitignore` and
+/// `.leading dot` have none: the same dot rule as
+/// `hds_io::sanitize::split_extension`, which places the ` (n)` of output
+/// names (ALGORITHMS H4).
 pub(crate) fn ext_of(folded: &str) -> &str {
     match folded.rfind('.') {
-        Some(i) => folded.get(i.saturating_add(1)..).unwrap_or(""),
-        None => "",
+        Some(i) if i > 0 => folded.get(i.saturating_add(1)..).unwrap_or(""),
+        _ => "",
     }
 }
 

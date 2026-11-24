@@ -321,10 +321,20 @@ fn run(
     // The session goes back before scan_done is written, so that the
     // catalog can be queried as soon as the event arrives.
     slot.give_back();
-    if done.status != ScanStatus::Failed && !ctx.is_shutting_down() {
+    // Read once: a shutdown between two reads would give `stopped` with a
+    // catalog (the engine thread clears that case as well).
+    let shutting_down = ctx.is_shutting_down();
+    if done.status != ScanStatus::Failed && !shutting_down {
         let st = slot.shared.lock();
         let attached = st.source.is_some();
         done.catalog = st.work.as_ref().and_then(|w| w.info(attached));
+    }
+    // A shutdown ends the job before its catalog exists: the scan is
+    // `stopped` even when its read phases had finished (phase `analyzing`).
+    // The session file holds what was read either way, so a resume or a
+    // `session_load` carries on from there.
+    if done.status == ScanStatus::Completed && shutting_down {
+        done.status = ScanStatus::Stopped;
     }
     if done.status == ScanStatus::Failed && done.error.is_none() {
         done.error = Some(ProtocolError::new(ErrorCode::Internal, "the scan failed"));

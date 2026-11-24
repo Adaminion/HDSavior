@@ -6,7 +6,15 @@
 //! event as one JSON object per line on stdout (a result as its bare object,
 //! an event as `{"event", "data"}`, an error as `{"error": {...}}`); logs go
 //! to stderr. Exit code 0 = ok, 1 = a command or the job failed, 2 = usage
-//! error.
+//! error, 130 = the job was stopped with Ctrl-C.
+//!
+//! Ctrl-C while a job runs ([`CtrlC`]) ends the job the clean way: a scan
+//! gets `shutdown` (it stops reading and saves its session; no catalog is
+//! built), the other jobs get `job_cancel` (a recovery removes its current
+//! part file; `recover` and `carve` then save the session back as after
+//! any job). A second Ctrl-C ends the process at once. For `recover` and
+//! `carve` the first Ctrl-C is caught until the session is saved back: one
+//! pressed during that save lets it finish and then exits with 130.
 //!
 //! The parser is hand-written: a dozen options do not justify a dependency.
 //! Options take their value as the next argument or after `=`; `--` ends the
@@ -17,11 +25,13 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::backend::Backend;
+use crate::interrupt::CtrlC;
 use crate::output::log_warn;
 use crate::protocol::{OutputLine, ProtocolError, SourceKind};
 use crate::server::{serve, InProcess};
@@ -32,6 +42,9 @@ pub const EXIT_OK: u8 = 0;
 pub const EXIT_FAILED: u8 = 1;
 /// Exit code: usage error.
 pub const EXIT_USAGE: u8 = 2;
+/// Exit code: the job was stopped with Ctrl-C (128 + `SIGINT`, as shells
+/// report a process ended by it).
+pub const EXIT_INTERRUPTED: u8 = 130;
 
 /// The usage text.
 pub const USAGE: &str = r"usage:
@@ -55,7 +68,9 @@ scan refuses to replace an existing session file unless --force is given;
 --resume continues it. recover and carve save the session back to --session.
 info fails when --source is given and is not the session's source.
 Results and events are printed as JSON lines on stdout, logs on stderr.
-Exit codes: 0 ok, 1 failed, 2 usage error.";
+Ctrl-C stops a running job cleanly (a scan saves its session); a second
+Ctrl-C ends the program at once.
+Exit codes: 0 ok, 1 failed, 2 usage error, 130 stopped with Ctrl-C.";
 
 /// A usage error: the message for stderr.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -401,6 +416,10 @@ pub fn run(args: Vec<OsString>, backend: Arc<dyn Backend>) -> u8 {
                     eprintln!("hdsavior-engine: {message}");
                     EXIT_FAILED
                 }
+                Err(Failure::Interrupted(message)) => {
+                    eprintln!("hdsavior-engine: {message}");
+                    EXIT_INTERRUPTED
+                }
             };
             drop(client);
             code
@@ -411,6 +430,18 @@ pub fn run(args: Vec<OsString>, backend: Arc<dyn Backend>) -> u8 {
 enum Failure {
     Usage(String),
     Failed(String),
+    /// The job was stopped with Ctrl-C.
+    Interrupted(String),
+}
+
+/// What Ctrl-C sends to the engine while a job runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnCtrlC {
+    /// `job_cancel`: the job ends `cancelled` (or `stopped`).
+    Cancel,
+    /// `shutdown`: a scan saves its session without building a catalog,
+    /// and the engine ends.
+    Shutdown,
 }
 
 impl From<UsageError> for Failure {
@@ -470,10 +501,40 @@ impl Client {
         }
     }
 
-    /// Prints events until `done` arrives; fails unless its status is `completed`.
-    fn wait_done(&mut self, done: &str) -> Result<Value, Failure> {
+    /// Prints events until `done` arrives; fails unless its status is
+    /// `completed`. The first Ctrl-C meanwhile sends `on_ctrl_c`.
+    fn wait_done(&mut self, done: &str, on_ctrl_c: OnCtrlC) -> Result<Value, Failure> {
+        let ctrl_c = CtrlC::catch();
+        self.wait_done_with(&ctrl_c, done, on_ctrl_c)
+    }
+
+    /// [`wait_done`](Self::wait_done) under a [`CtrlC`] the caller keeps
+    /// alive for what follows the job.
+    fn wait_done_with(
+        &mut self,
+        ctrl_c: &CtrlC,
+        done: &str,
+        on_ctrl_c: OnCtrlC,
+    ) -> Result<Value, Failure> {
+        let mut interrupted = false;
         loop {
-            match self.engine.next() {
+            if !interrupted && ctrl_c.pressed() {
+                interrupted = true;
+                let cmd = match on_ctrl_c {
+                    OnCtrlC::Cancel => "job_cancel",
+                    OnCtrlC::Shutdown => "shutdown",
+                };
+                log_warn(&format!(
+                    "Ctrl-C: stopping the job ({cmd}); press Ctrl-C again to end at once"
+                ));
+                self.engine.send(cmd, &json!({}));
+            }
+            let line = match self.engine.next_within(Duration::from_millis(100)) {
+                Ok(Some(line)) => Some(line),
+                Ok(None) => continue,
+                Err(()) => None,
+            };
+            match line {
                 Some(OutputLine::Event(event)) => {
                     print_line(&json!({"event": event.event, "data": event.data}));
                     if event.event == done {
@@ -484,6 +545,10 @@ impl Client {
                             .unwrap_or("");
                         return if status == "completed" {
                             Ok(event.data)
+                        } else if interrupted {
+                            Err(Failure::Interrupted(format!(
+                                "{done}: stopped with Ctrl-C (status \"{status}\")"
+                            )))
                         } else {
                             Err(Failure::Failed(format!(
                                 "{done}: the job ended with status \"{status}\""
@@ -583,7 +648,7 @@ impl Client {
                         }),
                     )?;
                 }
-                self.wait_done("scan_done").map(|_| ())
+                self.wait_done("scan_done", OnCtrlC::Shutdown).map(|_| ())
             }
             Subcommand::Info(p) => {
                 let loaded = self.load(&p)?;
@@ -655,19 +720,15 @@ impl Client {
                         "on_exists": p.value("--on-exists").unwrap_or("rename"),
                     }),
                 )?;
-                let done = self.wait_done("recover_done");
                 // What the reads found (G1) is part of the session.
-                self.save_back(&p)?;
-                done.map(|_| ())
+                self.job_then_save_back(&p, "recover_done")
             }
             Subcommand::Carve(p) => {
                 self.load(&p)?;
                 let kinds = p.value("--kinds").map(parse_list);
                 self.call("carve_start", &json!({ "kinds": kinds }))?;
-                let done = self.wait_done("carve_done");
                 // The carved files are part of the session (I5).
-                self.save_back(&p)?;
-                done.map(|_| ())
+                self.job_then_save_back(&p, "carve_done")
             }
             Subcommand::Image(p) => {
                 let opened = self.open(&p.positional[0], None)?;
@@ -682,9 +743,27 @@ impl Client {
                         "allow_unknown_disk": p.flag("--allow-unknown-disk"),
                     }),
                 )?;
-                self.wait_done("image_done").map(|_| ())
+                self.wait_done("image_done", OnCtrlC::Cancel).map(|_| ())
             }
         }
+    }
+
+    /// Waits for the job's `done` event, then saves the session back. The
+    /// first Ctrl-C stays caught until the save has ended: during the job
+    /// it cancels the job, after it the save still completes (no partial
+    /// temporary session file is left) and the exit code is 130.
+    fn job_then_save_back(&mut self, p: &Parsed, done: &str) -> Result<(), Failure> {
+        let ctrl_c = CtrlC::catch();
+        let result = self.wait_done_with(&ctrl_c, done, OnCtrlC::Cancel);
+        let pressed_during_job = ctrl_c.pressed();
+        self.save_back(p)?;
+        result?;
+        if !pressed_during_job && ctrl_c.pressed() {
+            return Err(Failure::Interrupted(format!(
+                "Ctrl-C after {done}: the session was saved back first"
+            )));
+        }
+        Ok(())
     }
 
     /// Saves the session back to `--session` (with the consent options):

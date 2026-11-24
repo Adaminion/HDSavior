@@ -162,6 +162,9 @@ differ: copy the new text here and adjust the models and expectations.
 ### close_source.result
 {}
 
+### close_session.result
+{}
+
 ### scan_start.result
 {"job": "scan", "bytes_total": 4000785104896}
 

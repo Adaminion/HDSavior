@@ -4,14 +4,19 @@
 //! Every `*_start` decides on the server thread everything that can be
 //! refused, so that the refusal is the answer to the request:
 //!
-//! * `recover_start` (H1-H3): a fresh current-volume snapshot re-evaluates
-//!   `overwritten` (H1, [`Work::fresh_overwritten`] and
-//!   `Catalog::plan(.., Some(&set))`), the plan is built from the selection
-//!   (H2, H4 through `hds_core::query`), the destination's free space is
-//!   compared with the bytes that will be written (`no_space`), and
-//!   [`Recovery::prepare`] runs the destination guard on the path and again
-//!   on the created root with the protected ranges of this moment (session
-//!   range first, then the lost volumes: [`Work::protected`]).
+//! * `recover_start` (H1-H3): with the backend lock held, a fresh
+//!   current-volume snapshot re-evaluates `overwritten` (H1,
+//!   [`Work::fresh_overwritten`] and `Catalog::plan_selection(.., Some(&set))`)
+//!   and the selection is made (H2: the folders in full, 12 bytes per
+//!   file); then, without the lock, the destination's free space is
+//!   compared with an estimate of what the files take (`no_space`), and
+//!   [`Recovery::prepare_lazy`] runs the destination guard on the path and
+//!   again on the created root with the protected ranges of this moment
+//!   (session range first, then the lost volumes: [`Work::protected`]).
+//!   The job orders and names the files itself (H4, H5) and describes each
+//!   file from the catalog and a shared handle on the store when it writes
+//!   it, so `recover_start` answers in O(selected files) and the plan
+//!   costs a few dozen bytes per file instead of its runlist and paths.
 //! * `carve_start` (I1, I2): the candidates are chosen from the stored hits
 //!   with the `main` instance's geometry, the protected files of I2 (a)
 //!   (`Catalog::carve_protected`), the overwritten set and the
@@ -21,10 +26,10 @@
 //!   exists, plus the imaged range).
 //!
 //! The run functions hold no lock while they read or write: the recovery
-//! locks the state for a moment per finished file to add what the read
-//! found to the catalog (G1: `signature_ok` / `signature_mismatch`,
-//! `bad_sectors`); carving locks it once at the end to store the run in
-//! the session and the catalog (I5). Neither the session nor the catalog
+//! adds what each read found to the catalog through its own handle on it
+//! (G1: `signature_ok` / `signature_mismatch`, `bad_sectors`; the flags
+//! are shared by every handle of a catalog); carving locks the state once
+//! at the end to store the run in the session and the catalog (I5). Neither the session nor the catalog
 //! can be replaced while a job runs: the server answers `busy` to every
 //! command that would.
 
@@ -32,7 +37,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use hds_core::carve::{store_run, CarveGeometry, CarveInput, CarveStatus, Carver, KindSet};
-use hds_core::catalog::NodeId;
+use hds_core::catalog::{Catalog, NodeId};
 use hds_core::instances::InstanceKind;
 use hds_core::query::Selection;
 use hds_io::{destination_check, DestinationCheck, Protected, Purpose, RangedSource};
@@ -43,7 +48,7 @@ use hds_recover::{
 };
 
 use super::convert::{self, display_path};
-use super::{no_catalog, no_source, Shared, State, Work};
+use super::{no_catalog, no_source, Shared, Work};
 use crate::backend::{
     CarveJob, CarveRequest, ImageJob, ImageRequest, JobContext, JobStart, RecoverJob,
     RecoverRequest,
@@ -57,15 +62,10 @@ use crate::protocol::{
 
 /// `destination_refused` with the check (and the catalog's files inside
 /// the location's volume) as `data`, as the server answers it.
-fn refused(state: &State, check: &DestinationCheck) -> ProtocolError {
-    let (lost_files, lost_bytes) = state
-        .work
-        .as_ref()
-        .and_then(|w| w.built.as_ref())
+fn refused(catalog: Option<&Catalog>, check: &DestinationCheck) -> ProtocolError {
+    let (lost_files, lost_bytes) = catalog
         .filter(|_| !check.source_extents.is_empty())
-        .map_or((0, 0), |b| {
-            b.catalog.files_in_extents(&check.source_extents)
-        });
+        .map_or((0, 0), |c| c.files_in_extents(&check.source_extents));
     let result = CheckDestinationResult {
         check: check.clone(),
         lost_files,
@@ -116,7 +116,9 @@ fn job_status(status: RecoverStatus) -> JobStatus {
 /// Forwards progress and feeds what each read found back into the catalog.
 struct RecoverEvents<'a> {
     ctx: &'a JobContext<RecoverProgress>,
-    shared: &'a Shared,
+    /// The session's catalog (a handle on the same flags: the catalog
+    /// cannot be replaced while the job runs).
+    catalog: &'a Catalog,
 }
 
 impl RecoverObserver for RecoverEvents<'_> {
@@ -143,10 +145,7 @@ impl RecoverObserver for RecoverEvents<'_> {
         let Ok(id) = u32::try_from(outcome.node) else {
             return;
         };
-        let st = self.shared.lock();
-        if let Some(built) = st.work.as_ref().and_then(|w| w.built.as_ref()) {
-            built.catalog.observe(NodeId(id), outcome.flags);
-        }
+        self.catalog.observe(NodeId(id), outcome.flags);
     }
 }
 
@@ -195,12 +194,6 @@ pub(super) fn recover_start(
     request: RecoverRequest,
 ) -> Result<RecoverJob, ProtocolError> {
     let RecoverRequest { args, dest } = request;
-    let st = shared.lock();
-    let source = st.source.clone().ok_or_else(no_source)?;
-    let work = st.work.as_ref().ok_or_else(no_catalog)?;
-    let built = work.built.as_ref().ok_or_else(no_catalog)?;
-    // H1: the current volumes may have written since the scan.
-    let fresh = work.fresh_overwritten(&source, &super::never())?;
     let selection = Selection {
         include: args.include.clone(),
         exclude: args.exclude.clone(),
@@ -208,30 +201,45 @@ pub(super) fn recover_start(
         include_deleted: args.include_deleted,
         skip_damaged: args.skip_damaged,
     };
-    let store = work.session.store();
-    let plan = built
-        .catalog
-        .plan(store, &selection, Some(&fresh))
-        .map_err(|e| convert::query_error(&e))?;
-    if plan.files.is_empty() {
+    // Under the lock only what needs the session: H1 and the selection
+    // (O(selected files), 12 bytes per file), and handles on the store and
+    // the catalog for the job.
+    let (planned, store, catalog, ranged, protected) = {
+        let st = shared.lock();
+        let source = st.source.clone().ok_or_else(no_source)?;
+        let work = st.work.as_ref().ok_or_else(no_catalog)?;
+        let built = work.built.as_ref().ok_or_else(no_catalog)?;
+        // H1: the current volumes may have written since the scan.
+        let fresh = work.fresh_overwritten(&source, &super::never())?;
+        let planned = built
+            .catalog
+            .plan_selection(work.session.store(), &selection, Some(&fresh))
+            .map_err(|e| convert::query_error(&e))?;
+        (
+            planned,
+            work.session.shared_store(),
+            built.catalog.clone(),
+            work.ranged(&source)?,
+            merged_protected(work, &dest.protected),
+        )
+    };
+    if planned.file_count() == 0 {
         return Err(ProtocolError::bad_request(
             "the selection holds no file to recover",
         ));
     }
-    let ranged = work.ranged(&source)?;
-    let protected = merged_protected(work, &dest.protected);
     // `no_space`: an estimate of what the files that will be written take
     // on the destination (H3), with allocation overhead.
     let need = space_need(
-        plan.files
-            .iter()
+        planned
+            .facts()
             .filter(|f| match rate(f.flags, f.context) {
                 Rating::Unsupported => false,
                 Rating::Damaged => !args.skip_damaged,
                 Rating::Good | Rating::Uncertain => true,
             })
             .map(|f| f.size),
-        plan.folders.len(),
+        planned.folders().len(),
     );
     let check = destination_check(
         Path::new(&dest.path),
@@ -241,7 +249,7 @@ pub(super) fn recover_start(
         Some(need),
     );
     if !check.is_allowed(dest.allow_same_disk, dest.allow_unknown_disk) {
-        return Err(refused(&st, &check));
+        return Err(refused(Some(&catalog), &check));
     }
     if check.enough_space == Some(false) {
         return Err(ProtocolError::new(
@@ -267,31 +275,35 @@ pub(super) fn recover_start(
         allow_unknown_disk: dest.allow_unknown_disk,
         protected,
     };
-    // The guard again on the path and on the created root (H3).
-    let job =
-        Recovery::prepare(ranged, plan, Path::new(&dest.path), options).map_err(|e| match e {
-            StartError::DestinationRefused(check) => refused(&st, &check),
-            StartError::NoSpace(e) => {
-                ProtocolError::new(ErrorCode::NoSpace, format!("the destination is full: {e}"))
-            }
-            StartError::Io(e) => ProtocolError::from_io("the destination cannot be prepared", &e),
-            StartError::InvalidPlan(why) => {
-                ProtocolError::internal(format!("invalid recovery plan: {why}"))
-            }
-        })?;
-    drop(st);
+    // The guard again on the path and on the created root (H3); the plan
+    // is checked, ordered and named when the job runs.
+    let job = Recovery::prepare_lazy(
+        ranged,
+        planned.into_lazy(store),
+        Path::new(&dest.path),
+        options,
+    )
+    .map_err(|e| match e {
+        StartError::DestinationRefused(check) => refused(Some(&catalog), &check),
+        StartError::NoSpace(e) => {
+            ProtocolError::new(ErrorCode::NoSpace, format!("the destination is full: {e}"))
+        }
+        StartError::Io(e) => ProtocolError::from_io("the destination cannot be prepared", &e),
+        StartError::InvalidPlan(why) => {
+            ProtocolError::internal(format!("invalid recovery plan: {why}"))
+        }
+    })?;
     let result = RecoverStartResult {
         job: JobKind::Recover,
         files: job.files_total(),
         bytes: job.bytes_total(),
     };
-    let shared = shared.clone();
     Ok(JobStart {
         result,
         run: Box::new(move |ctx: &JobContext<RecoverProgress>| {
             let mut events = RecoverEvents {
                 ctx,
-                shared: &shared,
+                catalog: &catalog,
             };
             let summary = job.run(&mut events, ctx.cancel_flag());
             if let Some(message) = &summary.message {
@@ -513,7 +525,13 @@ pub(super) fn image_start(
         protected,
     };
     let job = Imaging::prepare(ranged, Path::new(&dest.path), &options).map_err(|e| match e {
-        ImageStartError::DestinationRefused(check) => refused(&st, &check),
+        ImageStartError::DestinationRefused(check) => refused(
+            st.work
+                .as_ref()
+                .and_then(|w| w.built.as_ref())
+                .map(|b| &b.catalog),
+            &check,
+        ),
         ImageStartError::Exists(path) => ProtocolError::new(
             ErrorCode::Exists,
             format!(

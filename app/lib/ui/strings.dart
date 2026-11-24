@@ -134,7 +134,7 @@ abstract final class S {
     WarningCode.mountedVolume => 'Windows is using this disk right now',
     WarningCode.pageFileOnSource => 'Windows keeps a page file on this disk',
     WarningCode.systemDisk => 'This is the disk Windows runs from',
-    WarningCode.appOnSource => 'HDSavior itself runs from this disk',
+    WarningCode.appOnSource => 'HDSavior itself may run from this disk',
     WarningCode.sourceReadsZero => 'The disk reads back as empty',
     WarningCode.carveHitsCapped => 'Too many file signatures to keep',
     WarningCode.liveVolumeIncomplete => 'The new file system could not be read completely',

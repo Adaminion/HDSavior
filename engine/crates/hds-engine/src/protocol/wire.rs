@@ -178,6 +178,18 @@ pub struct EnvelopeError {
 /// Largest integer the protocol carries (PROTOCOL.md, "Conventions").
 pub const MAX_WIRE_INT: u64 = i64::MAX as u64;
 
+/// The `cmd` of a request line, if the line is a JSON object with a string
+/// `cmd` (whatever else is wrong with it). The engine looks at lines it
+/// holds while a `read_file` runs with it, to see a `shutdown` or a
+/// `job_cancel` that has to stop the read.
+pub fn peek_command(line: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Cmd {
+        cmd: String,
+    }
+    serde_json::from_str::<Cmd>(line).ok().map(|c| c.cmd)
+}
+
 /// Parses one request line (without its line terminator).
 ///
 /// The line must be a JSON object with an integer `id` in the range of a
