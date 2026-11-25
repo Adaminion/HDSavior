@@ -206,6 +206,14 @@ jobs:
           $exe = [IO.File]::ReadAllBytes((Resolve-Path "$bundle\hdsavior.exe"))
           $text = [Text.Encoding]::ASCII.GetString($exe)
           if ($text -notmatch 'requireAdministrator') { throw 'requireAdministrator not in the embedded manifest' }
+          # The real-hardware test kit travels with the build, so testers
+          # need only this one download.
+          $script = '..\scripts\windows\hardware-test.ps1'
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Host $_ }; throw 'hardware-test.ps1 does not parse' }
+          Copy-Item $script "$bundle\hardware-test.ps1"
+          Copy-Item '..\docs\hardware-test.md' "$bundle\hardware-test.md"
           Get-ChildItem $bundle
 
       - uses: actions/upload-artifact@v4
